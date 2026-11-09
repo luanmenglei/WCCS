@@ -1,0 +1,42 @@
+# Build and package output
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+**/coverage/
+**/TestResults/
+**/__pycache__/
+*.py[cod]
+artifacts/
+.venv/
+
+# Local editors and agent state
+.vs/
+.idea/
+*.user
+*.suo
+.codex/
+AGENTS.override.md
+.worktrees/
+
+# Deployment state, participant data and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.local.json
+*.local.yaml
+*.local.yml
+*.pfx
+*.p12
+*.key
+*.pem
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+local/
+runtime/
+secrets/

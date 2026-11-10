@@ -321,7 +321,7 @@ fn reported_ips(server: &str) -> Vec<String> {
     vec![]
 }
 
-pub fn validate_server(server: &str) -> Result<()> {
+pub fn validate_server(server: &str) -> Result<reqwest::Url> {
     let url = reqwest::Url::parse(server)?;
     if !url.username().is_empty()
         || url.password().is_some()
@@ -335,7 +335,7 @@ pub fn validate_server(server: &str) -> Result<()> {
     if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
         return Err("服务地址需要 HTTPS，本地回环支持 HTTP 验证".into());
     }
-    Ok(())
+    Ok(url)
 }
 
 pub fn run_worker(path: &Path, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
@@ -377,5 +377,25 @@ pub fn run_worker(path: &Path, stop: std::sync::Arc<std::sync::atomic::AtomicBoo
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    #[test]
+    fn accepted_origins_normalize_case_and_keep_tls_requirements() {
+        assert_eq!(
+            validate_server("HTTPS://EXAMPLE.COM/").unwrap().as_str(),
+            "https://example.com/"
+        );
+        assert_eq!(
+            validate_server("HTTP://LOCALHOST:8788").unwrap().as_str(),
+            "http://localhost:8788/"
+        );
+        assert!(validate_server("http://10.0.0.1").is_err());
+        assert!(validate_server("https://user:password@example.com").is_err());
+        assert!(validate_server("https://example.com/path").is_err());
+        assert!(validate_server("https://example.com/?token=value").is_err());
     }
 }

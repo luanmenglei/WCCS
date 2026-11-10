@@ -128,17 +128,15 @@ impl Controller {
     async fn connection(&mut self, stop: &AtomicBool) -> Result<()> {
         let identity: serde_json::Value = serde_json::from_slice(&fs::read(&self.path)?)?;
         let server = identity["server"].as_str().ok_or("server_missing")?;
-        crate::windows_agent::validate_server(server).map_err(|_| "invalid_server_origin")?;
+        let mut url =
+            crate::windows_agent::validate_server(server).map_err(|_| "invalid_server_origin")?;
         let device = identity["device_id"].as_str().ok_or("device_missing")?;
         let credential = fs::read_to_string(self.path.with_extension("credential"))?;
-        let url = format!(
-            "{}/api/device/control",
-            server
-                .trim_end_matches('/')
-                .replacen("https://", "wss://", 1)
-                .replacen("http://", "ws://", 1)
-        );
-        let mut request = url.into_client_request()?;
+        let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
+        url.set_scheme(scheme)
+            .map_err(|_| "invalid_control_scheme")?;
+        url.set_path("/api/device/control");
+        let mut request = url.as_str().into_client_request()?;
         request
             .headers_mut()
             .insert("authorization", format!("Bearer {credential}").parse()?);

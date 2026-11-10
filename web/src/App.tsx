@@ -14,6 +14,7 @@ import {
   type Snapshot,
 } from "./contracts";
 import { ConfigurationEditor } from "./ConfigurationEditor";
+import { Rooms } from "./Rooms";
 import { Devices } from "./Devices";
 
 function message(error: unknown): string {
@@ -109,8 +110,8 @@ export function App() {
         path === "devices" ? body : { ...body, request_id: requestId },
         session.csrf,
       );
-      requestIds.current.delete(key);
       await refresh();
+      requestIds.current.delete(key);
       setNotice(success);
     } catch (error) {
       setError(message(error));
@@ -192,6 +193,7 @@ export function App() {
         <div className="brand">WCCS</div>
         <p className="sidebar-caption">赛场管理台</p>
         <nav aria-label="页面导航">
+          <a href="#rooms">机房与座位</a>
           <a href="#configuration">工具配置</a>
           <a href="#devices">设备与检查</a>
         </nav>
@@ -218,7 +220,7 @@ export function App() {
         <header className="page-header">
           <div>
             <p className="eyebrow">环境准备</p>
-            <h1>工具路径配置</h1>
+            <h1>机房与环境准备</h1>
           </div>
           <div className="connection">
             <span className={connected ? "dot online" : "dot"} />
@@ -238,6 +240,12 @@ export function App() {
         )}
         {snapshot ? (
           <>
+            <Rooms
+              snapshot={snapshot}
+              csrf={session.csrf}
+              disabled={busy || !connected}
+              onMutate={mutate}
+            />
             <ConfigurationEditor
               key={editorKey}
               snapshot={snapshot}

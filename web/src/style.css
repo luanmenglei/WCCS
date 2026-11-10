@@ -627,3 +627,115 @@ td.mono {
     padding: 26px;
   }
 }
+
+.rooms-panel {
+  margin-bottom: 2rem;
+  padding: clamp(14px, 2vw, 28px);
+}
+.room-tabs,
+.room-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 1rem 0;
+}
+.room-tabs button[aria-pressed="true"] {
+  background: #183f3b;
+  color: white;
+}
+.room-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+.room-controls label {
+  flex: 1 1 130px;
+  max-width: 260px;
+}
+.room-editor fieldset {
+  border: 0;
+  padding: 0;
+  min-width: 0;
+}
+.table-scroll {
+  max-width: 100%;
+  overflow: auto;
+  margin: 1rem 0;
+  max-height: 660px;
+}
+.seat-layout td {
+  min-width: 200px;
+  max-width: 280px;
+  vertical-align: top;
+  padding: 1rem;
+}
+.seat-layout.compact td {
+  min-width: 155px;
+  padding: 0.5rem;
+  font-size: 0.85rem;
+}
+.seat-layout.large td {
+  min-width: 260px;
+  padding: 1.3rem;
+  font-size: 1.1rem;
+}
+.seat-layout th {
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: #eff3ef;
+  z-index: 1;
+}
+.seat-layout tbody th {
+  left: 0;
+}
+.seat-layout input {
+  width: 100%;
+  min-width: 0;
+}
+.seat-layout small,
+.seat-state {
+  display: block;
+  margin-top: 0.4rem;
+  overflow-wrap: anywhere;
+}
+.seat-layout .seat-select {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+.seat-layout .seat-select input {
+  width: auto;
+}
+.seat-layout .seat-invalid {
+  background: #fff0ed;
+  outline: 2px solid #a33b2c;
+  outline-offset: -2px;
+}
+.seat-state.online {
+  color: #216b4b;
+}
+.seat-state.conflict {
+  color: #a33b2c;
+}
+.batch-editor,
+.save-preview {
+  padding: 1rem;
+  background: #f4f5ef;
+  margin: 1rem 0;
+}
+.batch-editor summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.batch-editor textarea {
+  width: 100%;
+  min-height: 100px;
+  font: inherit;
+}
+.rooms-panel td {
+  overflow-wrap: anywhere;
+}

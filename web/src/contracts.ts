@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { seatingSchema } from "./seating";
 
 export const toolSchema = z.object({
   id: z.string(),
@@ -58,6 +59,7 @@ export const deviceSchema = z.object({
   received_at: z.number().nullable(),
 });
 export const stateSchema = z.object({
+  seating: seatingSchema.default({ rooms: [], devices: [] }),
   protocol_version: z.literal(1),
   server_time: z.number(),
   version: z.number().int(),

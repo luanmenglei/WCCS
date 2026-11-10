@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wccs-inventory"]
+members = ["crates/wccs-inventory", "crates/wccs-session"]
 resolver = "3"
 
 [workspace.package]

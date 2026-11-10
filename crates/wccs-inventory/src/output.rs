@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crate::model::{EvidenceContext, Observation, Reason, Report};
+use crate::model::{EvidenceContext, Observation, Reason, Report, ToolReport};
 use std::{
     fmt::Display,
     fs::{self, OpenOptions},
@@ -19,8 +19,11 @@ fn field<T: Display>(observation: &Observation<T>) -> String {
 fn reason_label(reason: &Reason) -> &'static str {
     match reason {
         Reason::PermissionDenied => "权限不足",
-        Reason::Missing => "字段缺失",
+        Reason::Missing => "字段或文件缺失",
         Reason::NotFoundInSearchScope => "搜索范围内未发现",
+        Reason::NotApplicable => "不适用（脚本文件）",
+        Reason::NotConfigured => "未配置",
+        Reason::NotAFile => "配置路径指向目录等非文件对象",
         Reason::Unsupported => "不支持",
         Reason::SystemError => "系统错误",
     }
@@ -105,8 +108,28 @@ pub fn summary(report: &Report) -> Result<String, serde_json::Error> {
             lines.push(format!("网络采集 {}", reason_label(reason)))
         }
     }
-    lines.push("竞赛工具文件探测（文件存在性与 PE 文件版本）".into());
-    for tool in &report.tools {
+    if let Some(configuration) = &report.tool_configuration {
+        lines.push(format!("工具路径配置 · {}", field(configuration)));
+    } else {
+        lines.push("历史工具采集结果".into());
+    }
+    for entry in &report.tools {
+        let tool = match entry {
+            ToolReport::Configured(tool) => {
+                let status = match &tool.check {
+                    Observation::Available { value } => {
+                        format!("目标文件存在，文件版本 {}", field(&value.file_version))
+                    }
+                    Observation::Unavailable { reason, .. } => reason_label(reason).into(),
+                };
+                lines.push(format!(
+                    "  {} · {} · {status}",
+                    tool.tool.id, tool.tool.name
+                ));
+                continue;
+            }
+            ToolReport::Legacy(tool) => tool,
+        };
         let status = match &tool.detection {
             Observation::Available { value } => format!(
                 "发现 {} 处，文件版本 {}",
@@ -125,7 +148,7 @@ pub fn summary(report: &Report) -> Result<String, serde_json::Error> {
     let mut issues = Vec::new();
     unavailable_fields(&json, "", &mut issues);
     lines.push(format!(
-        "缺失或失败字段 {} 项（详情含字段路径和错误码）",
+        "待处理字段 {} 项（详情含字段路径和错误码）",
         issues.len()
     ));
     lines.extend(issues);
@@ -139,6 +162,9 @@ fn unavailable_fields(value: &serde_json::Value, path: &str, issues: &mut Vec<St
     match value {
         serde_json::Value::Object(object) => {
             if object.get("status").and_then(|value| value.as_str()) == Some("unavailable") {
+                if object.get("reason").and_then(|value| value.as_str()) == Some("not_applicable") {
+                    return;
+                }
                 issues.push(format!(
                     "  {path} · {} · code {}",
                     object["reason"].as_str().unwrap_or("unknown"),
@@ -197,6 +223,34 @@ mod tests {
 
     fn fixture() -> Report {
         serde_json::from_str(include_str!("../tests/fixtures/report.json")).unwrap()
+    }
+
+    #[test]
+    fn script_version_is_not_applicable_and_is_excluded_from_failures() {
+        let mut report = fixture();
+        report.schema_version = 2;
+        report.tools.push(ToolReport::Legacy(crate::model::Tool {
+            executable: "submit.py".into(),
+            detection: Observation::available(vec![crate::model::ToolFile {
+                path: "C:\\synthetic\\submit.py".into(),
+                file_version: Observation::unavailable(Reason::NotApplicable),
+            }]),
+            search_errors: Vec::new(),
+        }));
+        let summary = summary(&report).unwrap();
+        assert!(summary.contains("submit.py · 发现 1 处，文件版本 不适用（脚本文件）"));
+        assert!(!summary.contains("tools[2].detection.value[0].file_version"));
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.schema_version, 2);
+        let ToolReport::Legacy(tool) = &decoded.tools[2] else {
+            panic!("legacy report required")
+        };
+        assert_eq!(
+            tool.detection.value().unwrap()[0].file_version,
+            Observation::unavailable(Reason::NotApplicable)
+        );
+        assert_eq!(fixture().schema_version, 1);
     }
 
     #[test]

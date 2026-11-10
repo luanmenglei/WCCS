@@ -8,7 +8,7 @@ use crate::{
     tools,
 };
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 use windows::{
@@ -16,13 +16,17 @@ use windows::{
     core::{PCWSTR, Result as WinResult, w},
 };
 
-pub fn collect(context: EvidenceContext, extra: &[PathBuf]) -> std::io::Result<Report> {
+pub fn collect(
+    context: EvidenceContext,
+    configuration: Option<&tools::ToolConfiguration>,
+) -> std::io::Result<Report> {
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(std::io::Error::other)?;
-    let directories = tools::search_directories(extra);
+    let (tool_configuration, tools) =
+        tools::check_configuration(configuration, tools::inspect_file, file_version)?;
     Ok(Report {
-        schema_version: 1,
+        schema_version: 3,
         collector_version: env!("CARGO_PKG_VERSION").into(),
         evidence_context: context,
         collected_at_unix_ms: started.as_millis(),
@@ -31,14 +35,9 @@ pub fn collect(context: EvidenceContext, extra: &[PathBuf]) -> std::io::Result<R
         account: account::collect(),
         volumes: volumes::collect(),
         network: observation(network::collect()),
-        tool_search_directories: directories
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect(),
-        tools: tools::EXECUTABLES
-            .iter()
-            .map(|name| tools::probe_tool(name, &directories, tools::inspect_file, file_version))
-            .collect(),
+        tool_configuration: Some(tool_configuration),
+        tool_search_directories: Vec::new(),
+        tools,
     })
 }
 

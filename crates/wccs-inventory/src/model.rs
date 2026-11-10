@@ -9,6 +9,9 @@ pub enum Reason {
     PermissionDenied,
     Missing,
     NotFoundInSearchScope,
+    NotApplicable,
+    NotConfigured,
+    NotAFile,
     Unsupported,
     SystemError,
 }
@@ -80,8 +83,12 @@ pub struct Report {
     pub account: Account,
     pub volumes: VolumeInventory,
     pub network: Observation<Vec<NetworkAdapter>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_configuration: Option<Observation<String>>,
+    // Retained only for reading and re-exporting Schema 1/2 evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_search_directories: Vec<String>,
-    pub tools: Vec<Tool>,
+    pub tools: Vec<ToolReport>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -156,6 +163,42 @@ pub struct IpAddress {
     pub prefix_length: u8,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    Executable,
+    Script,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPath {
+    pub id: String,
+    pub name: String,
+    pub kind: ToolKind,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ToolReport {
+    Configured(ConfiguredTool),
+    Legacy(Tool),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ConfiguredTool {
+    #[serde(flatten)]
+    pub tool: ToolPath,
+    pub check: Observation<ToolMetadata>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ToolMetadata {
+    pub file_version: Observation<String>,
+}
+
+// Schema 1/2 historical reports, never used to resolve current tool paths.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tool {
     pub executable: String,

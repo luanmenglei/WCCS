@@ -2,6 +2,8 @@
 
 日期为 2026-11-10。状态为用户已认可，版本及平台兼容性待原型验证。本决策替代 [ADR 0001](0001-project-baseline.md) 中的初始技术选型。
 
+选手编译及提交命令的实现方式于同日由 [ADR 0003](0003-contest-script-integration.md) 更新为独立脚本包，可复用上游或自行实现。
+
 ## 背景与依据
 
 用户明确服务器运行于 Linux，建议服务端使用 Node.js、Rust 或 Go，Windows 客户端使用 C++ 或 Rust，并强调管理端 UI 的完整交付。项目当前处于架构阶段，可直接调整实现方案。
@@ -15,7 +17,7 @@
 | Linux 服务端 | Rust、Tokio、Axum | 单体服务二进制，包含管理 API、控制连接与静态资源服务 |
 | Windows 服务 | Rust、windows crate、必要的异步网络组件 | 独立服务进程，执行系统操作和设备管理 |
 | Windows 等待界面 | Rust、Win32 原生窗口，绘制方式由原型确定 | 独立用户会话进程，展示身份和触碰提示 |
-| compilecpp / submit | Rust | 普通用户权限下的命令行程序 |
+| compilecpp / submit | 脚本实现及 Windows 入口，见 ADR 0003 | 以选手权限运行、可独立更新的脚本包 |
 | Web 管理界面 | React + TypeScript + Vite | 独立前端工程，构建为静态资源并随 Linux 服务交付 |
 | 控制协议 | HTTPS API、WSS、版本化 JSON 消息 | 重连、确认、去重、背压及状态重同步由应用协议定义 |
 | 持久化 | PostgreSQL 与文件存储 | 任务和审计持久化，归档及发布文件分开管理 |

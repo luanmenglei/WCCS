@@ -1,112 +1,96 @@
 #![forbid(unsafe_code)]
 
-use crate::model::{Observation, Reason, Tool, ToolFile, ToolSearchError};
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
+use crate::model::{
+    ConfiguredTool, Observation, Reason, ToolKind, ToolMetadata, ToolPath, ToolReport,
 };
+use serde::{Deserialize, Serialize};
+use std::{collections::HashSet, fs, io, path::Path};
 
-pub const EXECUTABLES: &[&str] = &[
-    "g++.exe",
-    "gcc.exe",
-    "gdb.exe",
-    "clang++.exe",
-    "clang.exe",
-    "cl.exe",
-    "python.exe",
-    "java.exe",
-    "javac.exe",
-    "rustc.exe",
-    "cargo.exe",
-    "code.exe",
-    "devcpp.exe",
-    "codeblocks.exe",
-    "cmake.exe",
-    "compilecpp.exe",
-    "submit.exe",
-];
+pub const TOOL_CATALOG: &str = include_str!("../../../config/tool-catalog.json");
 
-pub fn search_directories(extra: &[PathBuf]) -> Vec<PathBuf> {
-    let mut directories = Vec::new();
-    if let Some(path) = std::env::var_os("PATH") {
-        directories.extend(std::env::split_paths(&path).filter(|path| path.is_absolute()));
-    }
-    for root in [
-        "C:/MinGW/bin",
-        "C:/msys64/mingw64/bin",
-        "C:/msys64/ucrt64/bin",
-    ] {
-        directories.push(PathBuf::from(root));
-    }
-    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(root) = std::env::var_os(variable) {
-            for suffix in [
-                "LLVM/bin",
-                "Dev-Cpp",
-                "Dev-Cpp/MinGW64/bin",
-                "CodeBlocks",
-                "CodeBlocks/MinGW/bin",
-                "Microsoft VS Code",
-            ] {
-                directories.push(PathBuf::from(&root).join(suffix));
-            }
-        }
-    }
-    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-        directories.push(PathBuf::from(root).join("Programs/Microsoft VS Code"));
-    }
-    directories.extend_from_slice(extra);
-    let mut unique = Vec::new();
-    for directory in directories {
-        if !unique.contains(&directory) {
-            unique.push(directory);
-        }
-    }
-    unique
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolConfiguration {
+    pub schema_version: u32,
+    pub config_version: String,
+    pub tools: Vec<ToolPath>,
 }
 
-// Injectable file lookup keeps denied/missing paths testable without changing machine ACLs.
-pub fn probe_tool(
-    executable: &str,
-    directories: &[PathBuf],
+impl ToolConfiguration {
+    pub fn parse(json: &str) -> io::Result<Self> {
+        let configuration: Self = serde_json::from_str(json).map_err(io::Error::other)?;
+        configuration.validate()?;
+        Ok(configuration)
+    }
+
+    pub fn validate(&self) -> io::Result<()> {
+        if self.schema_version != 1 {
+            return Err(invalid("工具配置 schema_version 必须为 1"));
+        }
+        if self.config_version.trim().is_empty() {
+            return Err(invalid("工具配置必须提供 config_version"));
+        }
+        let mut ids = HashSet::new();
+        for tool in &self.tools {
+            if tool.id.trim().is_empty() || tool.name.trim().is_empty() {
+                return Err(invalid("工具 id 和 name 必须非空"));
+            }
+            if !ids.insert(&tool.id) {
+                return Err(invalid("工具配置包含重复 id"));
+            }
+            if let Some(path) = &tool.path
+                && (path.contains('\0') || !Path::new(path).is_absolute())
+            {
+                return Err(invalid("工具路径必须为完整文件绝对路径，未配置时使用 null"));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+// The caller supplies the entire effective configuration. Only these exact paths
+// reach the filesystem boundary, so missing paths cannot trigger discovery.
+pub fn check_configuration(
+    configuration: Option<&ToolConfiguration>,
     inspect: impl Fn(&Path) -> io::Result<bool>,
     version: impl Fn(&Path) -> Observation<String>,
-) -> Tool {
-    let mut files = Vec::new();
-    let mut search_errors = Vec::new();
-    for directory in directories {
-        let path = directory.join(executable);
-        match inspect(&path) {
-            Ok(true) => files.push(ToolFile {
-                path: path.to_string_lossy().into_owned(),
-                file_version: version(&path),
-            }),
-            Ok(false) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => search_errors.push(ToolSearchError {
-                directory: directory.to_string_lossy().into_owned(),
-                error: Observation::from_io(&error),
-            }),
-        }
-    }
-    let detection = if !files.is_empty() {
-        Observation::available(files)
-    } else if let Some(error) = search_errors.first() {
-        match &error.error {
-            Observation::Unavailable { reason, code } => Observation::Unavailable {
-                reason: reason.clone(),
-                code: *code,
-            },
-            Observation::Available { .. } => unreachable!(),
-        }
-    } else {
-        Observation::unavailable(Reason::NotFoundInSearchScope)
+) -> io::Result<(Observation<String>, Vec<ToolReport>)> {
+    let Some(configuration) = configuration else {
+        return Ok((Observation::unavailable(Reason::NotConfigured), Vec::new()));
     };
-    Tool {
-        executable: executable.to_owned(),
-        detection,
-        search_errors,
-    }
+    // Validate the full snapshot before the first file access, including direct callers.
+    configuration.validate()?;
+    let tools = configuration
+        .tools
+        .iter()
+        .map(|tool| {
+            let check = match &tool.path {
+                None => Observation::unavailable(Reason::NotConfigured),
+                Some(path) => match inspect(Path::new(path)) {
+                    Ok(true) => Observation::available(ToolMetadata {
+                        file_version: match tool.kind {
+                            ToolKind::Executable => version(Path::new(path)),
+                            ToolKind::Script => Observation::unavailable(Reason::NotApplicable),
+                        },
+                    }),
+                    Ok(false) => Observation::unavailable(Reason::NotAFile),
+                    Err(error) => Observation::from_io(&error),
+                },
+            };
+            ToolReport::Configured(ConfiguredTool {
+                tool: tool.clone(),
+                check,
+            })
+        })
+        .collect();
+    Ok((
+        Observation::available(configuration.config_version.clone()),
+        tools,
+    ))
 }
 
 pub fn inspect_file(path: &Path) -> io::Result<bool> {
@@ -116,62 +100,169 @@ pub fn inspect_file(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
-    #[test]
-    fn absent_tool_is_explicit_and_version_is_not_called() {
-        let tool = probe_tool(
-            "g++.exe",
-            &["synthetic".into()],
-            |_| Err(io::ErrorKind::NotFound.into()),
-            |_| panic!("absent tool"),
-        );
-        assert!(matches!(
-            tool.detection,
-            Observation::Unavailable {
-                reason: Reason::NotFoundInSearchScope,
-                ..
-            }
-        ));
+    fn configuration() -> ToolConfiguration {
+        ToolConfiguration {
+            schema_version: 1,
+            config_version: "synthetic-v1".into(),
+            tools: vec![ToolPath {
+                id: "custom-compiler".into(),
+                name: "自定义编译器".into(),
+                kind: ToolKind::Executable,
+                path: Some(
+                    std::env::temp_dir()
+                        .join("自定义 工具.exe")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            }],
+        }
+    }
+
+    fn checked(tools: &[ToolReport]) -> &ConfiguredTool {
+        let ToolReport::Configured(tool) = &tools[0] else {
+            panic!("current report required")
+        };
+        tool
     }
 
     #[test]
-    fn denied_lookup_is_not_reported_as_absent() {
-        let tool = probe_tool(
-            "g++.exe",
-            &["synthetic".into()],
-            |_| Err(io::ErrorKind::PermissionDenied.into()),
-            |_| panic!("denied tool"),
-        );
-        assert!(matches!(
-            tool.detection,
-            Observation::Unavailable {
-                reason: Reason::PermissionDenied,
-                ..
-            }
-        ));
+    fn catalog_contains_logical_tools_with_unconfigured_paths() {
+        let catalog = ToolConfiguration::parse(TOOL_CATALOG).unwrap();
+        assert!(catalog.tools.iter().all(|tool| tool.path.is_none()));
+        for id in ["gcc-cpp", "python", "powershell", "compilecpp", "submit"] {
+            assert!(catalog.tools.iter().any(|tool| tool.id == id));
+        }
     }
 
     #[test]
-    fn found_tool_survives_missing_version_and_other_denied_directory() {
-        let tool = probe_tool(
-            "g++.exe",
-            &["denied".into(), "中文 空格".into()],
-            |path| {
-                if path.starts_with("denied") {
-                    Err(io::ErrorKind::PermissionDenied.into())
-                } else {
-                    Ok(true)
+    fn no_configuration_and_unconfigured_paths_perform_no_file_access() {
+        let (status, reports) = check_configuration(
+            None,
+            |_| panic!("unexpected lookup"),
+            |_| panic!("unexpected version query"),
+        )
+        .unwrap();
+        assert_eq!(status, Observation::unavailable(Reason::NotConfigured));
+        assert!(reports.is_empty());
+        let catalog = ToolConfiguration::parse(TOOL_CATALOG).unwrap();
+        let (_, reports) = check_configuration(
+            Some(&catalog),
+            |_| panic!("unexpected lookup"),
+            |_| panic!("unexpected version query"),
+        )
+        .unwrap();
+        for report in reports {
+            let ToolReport::Configured(tool) = report else {
+                panic!("current report required")
+            };
+            assert!(matches!(
+                tool.check,
+                Observation::Unavailable {
+                    reason: Reason::NotConfigured,
+                    ..
                 }
+            ));
+        }
+    }
+
+    #[test]
+    fn checks_only_configured_path_and_keeps_missing_version() {
+        let config = configuration();
+        let accesses = RefCell::new(Vec::new());
+        let (status, reports) = check_configuration(
+            Some(&config),
+            |path| {
+                accesses.borrow_mut().push(path.to_path_buf());
+                Ok(true)
             },
             |_| Observation::unavailable(Reason::Missing),
+        )
+        .unwrap();
+        assert_eq!(status, Observation::available("synthetic-v1".into()));
+        assert_eq!(
+            *accesses.borrow(),
+            vec![std::path::PathBuf::from(
+                config.tools[0].path.as_ref().unwrap()
+            )]
         );
-        assert_eq!(tool.detection.value().unwrap().len(), 1);
-        assert_eq!(tool.search_errors.len(), 1);
+        assert_eq!(
+            checked(&reports).check.value().unwrap().file_version,
+            Observation::unavailable(Reason::Missing)
+        );
+    }
+
+    #[test]
+    fn configured_kind_controls_version_query_for_arbitrary_script_names() {
+        let mut config = configuration();
+        config.tools[0].kind = ToolKind::Script;
+        let (_, reports) = check_configuration(
+            Some(&config),
+            |_| Ok(true),
+            |_| panic!("script version query"),
+        )
+        .unwrap();
+        assert_eq!(
+            checked(&reports).check.value().unwrap().file_version,
+            Observation::unavailable(Reason::NotApplicable)
+        );
+    }
+
+    #[test]
+    fn missing_denied_and_directory_paths_have_distinct_results() {
+        for (result, expected) in [
+            (
+                Err(io::Error::from(io::ErrorKind::NotFound)),
+                Reason::Missing,
+            ),
+            (
+                Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                Reason::PermissionDenied,
+            ),
+            (Ok(false), Reason::NotAFile),
+        ] {
+            let (_, reports) = check_configuration(
+                Some(&configuration()),
+                |_| match &result {
+                    Ok(value) => Ok(*value),
+                    Err(error) => Err(error.kind().into()),
+                },
+                |_| panic!("unavailable file"),
+            )
+            .unwrap();
+            assert!(
+                matches!(&checked(&reports).check, Observation::Unavailable { reason, .. } if *reason == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_configuration_is_rejected_before_file_access() {
+        assert!(ToolConfiguration::parse(include_str!("../tests/fixtures/report.json")).is_err());
+        let mut duplicate = configuration();
+        duplicate.tools.push(duplicate.tools[0].clone());
         assert!(
-            tool.detection.value().unwrap()[0]
-                .file_version
-                .value()
-                .is_none()
+            check_configuration(
+                Some(&duplicate),
+                |_| panic!("unexpected lookup"),
+                |_| panic!("unexpected version query")
+            )
+            .is_err()
         );
+        for path in ["submit.py", "C:submit.py", "", "\0"] {
+            let mut config = configuration();
+            config.tools[0].path = Some(path.into());
+            assert!(config.validate().is_err());
+        }
+        for (field, value) in [
+            ("schema_version", serde_json::json!(99)),
+            ("config_version", serde_json::json!("")),
+            ("search_directories", serde_json::json!([])),
+        ] {
+            let mut json = serde_json::to_value(configuration()).unwrap();
+            json[field] = value;
+            assert!(ToolConfiguration::parse(&json.to_string()).is_err());
+        }
     }
 }

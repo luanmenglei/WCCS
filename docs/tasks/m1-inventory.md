@@ -2,6 +2,8 @@
 
 日期为 2026-11-10。状态为切片完成，开发机验证通过。目标为可运行的 Windows 环境采集 CLI，提供版本化 JSON 和脱敏摘要。
 
+以下为 0.1.0 首轮实现与实测的历史记录。用户后续明确工具路径由服务端统一维护，当前 0.1.2 的工具检查按配置完整路径执行。最新职责边界、偏差原因和迁移方式见 [ADR 0004](../decisions/0004-server-managed-tool-paths.md) 与 [采集说明](../inventory.md)。
+
 ## 实施范围
 
 - 创建最小 Cargo workspace，固定 Rust 1.99.1 和 x86_64-pc-windows-msvc 目标。

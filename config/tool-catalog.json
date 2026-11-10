@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "config_version": "unconfigured-catalog-v1",
+  "tools": [
+    {"id": "gcc-cpp", "name": "GNU G++", "kind": "executable", "path": null},
+    {"id": "gcc-c", "name": "GNU GCC", "kind": "executable", "path": null},
+    {"id": "gdb", "name": "GDB", "kind": "executable", "path": null},
+    {"id": "clang-cpp", "name": "Clang C++", "kind": "executable", "path": null},
+    {"id": "msvc", "name": "MSVC", "kind": "executable", "path": null},
+    {"id": "python", "name": "Python", "kind": "executable", "path": null},
+    {"id": "powershell", "name": "PowerShell", "kind": "executable", "path": null},
+    {"id": "java", "name": "Java", "kind": "executable", "path": null},
+    {"id": "javac", "name": "Java 编译器", "kind": "executable", "path": null},
+    {"id": "rustc", "name": "Rust 编译器", "kind": "executable", "path": null},
+    {"id": "cargo", "name": "Cargo", "kind": "executable", "path": null},
+    {"id": "vscode", "name": "VS Code", "kind": "executable", "path": null},
+    {"id": "devcpp", "name": "Dev-C++", "kind": "executable", "path": null},
+    {"id": "codeblocks", "name": "Code::Blocks", "kind": "executable", "path": null},
+    {"id": "cmake", "name": "CMake", "kind": "executable", "path": null},
+    {"id": "compilecpp", "name": "compilecpp 脚本", "kind": "script", "path": null},
+    {"id": "submit", "name": "submit 脚本", "kind": "script", "path": null}
+  ]
+}

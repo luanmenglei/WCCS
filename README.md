@@ -9,15 +9,18 @@ WCCS 用于 Windows 10 多机房单人算法竞赛，目标规模为 200～300 �
 | 部分 | 技术与部署 |
 | --- | --- |
 | 服务端 | Linux 上运行 Rust 单体服务，Tokio + Axum，PostgreSQL |
-| Windows 客户端 | Rust 系统服务、Rust 原生会话界面及竞赛 CLI，通过 windows crate 调用 Win32 API |
+| Windows 客户端 | Rust 系统服务、Rust 原生会话界面及运维采集工具，通过 windows crate 调用 Win32 API |
+| 选手竞赛命令 | 独立版本的脚本包，可复用上游或自行实现，统一分发 Windows 命令入口、依赖和比赛配置 |
 | Web 管理界面 | React + TypeScript + Vite，静态资源随 Linux 服务端交付，管理员从浏览器访问 |
 | 通信 | HTTPS API、WSS 控制与状态推送、分块文件传输及受控 P2P |
 
 当前技术方向记录在 [ADR 0002](docs/decisions/0002-linux-rust-stack.md)。依赖版本、Windows 最低版本和 Linux 发行版在原型及部署环境确认后固定。
 
+`compilecpp`、`submit` 的脚本交付方式见 [ADR 0003](docs/decisions/0003-contest-script-integration.md)。命令语义、复用或自行实现的选择及 Windows 运行环境在 M3 固定。
+
 ## 当前阶段
 
-M1 的首个切片已交付 `wccs-inventory`。它通过原生 Windows API 只读采集系统、账户权限、磁盘卷、网络和竞赛工具文件，输出 JSON 与脱敏摘要。下一步为 Rust 原生用户会话等待界面及机房环境验证。
+M1 的首个切片已交付 `wccs-inventory`。它通过原生 Windows API 只读采集系统、账户权限、磁盘卷和网络，并按明确配置路径检查工具文件，输出 JSON 与脱敏摘要。工具候选清单及客户端配置检查已实现，服务端路径管理页面和下发纳入 M2。下一步为 Rust 原生用户会话等待界面及机房环境验证。
 
 ## 开发入口
 
@@ -40,6 +43,8 @@ pwsh -NoProfile -File scripts/check-rust.ps1
 
 每次在 `local/environment/report-*/` 生成 `report.json` 和 `summary.txt`。完整 JSON 包含真实机器信息，保存在忽略目录。当前发布程序依赖 VC++ x64 运行库中的 `VCRUNTIME140.dll`。工具参数、字段状态及采集范围见 [采集工具说明](docs/inventory.md)。
 
+`--list-tools` 输出[候选工具清单](config/tool-catalog.json)。服务端负责统一维护选中工具的实际路径，M1 本地验证使用 `--tools-config local/tools.json` 读取相同字段的版本化配置。默认运行将工具状态标为未配置。职责边界见 [ADR 0004](docs/decisions/0004-server-managed-tool-paths.md)。
+
 ## 文档导航
 
 | 文档 | 用途 |
@@ -49,6 +54,7 @@ pwsh -NoProfile -File scripts/check-rust.ps1
 | [架构](docs/architecture.md) | 组件、状态、身份、协议和部署设计 |
 | [初始架构决策](docs/decisions/0001-project-baseline.md) | 架构基线与技术选型历史 |
 | [Linux 与 Rust 决策](docs/decisions/0002-linux-rust-stack.md) | 当前实现语言、Web 管理界面及构建边界 |
+| [竞赛脚本交付决策](docs/decisions/0003-contest-script-integration.md) | 实现选择、Windows 适配及独立更新方式 |
 | [开发规范](docs/development.md) | 代码、Git、Codex 开发与交接流程 |
 | [验证方案](docs/validation.md) | 自动化检查、容量目标和真机演练 |
 | [采集工具说明](docs/inventory.md) | 构建、运行、报告结构及只读边界 |

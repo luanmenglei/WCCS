@@ -20,7 +20,7 @@ WCCS 用于 Windows 10 多机房单人算法竞赛，目标规模为 200～300 �
 
 ## 当前阶段
 
-M1 已交付 `wccs-inventory` 和 `wccs-session`。采集器通过原生 Windows API 只读采集系统、账户权限、磁盘卷和网络，并按明确配置路径检查工具文件，输出 JSON 与脱敏摘要。会话原型使用 Win32 窗口展示合成身份、输入提示和退出入口，开发机交互与异常重启已验证。工具候选清单及客户端配置检查已实现，M2 已提供 Rust 服务、PostgreSQL 持久化、管理页面、设备注册心跳与配置检查回传。Windows 开发机闭环通过，实际 Linux 运行待补。机房镜像、多屏及系统会话切换仍待现场验证。
+M1 已交付 `wccs-inventory` 和 `wccs-session`。采集器通过原生 Windows API 只读采集系统、账户权限、磁盘卷和网络，并按明确配置路径检查工具文件，输出 JSON 与脱敏摘要。会话原型使用 Win32 窗口展示合成身份、输入提示和退出入口，开发机交互与异常重启已验证。工具候选清单及客户端配置检查已实现，M2 已提供 Rust 服务、PostgreSQL 持久化、管理页面、设备注册心跳与配置检查回传。M2 机房座位表已支持矩形编辑、连续编号、IP 批量绑定、认证设备匹配与检查目标预览。Windows 开发机闭环通过，实际 Linux 运行待补。机房镜像、多屏及系统会话切换仍待现场验证。
 
 ## 开发入口
 
@@ -66,6 +66,8 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 上述命令使用本轮独立 PostgreSQL 测试集群。新环境初始化、Linux 原生启动、浏览器步骤及全部证据见 [M2 任务记录](docs/tasks/m2-tool-configuration.md)。本切片使用单管理员、一份全局配置及目标集合、HTTP(S) 轮询与普通 Windows 进程入口。
 
+机房操作从“机房与座位”进入，创建布局、应用编号规则和批量 IP 映射，预览后保存。选择整机房或部分座位可展开实际检查目标。详细步骤、代理配置与验收边界见 [机房座位表记录](docs/tasks/m2-room-seating.md)。
+
 ## 文档导航
 
 | 文档 | 用途 |
@@ -86,6 +88,6 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 可以向 Codex 提交以下任务。
 
-> 阅读 AGENTS.md、需求基线、路线图和 M2 工具配置记录，先补齐实际 Linux 运行及 HTTPS 跨机闭环，再推进设备凭据生命周期、WSS、Windows 服务和等待界面鉴权 IPC。
+> 阅读 AGENTS.md、需求基线、路线图和两个 M2 闭环记录，继续设备凭据生命周期、Windows 服务、WSS 及等待界面的鉴权 IPC 和批量控制。同步完成管理页面、协议回归和浏览器验收，Linux 与 HTTPS 跨机闭环按可用环境补验。
 
 机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。

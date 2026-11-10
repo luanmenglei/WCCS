@@ -54,7 +54,7 @@ npm --prefix web run check
 & './target/x86_64-pc-windows-msvc/release/wccs-server.exe' --init local/m2-new/server.json
 ```
 
-在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。服务启动事务性执行版本 1 迁移，遇到未知 schema_version 拒绝启动。
+在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。当前服务启动事务性创建版本 1 并升级到版本 2，已有版本 1 数据自动迁移，遇到未知 schema_version 拒绝启动。机房切片升级情况见 [座位表记录](m2-room-seating.md)。
 
 ### Windows 检查入口
 
@@ -156,3 +156,8 @@ HTTP 集成还覆盖无会话 401、错误密码、来源/CSRF 403、错误设�
 先在可用 Linux 测试机执行原生构建与 PostgreSQL 集成，再完成 HTTPS 代理、浏览器至 Linux 服务和 Windows 客户端的跨机闭环。随后推进 M2 的设备凭据生命周期、WSS 与 Windows 服务、鉴权 IPC 和等待界面批量控制。机房 Windows 10 镜像、普通账户、复原后的身份恢复和现场网络继续作为独立验收条件。
 
 仓库检查通过 82 个文件，Python 仓库工具 14 项回归通过，工作区及暂存区 diff 检查通过。浏览器窄屏覆盖待补，本轮视口覆盖实际桌面窗口。
+
+
+## 机房座位表切片补充
+
+后续 M2 已增加矩形机房、稳定座位 ID、IP 绑定及认证来源匹配，保留本记录的全局配置与完整目标集合语义。座位检查使用独立的目标预览与提交入口，只重查配置范围内的唯一在线设备，其余目标明确跳过，详见 [座位表记录](m2-room-seating.md) 和 [ADR 0006](../decisions/0006-m2-room-seating.md)。

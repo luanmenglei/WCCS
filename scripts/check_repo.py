@@ -15,7 +15,7 @@ TEXT_SUFFIXES = {
     '.md', '.py', '.ps1', '.sh', '.toml', '.json', '.yaml', '.yml',
     '.cs', '.csproj', '.props', '.targets', '.sln', '.slnx', '.ts',
     '.tsx', '.js', '.jsx', '.css', '.html', '.xml', '.txt', '.svg',
-    '.bat', '.cmd', '.sql', '.config', '.lock',
+    '.bat', '.cmd', '.sql', '.config', '.lock', '.rs',
 }
 TEXT_NAMES = {'.editorconfig', '.gitattributes', '.gitignore', 'pre-commit'}
 PRIVATE_SUFFIXES = {'.key', '.pem', '.pfx', '.p12'}

@@ -43,16 +43,33 @@
 - 配置给出默认值、范围和迁移行为。协议及持久状态变更考虑旧版本客户端和旧数据。
 - 代码注释解释约束和选择，文档记录操作方法及验证证据。
 
-暂定技术栈采用以下规则，在创建工程时落实工具配置。
+当前技术方向采用以下规则，在创建工程时落实工具配置。
 
 | 技术 | 规则 |
 | --- | --- |
-| C# | 四空格、文件作用域命名空间、开启 nullable、异步方法 Async 后缀、传播 CancellationToken、采用 SDK 内置分析器 |
-| TypeScript | 两空格、strict 模式、边界数据运行时校验、锁定依赖、接入 lint 和格式检查 |
+| Rust | rustfmt 默认风格、Clippy 检查、Result 错误传播、明确取消和超时、Cargo.lock 入库 |
+| Windows FFI | 平台模块集中封装 unsafe，说明安全前提，RAII 管理句柄，验证回调生命周期及 panic 边界 |
+| React / TypeScript | 两空格、strict 模式、组件职责清晰、边界数据运行时校验、锁定依赖、接入 lint 和格式检查 |
 | PowerShell | 四空格、使用 Verb-Noun 命名、错误终止、参数化路径、文件操作使用 LiteralPath |
 | Python 工具 | Python 3.11+、四空格、标准库优先、使用 pathlib 和有检查的 subprocess |
 
 应用工程落地时同时加入实际格式化、构建和测试命令。根目录的文本检查负责基础约束，语言级语义检查由各工具链提供。
+
+Rust 纯业务模块采用 `#![forbid(unsafe_code)]`。平台适配模块逐处审查必要 unsafe，并启用 `unsafe_op_in_unsafe_fn` 检查。网络输入和正常系统失败通过 Result 传播，热路径中的阻塞文件操作及重计算需要受控调度。
+
+### 工具链与跨平台验证
+
+首个 Rust 工程固定 `rust-toolchain.toml`、Cargo.lock、目标平台与最低系统条件。Windows 客户端使用 MSVC 工具链及 Windows SDK。Linux 服务在对应 Linux 环境构建和运行，共享模块在两个平台验证。
+
+计划接入的 Rust 检查包括 `cargo fmt --all -- --check`，以及按目标平台选择包的 `cargo clippy --locked --all-targets -- -D warnings` 和 `cargo test --locked`。具体包选择由创建工程时的脚本固定，避免 Linux 构建引入 Windows 专用包。
+
+前端使用 React + TypeScript + Vite，创建工程时固定 Node.js、提交 package-lock.json，提供 `npm ci`、类型检查、lint、组件测试及生产构建入口。浏览器端到端测试覆盖真实服务端与客户端模拟器交互。
+
+### Web 管理端交付
+
+按照架构中的页面表实施。每项管理功能同时包含页面入口、服务端鉴权、操作结果和失败反馈。开发时可使用合成数据验证布局，阶段验收需连接实际 API。自动化浏览器检查覆盖权限拒绝、断线与重连、部分失败和重复点击。
+
+前端构建产物通过 Linux 服务交付，内网浏览器加载所需脚本、字体和图片随包提供。业务页面使用服务端状态和版本号处理并发编辑。完成一项管理功能时记录浏览器实测结果和相应任务证据。
 
 ## 开发与运维边界
 

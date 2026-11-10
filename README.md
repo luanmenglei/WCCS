@@ -4,6 +4,17 @@ WCCS 用于 Windows 10 多机房单人算法竞赛，目标规模为 200～300 �
 
 日常教学时客户端离线待机。比赛时由服务器的 Web 控制台集中管理。赛后可清空 D 盘并重启，通过机房镜像复原恢复教学环境。
 
+## 实现方向
+
+| 部分 | 技术与部署 |
+| --- | --- |
+| 服务端 | Linux 上运行 Rust 单体服务，Tokio + Axum，PostgreSQL |
+| Windows 客户端 | Rust 系统服务、Rust 原生会话界面及竞赛 CLI，通过 windows crate 调用 Win32 API |
+| Web 管理界面 | React + TypeScript + Vite，静态资源随 Linux 服务端交付，管理员从浏览器访问 |
+| 通信 | HTTPS API、WSS 控制与状态推送、分块文件传输及受控 P2P |
+
+当前技术方向记录在 [ADR 0002](docs/decisions/0002-linux-rust-stack.md)。依赖版本、Windows 最低版本和 Linux 发行版在原型及部署环境确认后固定。
+
 ## 当前阶段
 
 项目处于仓库与架构初始化阶段，当前交付包括项目指令、需求基线、设计文档、开发规范和可执行的仓库检查。下一步为只读环境采集及 Windows 技术验证。
@@ -27,7 +38,8 @@ python -m unittest discover -s scripts/tests -v
 | [AGENTS.md](AGENTS.md) | Codex 工作入口和项目约束 |
 | [需求基线](docs/requirements.md) | 已确认需求、范围和现场未知项 |
 | [架构](docs/architecture.md) | 组件、状态、身份、协议和部署设计 |
-| [架构决策](docs/decisions/0001-project-baseline.md) | 本轮决策及暂定技术选型 |
+| [初始架构决策](docs/decisions/0001-project-baseline.md) | 架构基线与技术选型历史 |
+| [Linux 与 Rust 决策](docs/decisions/0002-linux-rust-stack.md) | 当前实现语言、Web 管理界面及构建边界 |
 | [开发规范](docs/development.md) | 代码、Git、Codex 开发与交接流程 |
 | [验证方案](docs/validation.md) | 自动化检查、容量目标和真机演练 |
 | [路线图](docs/roadmap.md) | 当前状态、任务顺序和完成条件 |

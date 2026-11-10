@@ -5,6 +5,7 @@
 **/dist/
 **/coverage/
 **/TestResults/
+**/target/
 **/__pycache__/
 *.py[cod]
 artifacts/

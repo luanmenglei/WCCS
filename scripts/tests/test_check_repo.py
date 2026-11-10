@@ -43,6 +43,12 @@ class ContentChecks(unittest.TestCase):
         files = {'setup.cmd': b'@echo off\r\n', 'icon.png': b'\xff\x00'}
         self.assertEqual([], CHECKER.check_files(files))
 
+    def test_rust_sources_receive_text_checks(self):
+        files = {'src/main.rs': b'fn main() {} \n'}
+        errors = CHECKER.check_files(files)
+        self.assertTrue(any('trailing whitespace' in error for error in errors))
+        self.assertEqual([], CHECKER.check_files({'src/main.rs': b'fn main() {}\n'}))
+
     def test_private_files_and_environment_examples(self):
         files = {'.env': b'', '.env.example': b'', 'private.key': b''}
         self.assertEqual(2, len(CHECKER.check_files(files)))

@@ -7,6 +7,7 @@ import { ConfigurationEditor } from "./ConfigurationEditor";
 import { stateSchema } from "./contracts";
 
 const snapshot = stateSchema.parse({
+  registration_window: { version: 1, closes_at: 0, open: false },
   protocol_version: 1,
   server_time: 0,
   version: 1,
@@ -17,6 +18,14 @@ const snapshot = stateSchema.parse({
     {
       id: "test",
       name: "合成设备",
+      lifecycle: "enabled",
+      lifecycle_version: 1,
+      application_id: null,
+      application_at: null,
+      enrollment_expires: 0,
+      enrollment_generation: 1,
+      rotation_id: null,
+      rotation_expires: null,
       registered: true,
       online: false,
       last_seen: 0,

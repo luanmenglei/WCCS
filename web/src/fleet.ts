@@ -14,6 +14,8 @@ export function seatRows(snapshot: Snapshot) {
 }
 
 export function checkStatus(device: Device): string {
+  if (device.lifecycle === "revoked") return "凭据已撤销";
+  if (device.lifecycle === "disabled") return "检查领取已暂停";
   if (!device.registered) return "待注册";
   if (device.expired) return "任务已过期";
   if (!device.result) return device.desired_job ? "等待回传" : "尚未下发";
@@ -48,6 +50,11 @@ export const pages = {
     label: "设备",
     group: "赛场管理",
     description: "按连接、绑定和工具检查状态查找设备，查看最新回传。",
+  },
+  enrollment: {
+    label: "注册审核",
+    group: "赛前准备",
+    description: "管理注册窗口，核对设备申请和重新授权。",
   },
   targets: {
     label: "检查任务",

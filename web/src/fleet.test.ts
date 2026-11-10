@@ -8,6 +8,7 @@ import { Seats } from "./Seats";
 import { Devices } from "./Devices";
 
 const snapshot = stateSchema.parse({
+  registration_window: { version: 1, closes_at: 0, open: false },
   protocol_version: 1,
   server_time: 0,
   version: 1,
@@ -18,6 +19,14 @@ const snapshot = stateSchema.parse({
     {
       id: "device-a",
       name: "合成设备",
+      lifecycle: "enabled",
+      lifecycle_version: 1,
+      application_id: null,
+      application_at: null,
+      enrollment_expires: 0,
+      enrollment_generation: 1,
+      rotation_id: null,
+      rotation_expires: null,
       registered: true,
       online: true,
       last_seen: 0,
@@ -121,6 +130,7 @@ test("设备清单展示期望与实际状态，空匹配保留未分配", () =>
       snapshot,
       disabled: true,
       onCreate: async () => {},
+      onMutate: async () => {},
       onRecheck: async () => {},
     }),
   );

@@ -46,6 +46,22 @@ export const resultSchema = z.object({
   ),
 });
 export const deviceSchema = z.object({
+  lifecycle: z.enum([
+    "pending",
+    "enabled",
+    "disabled",
+    "revoked",
+    "rejected",
+    "expired",
+  ]),
+  lifecycle_version: z.number().int(),
+  agent_version: z.string().nullable().default(null),
+  application_id: z.string().nullable(),
+  application_at: z.number().nullable(),
+  enrollment_expires: z.number(),
+  enrollment_generation: z.number().int(),
+  rotation_id: z.string().nullable(),
+  rotation_expires: z.number().nullable(),
   id: z.string(),
   name: z.string(),
   registered: z.boolean(),
@@ -59,6 +75,11 @@ export const deviceSchema = z.object({
   received_at: z.number().nullable(),
 });
 export const stateSchema = z.object({
+  registration_window: z.object({
+    version: z.number().int(),
+    closes_at: z.number(),
+    open: z.boolean(),
+  }),
   seating: seatingSchema.default({ rooms: [], devices: [] }),
   protocol_version: z.literal(1),
   server_time: z.number(),

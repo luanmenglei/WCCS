@@ -101,6 +101,7 @@ test("两列表格和矩阵保留非目标位置，空白清空，校验重复�
 
 test("机房入口提供创建、尺寸和未分配设备核对", () => {
   const snapshot = stateSchema.parse({
+    registration_window: { version: 1, closes_at: 0, open: false },
     protocol_version: 1,
     server_time: 0,
     version: 0,

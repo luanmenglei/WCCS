@@ -10,6 +10,7 @@ export type Mutation = (
   message: string,
 ) => Promise<void>;
 const labels = {
+  disabled: "设备已禁用",
   ready: "可检查",
   unregistered: "未注册 / 未匹配，跳过",
   offline: "离线，跳过",

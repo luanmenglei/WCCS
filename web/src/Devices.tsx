@@ -1,10 +1,17 @@
 import { useState, type FormEvent } from "react";
+import {
+  LifecycleControls,
+  DeviceHistory,
+  lifecycleLabels,
+  type Mutate,
+} from "./Lifecycle";
 import { DetailsDialog } from "./DetailsDialog";
 import { checkStatus, matchesSearch, seatRows } from "./fleet";
 import { checkLabel, reasons, type Device, type Snapshot } from "./contracts";
 
 type Props = {
   snapshot: Snapshot;
+  onMutate: Mutate;
   disabled: boolean;
   onCreate: (body: Record<string, unknown>) => Promise<void>;
   onRecheck: (id: string) => Promise<void>;
@@ -15,7 +22,13 @@ function time(value: number | null) {
     : new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
 }
 
-export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
+export function Devices({
+  snapshot,
+  disabled,
+  onCreate,
+  onRecheck,
+  onMutate,
+}: Props) {
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
@@ -37,9 +50,10 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
       const address = addresses.get(device.id);
       const stateMatches =
         filter === "all" ||
+        filter === device.lifecycle ||
         (filter === "online" && device.online) ||
         (filter === "offline" && !device.online && device.registered) ||
-        (filter === "unregistered" && !device.registered) ||
+        (filter === "unregistered" && device.lifecycle === "pending") ||
         (filter === "unbound" && !matched.length) ||
         (filter === "conflict" &&
           matched.some(({ seat }) => seat.status === "conflict"));
@@ -184,6 +198,11 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
             onChange={(event) => setFilter(event.target.value)}
           >
             <option value="all">全部设备</option>
+            {Object.entries(lifecycleLabels).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
             <option value="online">在线</option>
             <option value="offline">离线</option>
             <option value="unregistered">待注册</option>
@@ -207,6 +226,7 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
                   设备名称 {descending ? "↓" : "↑"}
                 </button>
               </th>
+              <th>生命周期</th>
               <th>连接</th>
               <th>机房 / 座位</th>
               <th>观察 IP</th>
@@ -222,13 +242,14 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
                   <strong>{device.name}</strong>
                   <small className="mono">{device.id}</small>
                 </td>
+                <td>{lifecycleLabels[device.lifecycle]}</td>
                 <td>
                   <span className={device.online ? "online-text" : "status"}>
                     {device.online
                       ? "在线"
                       : device.registered
                         ? "离线"
-                        : "待注册"}
+                        : "认证停用"}
                   </span>
                 </td>
                 <td>
@@ -273,11 +294,19 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
       </div>
       {detail && (
         <DetailsDialog title={detail.name} onClose={() => setDetailId(null)}>
+          <LifecycleControls
+            key={detail.id}
+            device={detail}
+            disabled={disabled}
+            onMutate={onMutate}
+          />
           <DeviceDetails
+            recheckAllowed={snapshot.targets.includes(detail.id)}
             device={detail}
             disabled={disabled}
             onRecheck={onRecheck}
           />
+          <DeviceHistory key={`history-${detail.id}`} device={detail} />
         </DetailsDialog>
       )}
     </section>
@@ -286,10 +315,12 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
 
 export function DeviceDetails({
   device,
+  recheckAllowed = !!device.desired_job,
   disabled,
   onRecheck,
 }: {
   device: Device;
+  recheckAllowed?: boolean;
   disabled: boolean;
   onRecheck: (id: string) => Promise<void>;
 }) {
@@ -323,7 +354,9 @@ export function DeviceDetails({
           {checkStatus(device)}
         </span>
         <button
-          disabled={disabled || !device.desired_job}
+          disabled={
+            disabled || !recheckAllowed || device.lifecycle !== "enabled"
+          }
           onClick={() => {
             void onRecheck(device.id).catch(() => {});
           }}

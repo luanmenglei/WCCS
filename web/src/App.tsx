@@ -17,6 +17,7 @@ import { ConfigurationEditor } from "./ConfigurationEditor";
 import { Rooms } from "./Rooms";
 import { Seats } from "./Seats";
 import { pages, pageFromHash } from "./fleet";
+import { Enrollment } from "./Lifecycle";
 import { Devices } from "./Devices";
 
 function message(error: unknown): string {
@@ -150,7 +151,20 @@ export function App() {
       requestIds.current.delete(key);
       setNotice(success);
     } catch (error) {
-      if (epoch === sessionEpoch.current) setError(message(error));
+      if (epoch === sessionEpoch.current) {
+        setError(message(error));
+        if (error instanceof ApiError && error.status === 401) {
+          sessionEpoch.current++;
+          requestIds.current.clear();
+          setMenuOpen(false);
+          setNotice("");
+          setConnected(false);
+          setSession(null);
+          setSnapshot(null);
+          setSeatSelection([]);
+          setBusy(false);
+        }
+      }
       throw error;
     } finally {
       if (epoch === sessionEpoch.current) setBusy(false);
@@ -382,8 +396,16 @@ export function App() {
                 }}
               />
             </div>
+            <div className="page-view" hidden={page !== "enrollment"}>
+              <Enrollment
+                snapshot={snapshot}
+                disabled={busy || !connected}
+                onMutate={mutate}
+              />
+            </div>
             <div className="page-view" hidden={page !== "devices"}>
               <Devices
+                onMutate={mutate}
                 snapshot={snapshot}
                 disabled={busy || !connected}
                 onCreate={async (body) => {

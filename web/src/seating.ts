@@ -69,6 +69,7 @@ export const targetPreviewSchema = z.object({
       device_ids: z.array(z.string()),
       status: z.enum([
         "ready",
+        "disabled",
         "unregistered",
         "offline",
         "conflict",

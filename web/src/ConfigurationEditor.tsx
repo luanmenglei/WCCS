@@ -201,7 +201,7 @@ export function ConfigurationEditor({
               <label key={device.id} className="target">
                 <input
                   type="checkbox"
-                  disabled={!device.registered}
+                  disabled={!device.registered && !targets.includes(device.id)}
                   checked={targets.includes(device.id)}
                   onChange={(event) => {
                     setTargets((items) =>
@@ -216,6 +216,9 @@ export function ConfigurationEditor({
                   <strong>{device.name}</strong>
                   <small>
                     {device.id} ·{" "}
+                    {device.lifecycle === "disabled"
+                      ? "已禁用 · 领取暂停 · "
+                      : ""}{" "}
                     {device.registered
                       ? device.online
                         ? "在线"

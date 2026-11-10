@@ -1013,3 +1013,20 @@ progress::-webkit-progress-value {
     scroll-behavior: auto !important;
   }
 }
+
+.lifecycle-controls {
+  margin-block: 16px;
+}
+.lifecycle-controls .mono {
+  overflow-wrap: anywhere;
+}
+.operation-preview {
+  margin-block: 16px;
+  padding: 16px;
+  background: #f4f4f4;
+  border: 1px solid #e0e0e0;
+}
+.detail-dialog pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

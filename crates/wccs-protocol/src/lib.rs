@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod control;
+
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

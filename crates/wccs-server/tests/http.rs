@@ -1003,7 +1003,7 @@ async fn seating_migration_binding_and_concurrency() {
             .await
             .unwrap()
             .get::<_, i32>(0),
-        5
+        6
     );
     let mut room = room_input("A", 2, 3);
     room["seats"][0]["expected_ip"] = json!("127.0.0.1");
@@ -2261,3 +2261,6 @@ async fn operators_scopes_events_and_recovery() {
         .unwrap();
     connection_handle.abort();
 }
+
+#[path = "cases/waiting.rs"]
+mod waiting_tests;

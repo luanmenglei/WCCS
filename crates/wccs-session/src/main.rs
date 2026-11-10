@@ -25,6 +25,16 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<PathBuf>, St
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--controlled") {
+        return match platform::controlled() {
+            Ok(code) => ExitCode::from(code),
+            Err(_) => {
+                eprintln!("controlled_session_failed");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let directory = match parse(std::env::args_os().skip(1)) {
         Ok(Some(directory)) => directory,
         Ok(None) => {

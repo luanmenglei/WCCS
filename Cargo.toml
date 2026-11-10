@@ -11,7 +11,9 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 windows = "=0.61.3"
 tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "=0.28.0", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "=0.3.34", features = ["sink"] }
 rand = "=0.8.5"
 sha2 = "=0.10.9"
 

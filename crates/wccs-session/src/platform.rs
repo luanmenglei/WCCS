@@ -25,6 +25,9 @@ use windows::{
     core::{BOOL, PCWSTR, Result as WinResult, w},
 };
 
+use wccs_protocol::control::{Actual, CONTROL_VERSION, Command, IpcRequest, LEASE_SECONDS};
+use wccs_session::ipc;
+
 const REBUILD: u32 = WM_APP + 1;
 const LAYOUT: u32 = WM_APP + 2;
 const SESSION: u32 = WM_APP + 3;
@@ -110,7 +113,24 @@ impl Drop for NativeWindow {
 }
 
 impl NativeWindow {
-    fn create(rect: RECT, instance: HINSTANCE, index: usize, recovered: bool) -> WinResult<Self> {
+    fn create(
+        rect: RECT,
+        instance: HINSTANCE,
+        index: usize,
+        recovered: bool,
+        identity: Option<&Command>,
+        test_mode: bool,
+    ) -> WinResult<Self> {
+        let rect = if test_mode {
+            RECT {
+                left: rect.left + 40,
+                top: rect.top + 40,
+                right: (rect.left + 900).min(rect.right),
+                bottom: (rect.top + 740).min(rect.bottom),
+            }
+        } else {
+            rect
+        };
         let title = wide(format!("WCCS 等待界面 · 开发测试 · 屏幕 {}", index + 1).as_ref());
         // SAFETY: class is registered on this thread. Strings remain alive through
         // creation and Windows copies them. No user-data pointer is passed.
@@ -157,6 +177,20 @@ impl NativeWindow {
             window
                 .labels
                 .push(window.control(w!("STATIC"), text, 0, instance)?);
+        }
+        if let Some(command) = identity {
+            window.set_label(0, &format!("{} · 等待", command.identity.contest_name))?;
+            window.set_label(1, &format!("姓名　{}", command.identity.name))?;
+            window.set_label(2, &format!("学校　{}", command.identity.school))?;
+            window.set_label(3, &format!("座位　{}", command.identity.seat_label))?;
+            window.set_label(
+                7,
+                if test_mode {
+                    "受控开发测试 · 可随时退出"
+                } else {
+                    "身份已由管理端确认"
+                },
+            )?;
         }
         window.exit = window.control(w!("BUTTON"), "退出开发测试", EXIT_BUTTON, instance)?;
         window.layout()?;
@@ -417,7 +451,9 @@ struct App {
     started: Instant,
     started_at_unix_ms: u128,
     recovered: bool,
-    directory: PathBuf,
+    directory: Option<PathBuf>,
+    command: Option<Command>,
+    test_mode: bool,
     last_save_ms: u64,
     last_text: (String, String),
 }
@@ -426,7 +462,14 @@ impl App {
     fn rebuild(&mut self, instance: HINSTANCE) -> WinResult<()> {
         let mut windows = Vec::new();
         for (index, rect) in monitor_rects()?.into_iter().enumerate() {
-            windows.push(NativeWindow::create(rect, instance, index, self.recovered)?);
+            windows.push(NativeWindow::create(
+                rect,
+                instance,
+                index,
+                self.recovered,
+                self.command.as_ref(),
+                self.test_mode,
+            )?);
         }
         // SAFETY: first window is live. Only it subscribes to this session, so
         // counters remain independent of monitor count. Drop unregisters it.
@@ -483,6 +526,9 @@ impl App {
     }
 
     fn save(&mut self, clean_exit: bool) -> io::Result<()> {
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
         let elapsed_ms = self.elapsed_ms();
         let snapshot = Snapshot {
             schema_version: 1,
@@ -499,7 +545,7 @@ impl App {
             monitor_count: self.windows.len(),
             monitor_dpi: self.windows.iter().map(|window| window.dpi).collect(),
         };
-        save_snapshot(&self.directory, &snapshot)?;
+        save_snapshot(directory, &snapshot)?;
         self.last_save_ms = elapsed_ms;
         Ok(())
     }
@@ -543,6 +589,60 @@ fn save_snapshot(directory: &Path, snapshot: &Snapshot) -> io::Result<()> {
 }
 
 pub fn run(directory: &Path) -> Result<u8, Box<dyn std::error::Error>> {
+    run_ui(Some(directory), None)
+}
+
+struct Control {
+    pipe: ipc::Pipe,
+    command: Command,
+    deadline: Instant,
+    test_mode: bool,
+}
+
+pub fn controlled() -> Result<u8, Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 5 || !["test", "service"].contains(&args[4].as_str()) {
+        return Err("controlled_arguments".into());
+    }
+    let test_mode = args[4] == "test";
+    let pipe =
+        ipc::connect(&args[2], args[3].parse()?, test_mode).map_err(|_| "ipc_auth_failed")?;
+    let start = Instant::now();
+    let request = loop {
+        if let Some(request) = pipe
+            .receive::<IpcRequest>()
+            .map_err(|_| "ipc_read_failed")?
+        {
+            break request;
+        }
+        if start.elapsed().as_secs() > 8 {
+            return Err("ipc_timeout".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let session = ipc::discover(true).map_err(|_| "session_unavailable")?;
+    if request.protocol_version != CONTROL_VERSION
+        || request.command.protocol_version != CONTROL_VERSION
+        || request.command.action != "enter"
+        || request.command.session_key != session.key
+        || request.lease_seconds == 0
+        || request.lease_seconds > LEASE_SECONDS
+    {
+        return Err("ipc_command_rejected".into());
+    }
+    let control = Control {
+        pipe,
+        command: request.command,
+        deadline: Instant::now() + std::time::Duration::from_secs(request.lease_seconds),
+        test_mode,
+    };
+    run_ui(None, Some(control))
+}
+
+fn run_ui(
+    directory: Option<&Path>,
+    mut control: Option<Control>,
+) -> Result<u8, Box<dyn std::error::Error>> {
     let Some(_instance) = Instance::acquire(w!("Local\\WCCS.WaitingPrototype.v1"))? else {
         eprintln!("本会话的等待界面已经运行，请使用已有窗口或先退出该进程。");
         return Ok(2);
@@ -555,14 +655,22 @@ pub fn run(directory: &Path) -> Result<u8, Box<dyn std::error::Error>> {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;
         HINSTANCE(GetModuleHandleW(None)?.0)
     };
-    let directory = directory.join(format!("session-{session_id}"));
-    fs::create_dir_all(&directory)?;
+    let directory = directory.map(|d| d.join(format!("session-{session_id}")));
+    if let Some(directory) = &directory {
+        fs::create_dir_all(directory)?;
+    }
     let app = App {
         windows: Vec::new(),
         state: WaitingState::default(),
         started: Instant::now(),
         started_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-        recovered: recovered_previous_run(&directory)?,
+        recovered: directory
+            .as_ref()
+            .map(|d| recovered_previous_run(d))
+            .transpose()?
+            .unwrap_or(false),
+        command: control.as_ref().map(|c| c.command.clone()),
+        test_mode: control.as_ref().is_some_and(|c| c.test_mode),
         directory,
         last_save_ms: 0,
         last_text: Default::default(),
@@ -588,6 +696,9 @@ pub fn run(directory: &Path) -> Result<u8, Box<dyn std::error::Error>> {
     app.save(false)?;
     app.rebuild(module)?;
     app.save(false)?;
+    if let Some(control) = &control {
+        report_control(control, &app)?;
+    }
     // SAFETY: this thread owns the first visible window. Focus failure is permitted
     // by Windows policy and does not prevent clicking or closing the prototype.
     unsafe {
@@ -626,6 +737,9 @@ pub fn run(directory: &Path) -> Result<u8, Box<dyn std::error::Error>> {
                 }
             }
             SESSION => {
+                if control.is_some() {
+                    return Err("controlled_session_changed".into());
+                }
                 let event = match message.wParam.0 as u32 {
                     WTS_SESSION_LOCK => Some(SessionEvent::Lock),
                     WTS_SESSION_UNLOCK => Some(SessionEvent::Unlock),
@@ -642,6 +756,37 @@ pub fn run(directory: &Path) -> Result<u8, Box<dyn std::error::Error>> {
                 }
             }
             WM_TIMER if message.hwnd.is_invalid() && message.wParam.0 == timer_id => {
+                if let Some(control) = &mut control {
+                    if Instant::now() >= control.deadline {
+                        return Err("control_lease_expired".into());
+                    }
+                    if let Some(request) = control
+                        .pipe
+                        .receive::<IpcRequest>()
+                        .map_err(|_| "ipc_disconnected")?
+                    {
+                        if request.protocol_version != CONTROL_VERSION
+                            || request.lease_seconds == 0
+                            || request.lease_seconds > LEASE_SECONDS
+                        {
+                            return Err("ipc_protocol_rejected".into());
+                        }
+                        if request.command.action == "leave" {
+                            app.windows.clear();
+                            control
+                                .pipe
+                                .send(&Actual::default())
+                                .map_err(|_| "ipc_result_failed")?;
+                            return Ok(0);
+                        }
+                        if request.command != control.command {
+                            return Err("ipc_command_changed".into());
+                        }
+                        control.deadline =
+                            Instant::now() + std::time::Duration::from_secs(request.lease_seconds);
+                        report_control(control, &app)?;
+                    }
+                }
                 app.render()?;
                 if app.elapsed_ms().saturating_sub(app.last_save_ms) >= 1000 {
                     app.save(false)?;
@@ -697,6 +842,26 @@ fn drain_notifications(kind: u32) {
     let mut message = MSG::default();
     // SAFETY: removes only our pointer-free, coalescible layout notifications.
     unsafe { while PeekMessageW(&mut message, None, kind, kind, PM_REMOVE).as_bool() {} }
+}
+
+fn report_control(control: &Control, app: &App) -> Result<(), Box<dyn std::error::Error>> {
+    let actual = Actual {
+        state: if app.state.visible() && !app.windows.is_empty() {
+            "waiting"
+        } else {
+            "unknown"
+        }
+        .into(),
+        command_id: Some(control.command.command_id.clone()),
+        session_key: Some(control.command.session_key.clone()),
+        monitors: app.windows.len() as u32,
+        detail: "ui_observed".into(),
+    };
+    control
+        .pipe
+        .send(&actual)
+        .map_err(|_| "ipc_report_failed")?;
+    Ok(())
 }
 
 #[cfg(test)]

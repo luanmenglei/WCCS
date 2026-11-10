@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+mod control;
 mod device;
 mod events;
 mod lifecycle;
@@ -8,6 +9,7 @@ mod management;
 mod operators;
 mod roster;
 mod seating;
+mod waiting;
 
 use axum::{
     Json, Router,
@@ -46,6 +48,7 @@ pub struct Config {
 
 pub struct AppState {
     pub config: Config,
+    pub server_epoch: String,
     pub db: Mutex<Client>,
     pub sessions: Mutex<auth::Sessions>,
     pub password_slots: Arc<Semaphore>,
@@ -117,7 +120,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=5) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=6) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -147,9 +150,17 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         )
         .await?;
     }
+    if versions[0].get::<_, i32>(0) <= 5 {
+        tx.batch_execute(include_str!("../migrations/006_waiting.sql"))
+            .await?;
+    }
+    tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$1 WHERE stage NOT IN ('failed','cancelled','expired')", &[&wccs_protocol::now()]).await?;
+    tx.execute("UPDATE control_devices SET connected=false", &[])
+        .await?;
     tx.commit().await?;
     Ok(Arc::new(AppState {
         config,
+        server_epoch: wccs_protocol::token(),
         db: Mutex::new(db),
         sessions: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(2)),
@@ -181,6 +192,10 @@ async fn response_policy(request: Request, next: Next) -> Response {
 
 pub fn router(app: App) -> Router {
     Router::new()
+        .route("/api/waiting/preview", post(waiting::preview))
+        .route("/api/waiting/commit", post(waiting::commit))
+        .route("/api/waiting", get(waiting::list))
+        .route("/api/device/control", get(control::upgrade))
         .route("/api/login", post(auth::login))
         .route("/api/session", get(auth::session))
         .route("/api/logout", post(auth::logout))

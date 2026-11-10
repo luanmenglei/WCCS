@@ -1,6 +1,6 @@
 [package]
 name = "wccs-agent"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 
@@ -11,6 +11,14 @@ reqwest.workspace = true
 rand.workspace = true
 wccs-protocol = { path = "../wccs-protocol" }
 wccs-inventory = { path = "../wccs-inventory" }
+
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+wccs-session = { path = "../wccs-session" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Services", "Win32_System_Threading", "Win32_Security"] }
 
 [lints]
 workspace = true

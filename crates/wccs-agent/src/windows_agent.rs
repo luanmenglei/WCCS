@@ -46,19 +46,7 @@ pub fn run() -> Result<()> {
 
 fn run_locked(path: &Path, once: bool) -> Result<()> {
     let mut identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
-    let url = reqwest::Url::parse(&identity.server)?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path() != "/"
-    {
-        return Err("服务地址需要纯 origin".into());
-    }
-    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        return Err("服务地址需要 HTTPS，本地回环支持 HTTP 验证".into());
-    }
+    validate_server(&identity.server)?;
     if !valid_id(&identity.device_id) {
         return Err("设备 ID 无效".into());
     }
@@ -253,7 +241,7 @@ struct Candidate {
     new_token: String,
 }
 
-fn persist(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn persist(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let temporary = path.with_extension("durable.tmp");
     let mut file = fs::File::create(&temporary)?;
@@ -331,4 +319,63 @@ fn reported_ips(server: &str) -> Vec<String> {
         }
     }
     vec![]
+}
+
+pub fn validate_server(server: &str) -> Result<()> {
+    let url = reqwest::Url::parse(server)?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err("服务地址需要纯 origin".into());
+    }
+    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err("服务地址需要 HTTPS，本地回环支持 HTTP 验证".into());
+    }
+    Ok(())
+}
+
+pub fn run_worker(path: &Path, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let initialize = || -> Result<(Identity, Client)> {
+        let mut identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
+        validate_server(&identity.server)?;
+        let credential_path = path.with_extension("credential");
+        if !credential_path.exists() {
+            persist(
+                &credential_path,
+                identity
+                    .device_token
+                    .clone()
+                    .unwrap_or_else(token)
+                    .as_bytes(),
+            )?;
+        }
+        identity.device_token = Some(fs::read_to_string(credential_path)?);
+        let client = Client::builder()
+            .timeout(Duration::from_secs(12))
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok((identity, client))
+    };
+    let Ok((mut identity, client)) = initialize() else {
+        eprintln!("http_worker_initialization_failed");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        return;
+    };
+    let boot = token();
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        if cycle(&client, &mut identity, &boot, path).is_err() {
+            eprintln!("device_http_sync_failed");
+        }
+        for _ in 0..25 {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
 }

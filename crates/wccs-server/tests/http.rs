@@ -967,7 +967,7 @@ async fn seating_migration_binding_and_concurrency() {
             .await
             .unwrap()
             .get::<_, i32>(0),
-        3
+        4
     );
     let mut room = room_input("A", 2, 3);
     room["seats"][0]["expected_ip"] = json!("127.0.0.1");
@@ -1259,6 +1259,459 @@ async fn seating_migration_binding_and_concurrency() {
             .len(),
         3
     );
+    server.abort();
+    let _ = server.await;
+    db.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+    drop(db);
+    connection_handle.await.unwrap();
+}
+
+async fn roster_input(h: &Harness, contest: &str, operation: Value) -> Value {
+    let state = h.state().await;
+    let base = if operation["kind"] == "create" {
+        state["roster"]["version"].clone()
+    } else {
+        state["roster"]["contests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == contest)
+            .unwrap()["version"]
+            .clone()
+    };
+    json!({"request_id":token(),"contest_id":contest,"base_version":base,"operation":operation})
+}
+async fn roster_preview(h: &Harness, input: &mut Value) -> Value {
+    let response = h.post("roster/preview", input).await;
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    let preview: Value = response.json().await.unwrap();
+    input["preview_token"] = preview["preview_token"].clone();
+    preview
+}
+async fn roster_commit(h: &Harness, input: &mut Value) -> Value {
+    let preview = roster_preview(h, input).await;
+    assert_eq!(preview["errors"], json!([]));
+    let response = h.post("roster/commit", input).await;
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    response.json().await.unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn roster_import_assignment_isolation_and_recovery() {
+    let database = std::env::var("WCCS_TEST_DATABASE_URL").unwrap();
+    let (db, connection) = tokio_postgres::connect(&database, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let connection_handle = tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let schema = format!("test_roster_{}", &token()[..24]);
+    db.batch_execute(&format!(
+        "CREATE SCHEMA {schema}; SET search_path TO {schema}"
+    ))
+    .await
+    .unwrap();
+    // Upgrade an existing v3 deployment with a room and a registered device.
+    db.batch_execute(include_str!("../migrations/001_tools.sql"))
+        .await
+        .unwrap();
+    db.batch_execute(include_str!("../migrations/002_seating.sql"))
+        .await
+        .unwrap();
+    db.batch_execute(include_str!("../migrations/003_lifecycle.sql"))
+        .await
+        .unwrap();
+    let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
+    let config = Config {
+        bind: "127.0.0.1:0".into(),
+        origin: String::new(),
+        database_url: format!(
+            "{database} options='-c search_path={schema} -c statement_timeout=10000'"
+        ),
+        static_dir: "../../web/dist".into(),
+        trusted_proxies: vec![],
+        admin_username: "test-admin".into(),
+        admin_password_hash: Argon2::default()
+            .hash_password(b"synthetic-test-password", &salt)
+            .unwrap()
+            .to_string(),
+    };
+    let (mut h, server) = start(config.clone()).await;
+    let unauth = json!({"request_id":token(),"contest_id":"first","base_version":0,"operation":{"kind":"create","name":"合成第一场"}});
+    for path in ["roster/preview", "roster/commit"] {
+        assert_eq!(h.post(path, &unauth).await.status(), 401);
+    }
+    assert_eq!(
+        h.client
+            .get(format!("{}/api/roster/first/history", h.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    h.login().await;
+    assert_eq!(
+        h.client
+            .post(format!("{}/api/roster/preview", h.url))
+            .header("Cookie", &h.cookie)
+            .json(&unauth)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let mut first = unauth;
+    roster_commit(&h, &mut first).await;
+    let mut second = roster_input(&h, "second", json!({"kind":"create","name":"合成第二场"})).await;
+    roster_commit(&h, &mut second).await;
+    let mut room = room_input("room", 1, 3);
+    room["seats"][0]["expected_ip"] = json!("127.0.0.1");
+    preview_room(&h, &mut room).await;
+    assert_eq!(h.post("rooms/save", &room).await.status(), 200);
+    let tsv = "\u{feff}code\tname\tschool\r\n001\t 合成 甲 \t 合成学校 \r\n002\t合成乙\t合成学校\n003\t合成丙\t合成学校\n";
+    let mut import = roster_input(&h, "first", json!({"kind":"import","text":tsv})).await;
+    let result = roster_commit(&h, &mut import).await;
+    let imported = h.state().await["roster"]["contests"][0]["participants"].clone();
+    assert_eq!(
+        h.post("roster/commit", &import)
+            .await
+            .json::<Value>()
+            .await
+            .unwrap(),
+        result
+    );
+    let mut reused = import.clone();
+    reused["operation"]["text"] = json!("different");
+    assert_eq!(h.post("roster/commit", &reused).await.status(), 409);
+    for invalid in [
+        "code\tname\tschool\n001\t甲\t校\n001\t乙\t校",
+        "code\tname\tschool\n004\t\t校",
+        "wrong\nA\t甲\t校",
+    ] {
+        let mut bad = roster_input(&h, "first", json!({"kind":"import","text":invalid})).await;
+        assert!(
+            !roster_preview(&h, &mut bad).await["errors"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(h.post("roster/commit", &bad).await.status(), 400);
+        assert_eq!(
+            h.state().await["roster"]["contests"][0]["participants"],
+            imported
+        );
+    }
+    let mut repeat = roster_input(&h, "first", json!({"kind":"import","text":tsv})).await;
+    assert!(
+        roster_preview(&h, &mut repeat).await["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["kind"] == "unchanged")
+    );
+    assert_eq!(h.post("roster/commit", &repeat).await.status(), 200);
+    assert_eq!(
+        h.state().await["roster"]["contests"][0]["participants"],
+        imported
+    );
+    let mut missing = roster_input(
+        &h,
+        "first",
+        json!({"kind":"import","text":"code\tname\tschool\n001\t修正甲\t校"}),
+    )
+    .await;
+    roster_commit(&h, &mut missing).await;
+    assert_eq!(
+        h.state().await["roster"]["contests"][0]["participants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let mut other = roster_input(&h, "second", json!({"kind":"import","text":tsv})).await;
+    roster_commit(&h, &mut other).await;
+    assert_ne!(
+        h.state().await["roster"]["contests"][1]["participants"][0]["id"],
+        imported[0]["id"]
+    );
+    let mut auto = roster_input(&h, "first", json!({"kind":"auto","room_ids":["room"]})).await;
+    roster_preview(&h, &mut auto).await;
+    // Preview invalidation on room revision, with no roster edits.
+    room["request_id"] = json!(token());
+    room["base_version"] = json!(1);
+    room["name"] = json!("重命名机房");
+    preview_room(&h, &mut room).await;
+    assert_eq!(h.post("rooms/save", &room).await.status(), 200);
+    assert_eq!(h.post("roster/commit", &auto).await.status(), 409);
+    roster_preview(&h, &mut auto).await;
+    let mut concurrent = auto.clone();
+    concurrent["request_id"] = json!(token());
+    let (a, b) = tokio::join!(
+        h.post("roster/commit", &auto),
+        h.post("roster/commit", &concurrent)
+    );
+    let mut codes = vec![a.status().as_u16(), b.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, vec![200, 409]);
+    let state = h.state().await;
+    let people = state["roster"]["contests"][0]["participants"]
+        .as_array()
+        .unwrap();
+    let p = people[0]["id"].clone();
+    let q = people[1]["id"].clone();
+    let a = people[0]["seat_id"].clone();
+    let b = people[1]["seat_id"].clone();
+    let mut duplicate = roster_input(
+        &h,
+        "first",
+        json!({"kind":"assign","changes":[{"participant_id":p,"seat_id":b}]}),
+    )
+    .await;
+    assert!(
+        !roster_preview(&h, &mut duplicate).await["errors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(h.post("roster/commit", &duplicate).await.status(), 400);
+    let mut swap=roster_input(&h,"first",json!({"kind":"assign","changes":[{"participant_id":p,"seat_id":b},{"participant_id":q,"seat_id":a}]})).await;
+    let swapped = roster_commit(&h, &mut swap).await;
+    assert_eq!(
+        h.state().await["roster"]["contests"][0]["participants"][0]["seat_id"],
+        b
+    );
+    let mut cross = roster_input(
+        &h,
+        "second",
+        json!({"kind":"assign","changes":[{"participant_id":p,"seat_id":a}]}),
+    )
+    .await;
+    assert_eq!(h.post("roster/preview", &cross).await.status(), 400);
+    cross = roster_input(&h, "second", json!({"kind":"auto","room_ids":["room"]})).await;
+    roster_commit(&h, &mut cross).await; // Same seats, different contest.
+    let mut shrink = room_input("room", 1, 1);
+    shrink["base_version"] = json!(2);
+    assert_eq!(h.post("rooms/preview", &shrink).await.status(), 409);
+    // Numbering changes preserve stable IDs and all allocations.
+    room["base_version"] = json!(2);
+    room["start_number"] = json!(10);
+    for (i, seat) in room["seats"].as_array_mut().unwrap().iter_mut().enumerate() {
+        seat["number"] = json!(10 + i);
+    }
+    preview_room(&h, &mut room).await;
+    assert_eq!(h.post("rooms/save", &room).await.status(), 200);
+    assert_eq!(
+        h.state().await["roster"]["contests"][0]["participants"][0]["seat_id"],
+        b
+    );
+    let mut release = roster_input(
+        &h,
+        "first",
+        json!({"kind":"assign","changes":[{"participant_id":p,"seat_id":null}]}),
+    )
+    .await;
+    roster_commit(&h, &mut release).await;
+    let mut overflow = roster_input(
+        &h,
+        "first",
+        json!({"kind":"import","text":"code\tname\tschool\n004\t新选手\t校"}),
+    )
+    .await;
+    roster_commit(&h, &mut overflow).await;
+    let mut capacity = roster_input(&h, "first", json!({"kind":"auto","room_ids":["room"]})).await;
+    assert!(
+        !roster_preview(&h, &mut capacity).await["errors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(h.post("roster/commit", &capacity).await.status(), 400);
+    // Code correction keeps stable ID. Reimporting the old code must create a distinct participant.
+    let mut edit=roster_input(&h,"first",json!({"kind":"edit","participant_id":p,"code":"NEW","name":"修正姓名","school":"修正学校"})).await;
+    roster_commit(&h, &mut edit).await;
+    let mut reimport = roster_input(
+        &h,
+        "first",
+        json!({"kind":"import","text":"code\tname\tschool\n001\t另一选手\t校"}),
+    )
+    .await;
+    roster_commit(&h, &mut reimport).await;
+    let state = h.state().await;
+    assert_eq!(
+        state["roster"]["contests"][0]["participants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(
+        state["roster"]["contests"][0]["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == p)
+            .unwrap()["code"],
+        "NEW"
+    );
+    let mut removed = roster_input(
+        &h,
+        "first",
+        json!({"kind":"assign","changes":[{"participant_id":p,"seat_id":"missing-seat"}]}),
+    )
+    .await;
+    assert_eq!(h.post("roster/preview", &removed).await.status(), 409);
+    removed["operation"] =
+        json!({"kind":"edit","participant_id":p,"code":"002","name":"甲","school":"校"});
+    assert!(
+        !roster_preview(&h, &mut removed).await["errors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Real authenticated device protocol, synthetic network facts.
+    let enrollment = token();
+    let credential = token();
+    assert_eq!(
+        h.post(
+            "devices",
+            &json!({"id":"roster-device","name":"合成设备","enrollment_token":enrollment})
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        h.post(
+            "registration-window",
+            &json!({"request_id":token(),"base_version":1,"open":true})
+        )
+        .await
+        .status(),
+        200
+    );
+    h.device("register","",&json!({"protocol_version":1,"device_id":"roster-device","enrollment_token":enrollment,"device_token":credential})).await.error_for_status().unwrap();
+    h.device(
+        "heartbeat",
+        &credential,
+        &json!({"protocol_version":1,"boot_id":"roster","agent_version":"test"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    // A valid manual preview becomes stale when a device is disabled.
+    let mut manual = roster_input(&h, "first", json!({"kind":"assign","changes":[{"participant_id":p,"seat_id":a},{"participant_id":q,"seat_id":null}]})).await;
+    roster_preview(&h, &mut manual).await;
+    let disable = device_action(&h, "roster-device", "disable").await;
+    assert_eq!(h.post("devices/action", &disable).await.status(), 200);
+    assert_ne!(h.post("roster/commit", &manual).await.status(), 200);
+    let blocked = roster_preview(&h, &mut manual).await;
+    assert!(!blocked["errors"].as_array().unwrap().is_empty());
+    let enable = device_action(&h, "roster-device", "enable").await;
+    assert_eq!(h.post("devices/action", &enable).await.status(), 200);
+    db.batch_execute("UPDATE devices SET needs_review=true WHERE id='roster-device'")
+        .await
+        .unwrap();
+    assert!(
+        !roster_preview(&h, &mut manual).await["errors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    db.batch_execute("UPDATE devices SET needs_review=false,last_seen=0 WHERE id='roster-device'")
+        .await
+        .unwrap();
+    assert!(
+        roster_preview(&h, &mut manual).await["errors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Inject a storage failure after participant/version writes. The transaction must roll back.
+    let before_failure = h.state().await["roster"].clone();
+    db.batch_execute("CREATE FUNCTION reject_assignment() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic failure'; END $$; CREATE TRIGGER assignment_failure BEFORE INSERT ON assignments FOR EACH ROW EXECUTE FUNCTION reject_assignment()").await.unwrap();
+    assert_eq!(h.post("roster/commit", &manual).await.status(), 500);
+    assert_eq!(h.state().await["roster"], before_failure);
+    db.batch_execute(
+        "DROP TRIGGER assignment_failure ON assignments; DROP FUNCTION reject_assignment()",
+    )
+    .await
+    .unwrap();
+    let preserved = h.state().await["roster"].clone();
+    for action in ["disable", "enable", "revoke"] {
+        let body = device_action(&h, "roster-device", action).await;
+        assert_eq!(h.post("devices/action", &body).await.status(), 200);
+        assert_eq!(h.state().await["roster"], preserved);
+    }
+    // Database FK/unique constraints remain a second line of defense.
+    assert!(
+        db.execute(
+            "INSERT INTO assignments VALUES ('first',$1,$2)",
+            &[&p.as_str().unwrap(), &a.as_str().unwrap()]
+        )
+        .await
+        .is_err()
+    );
+    let saved = h.state().await["roster"].clone();
+    let events_before: i64 = db
+        .query_one("SELECT count(*) FROM roster_events", &[])
+        .await
+        .unwrap()
+        .get(0);
+    server.abort();
+    let _ = server.await;
+    let (mut restarted, server) = start(config).await;
+    assert_eq!(
+        restarted
+            .client
+            .get(format!("{}/api/state", restarted.url))
+            .header("Cookie", &h.cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    restarted.login().await;
+    assert_eq!(restarted.state().await["roster"], saved);
+    assert_eq!(
+        restarted
+            .post("roster/commit", &swap)
+            .await
+            .json::<Value>()
+            .await
+            .unwrap(),
+        swapped
+    );
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM roster_events", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        events_before
+    );
+    let history: Value = restarted
+        .client
+        .get(format!("{}/api/roster/first/history", restarted.url))
+        .header("Cookie", &restarted.cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["request_id"] == swap["request_id"])
+    );
+    assert!(history[0]["result"]["rooms"].is_array());
     server.abort();
     let _ = server.await;
     db.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))

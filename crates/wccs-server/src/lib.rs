@@ -4,6 +4,7 @@ mod auth;
 mod device;
 mod lifecycle;
 mod management;
+mod roster;
 mod seating;
 
 use axum::{
@@ -114,7 +115,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=3) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=4) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -123,6 +124,10 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     }
     if versions[0].get::<_, i32>(0) <= 2 {
         tx.batch_execute(include_str!("../migrations/003_lifecycle.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 3 {
+        tx.batch_execute(include_str!("../migrations/004_roster.sql"))
             .await?;
     }
     tx.commit().await?;
@@ -163,6 +168,9 @@ pub fn router(app: App) -> Router {
         .route("/api/session", get(auth::session))
         .route("/api/logout", post(auth::logout))
         .route("/api/state", get(management::state))
+        .route("/api/roster/preview", post(roster::preview))
+        .route("/api/roster/commit", post(roster::commit))
+        .route("/api/roster/{id}/history", get(roster::history))
         .route("/api/devices", post(management::create_device))
         .route("/api/registration-window", post(lifecycle::window))
         .route("/api/devices/action", post(lifecycle::action))

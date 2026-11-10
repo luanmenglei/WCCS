@@ -83,9 +83,10 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
         .await?;
     let registration_window = json!({"version":window.get::<_,i64>(0),"closes_at":window.get::<_,i64>(1),"open":window.get::<_,i64>(1)>now()});
     let seating = crate::seating::snapshot(&tx).await?;
+    let roster = crate::roster::snapshot(&tx).await?;
     tx.commit().await?;
     Ok(Json(
-        json!({"registration_window":registration_window,"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices}),
+        json!({"roster":roster,"registration_window":registration_window,"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices}),
     ))
 }
 

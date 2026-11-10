@@ -255,6 +255,17 @@ async fn room_preview(tx: &Transaction<'_>, input: &RoomWrite) -> ApiResult<Valu
     let old_seats = old
         .map(|room| room["seats"].as_array().unwrap().as_slice())
         .unwrap_or(&[]);
+    let removed_ids: Vec<String> = old_seats
+        .iter()
+        .filter(|seat| {
+            seat["row"].as_i64().unwrap() >= i64::from(input.rows)
+                || seat["column"].as_i64().unwrap() >= i64::from(input.columns)
+        })
+        .map(|seat| seat["id"].as_str().unwrap().to_string())
+        .collect();
+    if let Some(row) = tx.query_opt("SELECT c.name,p.code FROM assignments a JOIN contests c ON c.id=a.contest_id JOIN participants p ON p.id=a.participant_id WHERE a.seat_id=ANY($1) LIMIT 1", &[&removed_ids]).await? {
+        return Err(ApiError::conflict(&format!("移除座位仍分配给比赛 {} 的选手 {}，请在对应比赛先调整或解除分配",row.get::<_,String>(0),row.get::<_,String>(1))));
+    }
     let mut changes = Vec::new();
     for seat in &input.seats {
         let previous = old_seats

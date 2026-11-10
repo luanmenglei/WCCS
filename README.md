@@ -64,7 +64,7 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 服务与客户端分别运行在终端。浏览器访问 `http://127.0.0.1:8787/`，登录材料位于忽略目录 `local/m2/admin-access.json`。选择候选或自定义工具，编辑完整路径、选择目标并发布，设备区显示期望/实际配置版本和逐项结果。前端生产资源位于 `web/dist/`，由服务同源提供。
 
-上述命令使用本轮独立 PostgreSQL 测试集群。新环境初始化、Linux 原生启动、浏览器步骤及全部证据见 [M2 任务记录](docs/tasks/m2-tool-configuration.md)。本切片使用单管理员、一份全局配置及目标集合、HTTP(S) 轮询与普通 Windows 进程入口。
+上述命令使用本轮独立 PostgreSQL 测试集群。新环境初始化、Linux 原生启动、浏览器步骤及全部证据见 [M2 任务记录](docs/tasks/m2-tool-configuration.md)。当前使用持久操作员、角色与机房授权、一份全局配置及目标集合、HTTP(S) 轮询与普通 Windows 进程入口。操作员页面、全局事件、迁移及完整验证见 [操作员与事件记录](docs/tasks/m2-operator-events.md)。
 
 机房操作从“机房与座位”进入，创建布局、应用编号规则和批量 IP 映射，预览后保存。选择整机房或部分座位可展开实际检查目标。详细步骤、代理配置与验收边界见 [机房座位表记录](docs/tasks/m2-room-seating.md)。
 

@@ -2,6 +2,7 @@
 
 mod auth;
 mod device;
+mod lifecycle;
 mod management;
 mod seating;
 
@@ -113,11 +114,15 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1 | 2) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=3) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
         tx.batch_execute(include_str!("../migrations/002_seating.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 2 {
+        tx.batch_execute(include_str!("../migrations/003_lifecycle.sql"))
             .await?;
     }
     tx.commit().await?;
@@ -159,6 +164,10 @@ pub fn router(app: App) -> Router {
         .route("/api/logout", post(auth::logout))
         .route("/api/state", get(management::state))
         .route("/api/devices", post(management::create_device))
+        .route("/api/registration-window", post(lifecycle::window))
+        .route("/api/devices/action", post(lifecycle::action))
+        .route("/api/devices/{id}/history", get(lifecycle::history))
+        .route("/api/device/rotate", post(lifecycle::rotate))
         .route("/api/configuration", post(management::publish))
         .route("/api/recheck", post(management::recheck))
         .route("/api/rooms/preview", post(seating::preview))

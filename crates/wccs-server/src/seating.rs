@@ -126,7 +126,7 @@ pub(crate) async fn snapshot(tx: &Transaction<'_>) -> ApiResult<Value> {
     let device_rows = tx
         .query(
             "SELECT id, peer_ip, observed_ip, address_source, reported_ips, previous_ip,
-                address_version, needs_review, excluded, last_seen,
+                address_version, needs_review, excluded, last_seen, lifecycle,
                 credential_hash IS NOT NULL AS registered
          FROM devices ORDER BY id",
             &[],
@@ -146,8 +146,9 @@ pub(crate) async fn snapshot(tx: &Transaction<'_>) -> ApiResult<Value> {
                 "address_version": row.get::<_,i64>("address_version"),
                 "needs_review": row.get::<_,bool>("needs_review"),
                 "excluded": row.get::<_,bool>("excluded"),
+                "lifecycle": row.get::<_,String>("lifecycle"),
                 "registered": row.get::<_,bool>("registered"),
-                "online": seen.is_some_and(|time| now()-time < ONLINE_SECONDS),
+                "online": row.get::<_,bool>("registered") && seen.is_some_and(|time| now()-time < ONLINE_SECONDS),
             })
         })
         .collect();
@@ -393,6 +394,14 @@ async fn selected_targets(
             "unbound" => "unregistered",
             "conflict" => "conflict",
             "offline" => "offline",
+            _ if state["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| Some(&d["id"]) == device && d["lifecycle"] != "enabled") =>
+            {
+                "disabled"
+            }
             _ if !configured.as_array().unwrap().contains(device.unwrap()) => {
                 "outside_configuration"
             }

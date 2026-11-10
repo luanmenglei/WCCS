@@ -136,9 +136,17 @@ pub struct Job {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HeartbeatReply {
+    #[serde(default = "enabled_state")]
+    pub lifecycle: String,
+    #[serde(default)]
+    pub rotation_id: Option<String>,
     pub protocol_version: u32,
     pub server_time: i64,
     pub job: Option<Job>,
+}
+
+fn enabled_state() -> String {
+    "enabled".into()
 }
 
 #[derive(Debug, Deserialize, Serialize)]

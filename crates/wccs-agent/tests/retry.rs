@@ -55,6 +55,72 @@ fn reply(stream: &mut TcpStream, value: &Value) {
 }
 
 #[test]
+fn credential_rotation_recovers_before_and_after_commit() {
+    for committed in [false, true] {
+        let directory = std::env::temp_dir().join(format!("wccs-rotation-{}", token()));
+        fs::create_dir(&directory).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let identity = directory.join("device.json");
+        let old = token();
+        fs::write(&identity,serde_json::to_vec(&json!({"server":format!("http://{}",listener.local_addr().unwrap()),"device_id":"rotation","enrollment_token":token(),"device_token":old})).unwrap()).unwrap();
+        let worker = thread::spawn(move || {
+            let heartbeat = json!({"protocol_version":1,"server_time":now(),"lifecycle":"enabled","rotation_id":"rotate-test","job":null});
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(request(&mut stream).0.contains("heartbeat"));
+            reply(&mut stream, &heartbeat);
+            drop(stream);
+            let (mut stream, _) = listener.accept().unwrap();
+            let (path, first) = request(&mut stream);
+            assert!(path.contains("rotate"));
+            drop(stream);
+            // The subprocess exits with its durable candidate after losing the response.
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(request(&mut stream).0.contains("heartbeat"));
+            if committed {
+                write!(stream,"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+                drop(stream);
+                let (mut stream, _) = listener.accept().unwrap();
+                assert!(request(&mut stream).0.contains("heartbeat"));
+                reply(
+                    &mut stream,
+                    &json!({"protocol_version":1,"server_time":now(),"lifecycle":"enabled","rotation_id":null,"job":null}),
+                );
+            } else {
+                reply(&mut stream, &heartbeat);
+                drop(stream);
+                let (mut stream, _) = listener.accept().unwrap();
+                let (path, second) = request(&mut stream);
+                assert!(path.contains("rotate"));
+                assert_eq!(first, second);
+                reply(&mut stream, &json!({"ok":true}));
+            }
+            first["new_token"].as_str().unwrap().to_string()
+        });
+        let run = || {
+            Command::new(env!("CARGO_BIN_EXE_wccs-agent"))
+                .arg("--identity")
+                .arg(&identity)
+                .arg("--once")
+                .output()
+                .unwrap()
+        };
+        assert!(!run().status.success());
+        assert!(identity.with_extension("rotation.json").exists());
+        assert_eq!(
+            fs::read_to_string(identity.with_extension("credential")).unwrap(),
+            old
+        );
+        assert!(run().status.success());
+        assert_eq!(
+            fs::read_to_string(identity.with_extension("credential")).unwrap(),
+            worker.join().unwrap()
+        );
+        assert!(!identity.with_extension("rotation.json").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[test]
 fn lost_result_response_retries_identical_persisted_payload() {
     let directory = std::env::temp_dir().join(format!("wccs-agent-{}", token()));
     fs::create_dir(&directory).unwrap();

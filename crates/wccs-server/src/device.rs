@@ -25,35 +25,67 @@ pub async fn register(
     }
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
-    let row = tx.query_opt("SELECT enrollment_hash,enrollment_expires,credential_hash FROM devices WHERE id=$1 FOR UPDATE", &[&input.device_id]).await?.ok_or_else(|| ApiError::unauthorized("注册材料无效"))?;
-    let current: Option<String> = row.get(2);
+    crate::seating::lock(&tx).await?;
+    crate::lifecycle::expire(&tx).await?;
+    let row = tx.query_opt("SELECT enrollment_hash,enrollment_expires,credential_hash,lifecycle,applicant_hash,enrollment_generation,application_id FROM devices WHERE id=$1", &[&input.device_id]).await?.ok_or_else(|| ApiError::unauthorized("注册材料无效"))?;
     let credential = digest(&input.device_token);
-    if let Some(current) = current {
-        if current != credential {
-            return Err(ApiError::conflict("设备已注册，不能使用旧注册材料接管身份"));
+    let state: String = row.get(3);
+    if matches!(state.as_str(), "enabled" | "disabled")
+        && row.get::<_, Option<String>>(2).as_deref() == Some(&credential)
+    {
+        return Ok(Json(
+            json!({"device_id":input.device_id,"protocol_version":PROTOCOL_VERSION,"status":state}),
+        ));
+    }
+    if state != "pending"
+        || row.get::<_, String>(0) != digest(&input.enrollment_token)
+        || row.get::<_, i64>(1) <= now()
+    {
+        return Err(ApiError::unauthorized(
+            "注册材料无效、已使用或已过期，请管理员核对",
+        ));
+    }
+    let application = digest(&format!("{}:{}", row.get::<_, String>(0), credential));
+    if let Some(candidate) = row.get::<_, Option<String>>(4) {
+        if candidate != credential {
+            return Err(ApiError::conflict("此材料已关联另一申请，需管理员重新授权"));
         }
     } else {
-        if row.get::<_, String>(0) != digest(&input.enrollment_token)
-            || row.get::<_, i64>(1) <= now()
-        {
-            return Err(ApiError::unauthorized("注册材料无效或已过期"));
-        }
-        tx.execute(
-            "UPDATE devices SET credential_hash=$1 WHERE id=$2",
-            &[&credential, &input.device_id],
-        )
-        .await
-        .map_err(|error| {
-            if error.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
-                ApiError::conflict("设备凭据已绑定其他设备")
+        crate::lifecycle::reserve(&tx, &credential, &input.device_id, row.get(5)).await?;
+        let open: bool = tx
+            .query_one(
+                "SELECT closes_at>$1 FROM registration_window WHERE id=1",
+                &[&now()],
+            )
+            .await?
+            .get(0);
+        let auto = open && row.get::<_, i64>(5) == 1;
+        tx.execute("UPDATE devices SET applicant_hash=$2,application_id=$3,application_at=$4,lifecycle_version=lifecycle_version+1,
+            lifecycle=CASE WHEN $5 THEN 'enabled' ELSE 'pending' END,
+            credential_hash=CASE WHEN $5 THEN $2 ELSE NULL END WHERE id=$1",
+            &[&input.device_id,&credential,&application,&now(),&auto]).await?;
+        crate::lifecycle::event(
+            &tx,
+            &input.device_id,
+            if auto {
+                "automatically_approved"
             } else {
-                error.into()
-            }
-        })?;
+                "registration_requested"
+            },
+            &application,
+        )
+        .await?;
     }
+    let status: String = tx
+        .query_one(
+            "SELECT lifecycle FROM devices WHERE id=$1",
+            &[&input.device_id],
+        )
+        .await?
+        .get(0);
     tx.commit().await?;
     Ok(Json(
-        json!({"device_id":input.device_id,"protocol_version":PROTOCOL_VERSION}),
+        json!({"device_id":input.device_id,"protocol_version":PROTOCOL_VERSION,"status":status,"application_id":application}),
     ))
 }
 
@@ -63,7 +95,6 @@ pub async fn heartbeat(
     headers: HeaderMap,
     Json(input): Json<Heartbeat>,
 ) -> ApiResult<Json<HeartbeatReply>> {
-    let id = auth::device(&app, &headers).await?;
     if input.protocol_version != PROTOCOL_VERSION
         || !valid_id(&input.boot_id)
         || input.agent_version.len() > 80
@@ -79,6 +110,7 @@ pub async fn heartbeat(
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
     crate::seating::lock(&tx).await?;
+    let id = auth::device(&tx, &headers).await?;
     tx.execute(
         "UPDATE devices SET last_seen=$1,boot_id=$2,agent_version=$3,peer_ip=$5,
         previous_ip=CASE WHEN observed_ip IS DISTINCT FROM $6 THEN observed_ip ELSE previous_ip END,
@@ -87,7 +119,7 @@ pub async fn heartbeat(
         observed_ip=$6,address_source=$7,reported_ips=$8 WHERE id=$4",
         &[&now(), &input.boot_id, &input.agent_version, &id, &peer.ip().to_canonical().to_string(), &observed, &source, &serde_json::to_value(&input.reported_ips).unwrap()],
     ).await?;
-    let row = tx.query_opt("SELECT j.id,j.expires_at,c.snapshot FROM devices d JOIN jobs j ON d.desired_job=j.id JOIN configurations c ON c.version=j.config_version WHERE d.id=$1 AND j.result IS NULL AND j.expires_at>$2", &[&id,&now()]).await?;
+    let row = tx.query_opt("SELECT j.id,j.expires_at,c.snapshot FROM devices d JOIN jobs j ON d.desired_job=j.id JOIN configurations c ON c.version=j.config_version WHERE d.id=$1 AND d.lifecycle='enabled' AND j.cancelled_at IS NULL AND j.result IS NULL AND j.expires_at>$2", &[&id,&now()]).await?;
     let job = match row {
         Some(row) => Some(Job {
             job_id: row.get(0),
@@ -96,10 +128,26 @@ pub async fn heartbeat(
         }),
         None => None,
     };
+    let status = tx
+        .query_one(
+            "SELECT lifecycle,rotation_id,rotation_expires FROM devices WHERE id=$1",
+            &[&id],
+        )
+        .await?;
+    let rotation_id = if status
+        .get::<_, Option<i64>>(2)
+        .is_some_and(|time| time > now())
+    {
+        status.get(1)
+    } else {
+        None
+    };
     tx.commit().await?;
     Ok(Json(HeartbeatReply {
         protocol_version: PROTOCOL_VERSION,
         server_time: now(),
+        lifecycle: status.get(0),
+        rotation_id,
         job,
     }))
 }
@@ -109,13 +157,18 @@ pub async fn result(
     headers: HeaderMap,
     Json(input): Json<CheckResult>,
 ) -> ApiResult<Json<Value>> {
-    let id = auth::device(&app, &headers).await?;
+    let mut db = app.db.lock().await;
+    let tx = db.transaction().await?;
+    crate::seating::lock(&tx).await?;
+    let id = auth::device(&tx, &headers).await?;
     if input.device_id != id {
         return Err(ApiError::forbidden("结果设备身份不匹配"));
     }
-    let mut db = app.db.lock().await;
-    let tx = db.transaction().await?;
-    let row = tx.query_opt("SELECT j.result,j.expires_at,c.snapshot FROM jobs j JOIN configurations c ON c.version=j.config_version WHERE j.id=$1 AND j.device_id=$2 FOR UPDATE OF j", &[&input.job_id,&id]).await?.ok_or_else(|| ApiError::forbidden("任务未授权给此设备"))?;
+
+    let row = tx.query_opt("SELECT j.result,j.expires_at,c.snapshot,j.cancelled_at FROM jobs j JOIN configurations c ON c.version=j.config_version WHERE j.id=$1 AND j.device_id=$2 FOR UPDATE OF j", &[&input.job_id,&id]).await?.ok_or_else(|| ApiError::forbidden("任务未授权给此设备"))?;
+    if row.get::<_, Option<i64>>(3).is_some() {
+        return Err(ApiError::new(410, "任务已因撤销取消，保留历史记录"));
+    }
     let config: ToolConfiguration =
         serde_json::from_value(row.get(2)).map_err(|_| ApiError::internal())?;
     validate_result(&input, &config).map_err(|message| ApiError::bad(&message))?;

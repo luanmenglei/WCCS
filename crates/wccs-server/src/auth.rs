@@ -153,7 +153,7 @@ pub async fn logout(State(app): State<App>, headers: HeaderMap) -> ApiResult<Res
         .into_response())
 }
 
-pub async fn device(app: &App, headers: &HeaderMap) -> ApiResult<String> {
+pub fn credential_hash(headers: &HeaderMap) -> ApiResult<String> {
     let credential = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -162,13 +162,21 @@ pub async fn device(app: &App, headers: &HeaderMap) -> ApiResult<String> {
     if credential.len() != 64 {
         return Err(ApiError::unauthorized("设备认证失败"));
     }
-    let db = app.db.lock().await;
-    let row = db
-        .query_opt(
-            "SELECT id FROM devices WHERE credential_hash=$1",
-            &[&digest(credential)],
-        )
-        .await?;
-    row.map(|row| row.get(0))
-        .ok_or_else(|| ApiError::unauthorized("设备认证失败"))
+    Ok(digest(credential))
+}
+
+// The caller holds the configuration fence through authentication and mutation.
+pub async fn device(
+    tx: &tokio_postgres::Transaction<'_>,
+    headers: &HeaderMap,
+) -> ApiResult<String> {
+    let row = tx.query_opt("SELECT id FROM devices WHERE credential_hash=$1 AND lifecycle IN ('enabled','disabled')", &[&credential_hash(headers)?]).await?
+        .ok_or_else(||ApiError::unauthorized("设备认证失败"))?;
+    let id: String = row.get(0);
+    if let Some(claim) = headers.get("x-wccs-device-id")
+        && claim.to_str().ok() != Some(&id)
+    {
+        return Err(ApiError::forbidden("设备身份不匹配"));
+    }
+    Ok(id)
 }

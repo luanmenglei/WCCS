@@ -11,6 +11,10 @@ use wccs_protocol::{
 pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     auth::admin(&app, &headers, false).await?;
     let mut db = app.db.lock().await;
+    let expiry = db.transaction().await?;
+    crate::seating::lock(&expiry).await?;
+    crate::lifecycle::expire(&expiry).await?;
+    expiry.commit().await?;
     let tx = db
         .build_transaction()
         .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
@@ -37,6 +41,8 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
         .query(
             "SELECT d.id, d.name, d.last_seen, d.boot_id, d.agent_version,
                 d.credential_hash IS NOT NULL AS registered, d.desired_job,
+                d.lifecycle,d.lifecycle_version,d.application_id,d.application_at,d.enrollment_expires,
+                d.enrollment_generation,d.rotation_id,d.rotation_expires,
                 j.config_version, j.expires_at, r.result, r.received_at, r.id AS result_job
          FROM devices d
          LEFT JOIN jobs j ON j.id=d.desired_job
@@ -56,8 +62,12 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
         let expires: Option<i64> = row.get("expires_at");
         json!({
             "id":row.get::<_,String>("id"), "name":row.get::<_,String>("name"),
+            "lifecycle":row.get::<_,String>("lifecycle"), "lifecycle_version":row.get::<_,i64>("lifecycle_version"),
+            "application_id":row.get::<_,Option<String>>("application_id"),"application_at":row.get::<_,Option<i64>>("application_at"),
+            "enrollment_expires":row.get::<_,i64>("enrollment_expires"),"enrollment_generation":row.get::<_,i64>("enrollment_generation"),
+            "rotation_id":row.get::<_,Option<String>>("rotation_id"),"rotation_expires":row.get::<_,Option<i64>>("rotation_expires"),
             "registered":row.get::<_,bool>("registered"), "last_seen":last_seen,
-            "online":last_seen.is_some_and(|seen| now()-seen < ONLINE_SECONDS),
+            "online":row.get::<_,bool>("registered") && last_seen.is_some_and(|seen| now()-seen < ONLINE_SECONDS),
             "boot_id":row.get::<_,Option<String>>("boot_id"), "agent_version":row.get::<_,Option<String>>("agent_version"),
             "desired_job":desired,"desired_version":row.get::<_,Option<i64>>("config_version"),
             "expired":expires.is_some_and(|time| time <= now()) && result_job != desired,
@@ -65,10 +75,17 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
             "stale":result_job.is_some() && result_job != desired,
         })
     }).collect();
+    let window = tx
+        .query_one(
+            "SELECT version,closes_at FROM registration_window WHERE id=1",
+            &[],
+        )
+        .await?;
+    let registration_window = json!({"version":window.get::<_,i64>(0),"closes_at":window.get::<_,i64>(1),"open":window.get::<_,i64>(1)>now()});
     let seating = crate::seating::snapshot(&tx).await?;
     tx.commit().await?;
     Ok(Json(
-        json!({"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices}),
+        json!({"registration_window":registration_window,"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices}),
     ))
 }
 
@@ -125,6 +142,7 @@ pub async fn create_device(
         )
         .await?;
         audit(&tx, &app.config.admin_username, "create_device", &input.id).await?;
+        crate::lifecycle::event(&tx, &input.id, "created", &input.id).await?;
     }
     tx.commit().await?;
     Ok(Json(json!({"device_id":input.id,"ok":true})))
@@ -154,7 +172,7 @@ pub(crate) async fn previous(
     Ok(None)
 }
 
-async fn targets(tx: &Transaction<'_>, ids: &[String]) -> ApiResult<()> {
+async fn targets(tx: &Transaction<'_>, ids: &[String], enabled_only: bool) -> ApiResult<()> {
     let unique: std::collections::HashSet<_> = ids.iter().collect();
     if ids.is_empty() || ids.len() > 500 || unique.len() != ids.len() {
         return Err(ApiError::bad("请选择 1～500 台不同的目标设备"));
@@ -162,13 +180,13 @@ async fn targets(tx: &Transaction<'_>, ids: &[String]) -> ApiResult<()> {
     for id in ids {
         if tx
             .query_opt(
-                "SELECT id FROM devices WHERE id=$1 AND credential_hash IS NOT NULL",
-                &[id],
+                "SELECT id FROM devices WHERE id=$1 AND credential_hash IS NOT NULL AND (lifecycle='enabled' OR (NOT $2 AND lifecycle='disabled'))",
+                &[id, &enabled_only],
             )
             .await?
             .is_none()
         {
-            return Err(ApiError::bad("目标设备不存在或尚未注册"));
+            return Err(ApiError::bad("目标设备状态不允许本次操作，请核对注册与启用状态"));
         }
     }
     Ok(())
@@ -245,7 +263,7 @@ pub async fn publish(
             "配置已更新到 v{version}，请重新加载后编辑"
         )));
     }
-    targets(&tx, &input.targets).await?;
+    targets(&tx, &input.targets, false).await?;
     let next = version + 1;
     let snapshot = serde_json::to_value(ToolConfiguration {
         schema_version: 1,
@@ -298,7 +316,7 @@ pub async fn recheck(
     if version == 0 || version != input.base_version {
         return Err(ApiError::conflict("配置已变化，请重新加载后检查"));
     }
-    targets(&tx, &input.targets).await?;
+    targets(&tx, &input.targets, true).await?;
     let configured: Value = tx
         .query_one(
             "SELECT targets FROM configurations WHERE version=$1",

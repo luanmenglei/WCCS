@@ -170,6 +170,8 @@ a {
 }
 .sidebar nav {
   margin-top: 28px;
+  min-height: 0;
+  overflow-y: auto;
 }
 .nav-group {
   margin-bottom: 28px;
@@ -196,6 +198,8 @@ a {
   font-weight: 600;
 }
 .account {
+  flex-shrink: 0;
+  overflow-wrap: anywhere;
   margin-top: auto;
   padding: 16px 24px 0;
   border-top: 1px solid var(--line);
@@ -1053,4 +1057,22 @@ progress::-webkit-progress-value {
 .roster-page td,
 .roster-page .mono {
   overflow-wrap: anywhere;
+}
+.event-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.event-detail {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.detail-body dl {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 8px 16px;
+  overflow-wrap: anywhere;
+}
+.detail-body dd {
+  margin: 0;
 }

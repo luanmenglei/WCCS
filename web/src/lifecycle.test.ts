@@ -7,6 +7,7 @@ import { deviceSchema, stateSchema } from "./contracts";
 import { targetPreviewSchema } from "./seating";
 import { DeviceDetails } from "./Devices";
 import { ConfigurationEditor } from "./ConfigurationEditor";
+import { AccessContext } from "./access";
 
 const device = deviceSchema.parse({
   id: "synthetic",
@@ -54,11 +55,26 @@ test("生命周期操作符合合法转换，撤销后提供重新授权", () =>
 });
 test("详情展示生命周期版本及身份代次，断线禁止写入", () => {
   const html = renderToStaticMarkup(
-    createElement(LifecycleControls, {
-      device,
-      disabled: true,
-      onMutate: async () => {},
-    }),
+    createElement(
+      AccessContext.Provider,
+      {
+        value: {
+          id: "admin",
+          username: "admin",
+          display_name: "管理员",
+          csrf: "test",
+          role: "admin",
+          all_rooms: true,
+          room_ids: [],
+          version: 1,
+        },
+      },
+      createElement(LifecycleControls, {
+        device,
+        disabled: true,
+        onMutate: async () => {},
+      }),
+    ),
   );
   assert.match(html, /已启用/);
   assert.match(html, /状态版本/);

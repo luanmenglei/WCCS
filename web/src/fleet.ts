@@ -41,6 +41,16 @@ export function matchesSearch(
 }
 
 export const pages = {
+  operators: {
+    label: "操作员",
+    group: "系统管理",
+    description: "创建账号、核对权限并管理账号状态与登录凭据。",
+  },
+  events: {
+    label: "全局事件",
+    group: "系统管理",
+    description: "按授权范围查询管理动作、设备上报与任务结果。",
+  },
   roster: {
     label: "选手名单",
     group: "赛前准备",

@@ -1,3 +1,4 @@
+import { useAccess } from "./access";
 import { useState } from "react";
 import { z } from "zod";
 import { api } from "./api";
@@ -36,6 +37,7 @@ export function Roster({
   disabled: boolean;
   onMutate: Mutate;
 }) {
+  const access = useAccess();
   const [text, setText] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
@@ -297,7 +299,10 @@ export function Roster({
                 {contest.name} · {contest.participants.length} 名选手 · v
                 {contest.version}
               </h2>
-              <button disabled={locked} onClick={() => void readHistory()}>
+              <button
+                disabled={loading || !access.allRooms}
+                onClick={() => void readHistory()}
+              >
                 操作历史
               </button>
             </div>

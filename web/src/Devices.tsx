@@ -1,5 +1,6 @@
+import { useAccess } from "./access";
 import { participantLabel, type Contest } from "./roster-model";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   LifecycleControls,
   DeviceHistory,
@@ -32,11 +33,26 @@ export function Devices({
   onRecheck,
   onMutate,
 }: Props) {
+  const access = useAccess();
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [descending, setDescending] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+  useEffect(() => {
+    function followLink() {
+      if (location.hash.startsWith("#/devices?")) {
+        const id = new URLSearchParams(location.hash.split("?")[1]).get(
+          "device_id",
+        );
+        setDetailId(id);
+        setSearch(id ?? "");
+      }
+    }
+    followLink();
+    window.addEventListener("hashchange", followLink);
+    return () => window.removeEventListener("hashchange", followLink);
+  }, []);
   const seats = seatRows(snapshot);
   const addresses = new Map(
     snapshot.seating.devices.map((device) => [device.id, device]),
@@ -142,7 +158,10 @@ export function Devices({
             台在线，共 {snapshot.devices.length} 台 · 每 3 秒刷新
           </p>
         </div>
-        <button disabled={disabled} onClick={() => setCreating(!creating)}>
+        <button
+          disabled={disabled || !access.manage}
+          onClick={() => setCreating(!creating)}
+        >
           新增设备
         </button>
       </div>

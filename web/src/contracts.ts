@@ -97,7 +97,13 @@ export const stateSchema = z.object({
 });
 export const sessionSchema = z.object({
   csrf: z.string(),
+  id: z.string(),
   username: z.string(),
+  display_name: z.string(),
+  role: z.enum(["admin", "operator", "viewer"]),
+  all_rooms: z.boolean(),
+  room_ids: z.array(z.string()),
+  version: z.number().int(),
 });
 export type Tool = z.infer<typeof toolSchema>;
 export type Device = z.infer<typeof deviceSchema>;

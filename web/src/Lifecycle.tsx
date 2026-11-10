@@ -1,3 +1,4 @@
+import { useAccess } from "./access";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { api } from "./api";
@@ -120,6 +121,7 @@ export function LifecycleControls({
   disabled: boolean;
   onMutate: Mutate;
 }) {
+  const access = useAccess();
   const [confirmation, setConfirmation] = useState<Record<
     string,
     unknown
@@ -184,25 +186,31 @@ export function LifecycleControls({
         </p>
       )}
       <div className="actions">
-        {allowedActions(device).map((action) => (
-          <button
-            key={action}
-            disabled={disabled || !!confirmation}
-            onClick={() => {
-              setError("");
-              setConfirmation({
-                device_id: device.id,
-                base_version: device.lifecycle_version,
-                action,
-                ...(action === "reauthorize"
-                  ? { enrollment_token: randomSecret() }
-                  : {}),
-              });
-            }}
-          >
-            {actions[action].label}
-          </button>
-        ))}
+        {allowedActions(device)
+          .filter(
+            (action) =>
+              access.manage ||
+              (access.operate && ["enable", "disable"].includes(action)),
+          )
+          .map((action) => (
+            <button
+              key={action}
+              disabled={disabled || !!confirmation}
+              onClick={() => {
+                setError("");
+                setConfirmation({
+                  device_id: device.id,
+                  base_version: device.lifecycle_version,
+                  action,
+                  ...(action === "reauthorize"
+                    ? { enrollment_token: randomSecret() }
+                    : {}),
+                });
+              }}
+            >
+              {actions[action].label}
+            </button>
+          ))}
       </div>
       {confirmation && (
         <div className="operation-preview">

@@ -1,3 +1,4 @@
+import { Roster } from "./Roster";
 import { ZodError } from "zod";
 import {
   useCallback,
@@ -27,6 +28,7 @@ function message(error: unknown): string {
 }
 
 export function App() {
+  const [contestId, setContestId] = useState("");
   const [page, setPage] = useState(() => pageFromHash(location.hash));
   const [seatSelection, setSeatSelection] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -94,6 +96,7 @@ export function App() {
         sessionEpoch.current++; // Retire in-flight reads from the previous login.
         requestIds.current.clear();
         setSeatSelection([]);
+        setContestId("");
         setMenuOpen(false);
         setSession(null);
         setSnapshot(null);
@@ -137,7 +140,10 @@ export function App() {
     setError("");
     setNotice("");
     const key = JSON.stringify([path, body]);
-    const requestId = requestIds.current.get(key) ?? crypto.randomUUID();
+    const requestId =
+      typeof body.request_id === "string"
+        ? body.request_id
+        : (requestIds.current.get(key) ?? crypto.randomUUID());
     requestIds.current.set(key, requestId);
     try {
       await api(
@@ -162,6 +168,7 @@ export function App() {
           setSession(null);
           setSnapshot(null);
           setSeatSelection([]);
+          setContestId("");
           setBusy(false);
         }
       }
@@ -186,6 +193,7 @@ export function App() {
       sessionEpoch.current++;
       requestIds.current.clear();
       setSeatSelection([]);
+      setContestId("");
       setMenuOpen(false);
       setNotice("");
       setConnectionError("");
@@ -276,6 +284,7 @@ export function App() {
                   sessionEpoch.current++;
                   requestIds.current.clear();
                   setSeatSelection([]);
+                  setContestId("");
                   setMenuOpen(false);
                   setNotice("");
                   setSession(null);
@@ -342,10 +351,43 @@ export function App() {
             {notice}
           </p>
         )}
+        {snapshot && (
+          <label className="panel contest-context">
+            当前比赛
+            <select
+              aria-label="当前比赛"
+              value={contestId}
+              disabled={busy}
+              onChange={(event) => setContestId(event.target.value)}
+            >
+              <option value="">请选择比赛</option>
+              {snapshot.roster.contests.map((contest) => (
+                <option key={contest.id} value={contest.id}>
+                  {contest.name} · {contest.id}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {snapshot ? (
           <>
+            <div className="page-view" hidden={page !== "roster"}>
+              <Roster
+                key={contestId}
+                snapshot={snapshot}
+                contest={snapshot.roster.contests.find(
+                  (c) => c.id === contestId,
+                )}
+                csrf={session.csrf}
+                disabled={busy || !connected}
+                onMutate={mutate}
+              />
+            </div>
             <div className="page-view" hidden={page !== "seats"}>
               <Seats
+                contest={snapshot.roster.contests.find(
+                  (c) => c.id === contestId,
+                )}
                 selected={seatSelection}
                 onSelect={setSeatSelection}
                 snapshot={snapshot}
@@ -356,6 +398,9 @@ export function App() {
             </div>
             <div className="page-view" hidden={page !== "targets"}>
               <Seats
+                contest={snapshot.roster.contests.find(
+                  (c) => c.id === contestId,
+                )}
                 selected={seatSelection}
                 onSelect={setSeatSelection}
                 snapshot={snapshot}
@@ -405,6 +450,9 @@ export function App() {
             </div>
             <div className="page-view" hidden={page !== "devices"}>
               <Devices
+                contest={snapshot.roster.contests.find(
+                  (c) => c.id === contestId,
+                )}
                 onMutate={mutate}
                 snapshot={snapshot}
                 disabled={busy || !connected}

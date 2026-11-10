@@ -75,6 +75,7 @@ test("注册审核入口读取真实窗口状态并保留空列表筛选", () =>
     targets: [],
     catalog: [],
     devices: [],
+    roster: { version: 0, contests: [] },
     registration_window: { version: 1, closes_at: 0, open: false },
   });
   const html = renderToStaticMarkup(
@@ -128,6 +129,7 @@ test("重新授权设备按配置范围提供重查，撤销目标可取消选�
     targets: [device.id],
     catalog: [],
     devices: [{ ...device, lifecycle: "revoked", registered: false }],
+    roster: { version: 0, contests: [] },
     registration_window: { version: 1, closes_at: 0, open: false },
   });
   const editor = renderToStaticMarkup(

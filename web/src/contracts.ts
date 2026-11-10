@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { rosterSchema } from "./roster-model";
 import { seatingSchema } from "./seating";
 
 export const toolSchema = z.object({
@@ -75,6 +76,7 @@ export const deviceSchema = z.object({
   received_at: z.number().nullable(),
 });
 export const stateSchema = z.object({
+  roster: rosterSchema.default({ version: 0, contests: [] }),
   registration_window: z.object({
     version: z.number().int(),
     closes_at: z.number(),

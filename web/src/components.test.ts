@@ -7,6 +7,7 @@ import { ConfigurationEditor } from "./ConfigurationEditor";
 import { stateSchema } from "./contracts";
 
 const snapshot = stateSchema.parse({
+  roster: { version: 0, contests: [] },
   registration_window: { version: 1, closes_at: 0, open: false },
   protocol_version: 1,
   server_time: 0,

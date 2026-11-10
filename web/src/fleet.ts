@@ -41,6 +41,11 @@ export function matchesSearch(
 }
 
 export const pages = {
+  roster: {
+    label: "选手名单",
+    group: "赛前准备",
+    description: "按比赛导入名单、核对差异并分配或调整座位。",
+  },
   seats: {
     label: "座位",
     group: "赛场管理",

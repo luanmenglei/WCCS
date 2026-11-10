@@ -8,6 +8,7 @@ import { Seats } from "./Seats";
 import { Devices } from "./Devices";
 
 const snapshot = stateSchema.parse({
+  roster: { version: 0, contests: [] },
   registration_window: { version: 1, closes_at: 0, open: false },
   protocol_version: 1,
   server_time: 0,

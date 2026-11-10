@@ -1,3 +1,4 @@
+import { participantLabel, type Contest } from "./roster-model";
 import { useState } from "react";
 import { checkLabel, type Snapshot } from "./contracts";
 import {
@@ -10,6 +11,7 @@ import { DetailsDialog } from "./DetailsDialog";
 import { SeatChecks, type Mutation } from "./SeatChecks";
 
 type Props = {
+  contest?: Contest;
   snapshot: Snapshot;
   csrf: string;
   disabled: boolean;
@@ -20,6 +22,7 @@ type Props = {
 };
 
 export function Seats({
+  contest,
   snapshot,
   csrf,
   disabled,
@@ -41,7 +44,13 @@ export function Seats({
         seat.status === filter ||
         (filter === "bound" && ["online", "offline"].includes(seat.status))) &&
       matchesSearch(
-        [room.name, seat.number, seat.expected_ip, ...seat.devices],
+        [
+          room.name,
+          seat.number,
+          seat.expected_ip,
+          participantLabel(contest, seat.id),
+          ...seat.devices,
+        ],
         search,
       ),
   );
@@ -184,6 +193,7 @@ export function Seats({
               <tr>
                 <th>选择</th>
                 <th>机房 / 座位</th>
+                <th>选手</th>
                 <th>物理位置</th>
                 <th>预期 IP</th>
                 <th>状态</th>
@@ -207,6 +217,11 @@ export function Seats({
                   <td>
                     {room.name}
                     <strong className="seat-number">{seat.number}</strong>
+                  </td>
+                  <td>
+                    {contest
+                      ? participantLabel(contest, seat.id)
+                      : "未选择比赛"}
                   </td>
                   <td>
                     {seat.row + 1} 行 {seat.column + 1} 列
@@ -268,6 +283,11 @@ export function Seats({
                                       onClick={() => setDetailId(seat.id)}
                                     >
                                       <strong>{seat.number}</strong>
+                                      <small>
+                                        {contest
+                                          ? participantLabel(contest, seat.id)
+                                          : "未选择比赛"}
+                                      </small>
                                       <span>
                                         {seatStatusLabels[seat.status]}
                                       </span>
@@ -316,6 +336,12 @@ export function Seats({
           onClose={() => setDetailId(null)}
         >
           <dl className="facts">
+            <dt>选手</dt>
+            <dd>
+              {contest
+                ? participantLabel(contest, detail.seat.id)
+                : "未选择比赛"}
+            </dd>
             <dt>位置</dt>
             <dd>
               {detail.seat.row + 1} 行 {detail.seat.column + 1} 列

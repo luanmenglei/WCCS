@@ -1,3 +1,4 @@
+import { participantLabel, type Contest } from "./roster-model";
 import { useState, type FormEvent } from "react";
 import {
   LifecycleControls,
@@ -10,6 +11,7 @@ import { checkStatus, matchesSearch, seatRows } from "./fleet";
 import { checkLabel, reasons, type Device, type Snapshot } from "./contracts";
 
 type Props = {
+  contest?: Contest;
   snapshot: Snapshot;
   onMutate: Mutate;
   disabled: boolean;
@@ -23,6 +25,7 @@ function time(value: number | null) {
 }
 
 export function Devices({
+  contest,
   snapshot,
   disabled,
   onCreate,
@@ -294,6 +297,26 @@ export function Devices({
       </div>
       {detail && (
         <DetailsDialog title={detail.name} onClose={() => setDetailId(null)}>
+          <section className="detail-section">
+            <h3>当前座位与选手</h3>
+            <p>
+              {addresses.get(detail.id)?.needs_review
+                ? "地址待核对"
+                : "按当前来源地址匹配"}
+            </p>
+            {(bindings.get(detail.id) ?? []).map(({ room, seat }) => (
+              <p key={seat.id}>
+                {room.name} / {seat.number} ·{" "}
+                {seat.status === "conflict"
+                  ? "冲突，以下为座位计划选手"
+                  : "唯一匹配"}{" "}
+                · {contest ? participantLabel(contest, seat.id) : "未选择比赛"}
+              </p>
+            ))}
+            {!bindings.get(detail.id)?.length && (
+              <p>设备未匹配座位，暂无关联选手。</p>
+            )}
+          </section>
           <LifecycleControls
             key={detail.id}
             device={detail}

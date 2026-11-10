@@ -54,7 +54,7 @@ npm --prefix web run check
 & './target/x86_64-pc-windows-msvc/release/wccs-server.exe' --init local/m2-new/server.json
 ```
 
-在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。当前服务启动事务性创建版本 1 并升级到版本 3，已有版本 1 / 2 数据自动迁移，遇到未知 schema_version 拒绝启动。机房切片升级情况见 [座位表记录](m2-room-seating.md)。
+在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。当前服务启动事务性创建版本 1 并升级到版本 4，已有版本 1 / 2 / 3 数据自动迁移，遇到未知 schema_version 拒绝启动。机房切片升级情况见 [座位表记录](m2-room-seating.md)。
 
 ### Windows 检查入口
 

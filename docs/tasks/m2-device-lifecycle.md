@@ -85,3 +85,7 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 - 文档交接提交保存需求、架构、路线图、验证记录、界面规范和 ADR 更新。
 
 最终开发实例已使用最新构建副本恢复。服务 PID 位于 `local/lifecycle/server.pid` 和 `local/m2/server.pid`，原合成客户端 PID 位于 `local/m2/agent.pid`，恢复客户端 PID 位于 `local/lifecycle/agent.pid`。两客户端连续心跳成功，服务与客户端错误日志为空。注册窗口已关闭，恢复设备处于 enabled、身份代次 2，其占用已排除以保留旧合成机在回环地址上的座位匹配。所有身份与日志位于忽略目录。
+
+## 名单分配后续更新
+
+M2 已完成显式比赛名单和座位分配，采用稳定座位 ID。设备生命周期保留选手计划，缩减已分配位置需先在对应比赛调整，见 [名单分配记录](m2-participant-seating.md)。

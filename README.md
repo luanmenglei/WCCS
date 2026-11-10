@@ -94,3 +94,5 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 > 阅读 AGENTS.md、需求基线、路线图与 M2 任务记录，继续 Natsume 核心管理对齐的选手名单导入与座位分配。Windows 服务、WSS 及等待界面鉴权 IPC 按后续独立切片实施。同步完成管理页面、协议回归和浏览器验收，Linux 与 HTTPS 跨机闭环按可用环境补验。
 
 机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。
+
+M2 名单导入与座位分配已提供 `#/roster` 管理入口。启动、TSV 样例、验证和后续条件见 [名单分配记录](docs/tasks/m2-participant-seating.md)。

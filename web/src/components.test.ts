@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Devices } from "./Devices";
+import { DeviceDetails } from "./Devices";
 import { ConfigurationEditor } from "./ConfigurationEditor";
 import { stateSchema } from "./contracts";
 
@@ -51,10 +51,9 @@ const snapshot = stateSchema.parse({
 
 test("组件展示期望版本、实际版本和过期失败结果", () => {
   const html = renderToStaticMarkup(
-    createElement(Devices, {
-      snapshot,
+    createElement(DeviceDetails, {
+      device: snapshot.devices[0],
       disabled: false,
-      onCreate: async () => {},
       onRecheck: async () => {},
     }),
   );

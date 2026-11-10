@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { SeatChecks } from "./SeatChecks";
 import { api } from "./api";
 import { checkLabel, type Snapshot } from "./contracts";
 import {
@@ -8,7 +9,6 @@ import {
   newRoom,
   pasteIps,
   roomPreviewSchema,
-  targetPreviewSchema,
   type Draft,
   type DraftSeat,
 } from "./seating";
@@ -216,9 +216,7 @@ function RoomEditor({
   const [pasteMode, setPasteMode] = useState("pairs");
   const [text, setText] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
-  const [targets, setTargets] = useState<z.infer<
-    typeof targetPreviewSchema
-  > | null>(null);
+
   const [zoom, setZoom] = useState("normal");
   const requestId = useRef(crypto.randomUUID());
   const current = props.snapshot.seating.rooms.find(
@@ -239,7 +237,6 @@ function RoomEditor({
     setDraft(next);
     setPreview(null);
     setBatch(null);
-    setTargets(null);
     requestId.current = crypto.randomUUID();
   }
   function attempt(action: () => void) {
@@ -513,7 +510,6 @@ function RoomEditor({
                                       ? [...selected, live.id]
                                       : selected.filter((id) => id !== live.id),
                                   );
-                                  setTargets(null);
                                 }}
                               />
                               选择检查
@@ -747,7 +743,6 @@ function RoomEditor({
             <button
               onClick={() => {
                 setSelected(current.seats.map((seat) => seat.id));
-                setTargets(null);
               }}
             >
               选择整间机房
@@ -755,75 +750,20 @@ function RoomEditor({
             <button
               onClick={() => {
                 setSelected([]);
-                setTargets(null);
               }}
             >
               清除选择
             </button>
-            <button
-              disabled={!selected.length || conflict || !!preview}
-              onClick={() =>
-                void run(async () =>
-                  setTargets(
-                    targetPreviewSchema.parse(
-                      await api(
-                        "seating/check-preview",
-                        {
-                          request_id: crypto.randomUUID(),
-                          base_version: props.snapshot.version,
-                          seat_ids: selected,
-                        },
-                        props.csrf,
-                      ),
-                    ),
-                  ),
-                )
-              }
-            >
-              预览检查目标（{selected.length}）
-            </button>
           </div>
         )}
-        {targets && (
-          <div>
-            <h4>实际设备目标 · 全局配置 v{props.snapshot.version}</h4>
-            <p>
-              仅为“可检查”目标生成新任务。离线、冲突、未注册及配置范围外的座位会跳过。
-            </p>
-            <ul>
-              {targets.targets.map((target) => (
-                <li key={target.seat_id}>
-                  座位 {target.number} ·{" "}
-                  {target.device_ids.join("、") || "无设备"} ·{" "}
-                  {statuses[target.status]}
-                  {["offline", "conflict"].includes(target.status)
-                    ? "，跳过"
-                    : ""}
-                </li>
-              ))}
-            </ul>
-            <button
-              disabled={
-                !targets.targets.some((target) => target.status === "ready")
-              }
-              onClick={() =>
-                void run(async () => {
-                  await props.onMutate(
-                    "seating/check",
-                    {
-                      base_version: props.snapshot.version,
-                      seat_ids: selected,
-                      preview_token: targets.preview_token,
-                    },
-                    "已向预览中的可检查设备下发任务，其余目标已跳过。",
-                  );
-                  setTargets(null);
-                })
-              }
-            >
-              确认发起工具检查
-            </button>
-          </div>
+        {current && (
+          <SeatChecks
+            snapshot={props.snapshot}
+            selected={selected}
+            csrf={props.csrf}
+            disabled={disabled || conflict || !!preview}
+            onMutate={props.onMutate}
+          />
         )}
       </fieldset>
       {busy && <p role="status">正在处理…</p>}

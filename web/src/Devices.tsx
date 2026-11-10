@@ -1,4 +1,6 @@
 import { useState, type FormEvent } from "react";
+import { DetailsDialog } from "./DetailsDialog";
+import { checkStatus, matchesSearch, seatRows } from "./fleet";
 import { checkLabel, reasons, type Device, type Snapshot } from "./contracts";
 
 type Props = {
@@ -12,18 +14,54 @@ function time(value: number | null) {
     ? "尚无记录"
     : new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
 }
-function status(device: Device) {
-  if (!device.registered) return "待注册";
-  if (device.expired) return "任务已过期";
-  if (!device.result) return device.desired_job ? "等待回传" : "尚未下发";
-  if (device.stale) return "结果已过期";
-  return device.result.tools.some((item) => item.check.status === "unavailable")
-    ? "有检查异常"
-    : "检查完成";
-}
 
 export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
   const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [descending, setDescending] = useState(false);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const seats = seatRows(snapshot);
+  const addresses = new Map(
+    snapshot.seating.devices.map((device) => [device.id, device]),
+  );
+  const bindings = new Map(
+    snapshot.devices.map((device) => [
+      device.id,
+      seats.filter(({ seat }) => seat.devices.includes(device.id)),
+    ]),
+  );
+  const rows = snapshot.devices
+    .filter((device) => {
+      const matched = bindings.get(device.id) ?? [];
+      const address = addresses.get(device.id);
+      const stateMatches =
+        filter === "all" ||
+        (filter === "online" && device.online) ||
+        (filter === "offline" && !device.online && device.registered) ||
+        (filter === "unregistered" && !device.registered) ||
+        (filter === "unbound" && !matched.length) ||
+        (filter === "conflict" &&
+          matched.some(({ seat }) => seat.status === "conflict"));
+      return (
+        stateMatches &&
+        matchesSearch(
+          [
+            device.id,
+            device.name,
+            address?.observed_ip,
+            ...matched.flatMap(({ room, seat }) => [room.name, seat.number]),
+          ],
+          search,
+        )
+      );
+    })
+    .sort(
+      (a, b) =>
+        (descending ? -1 : 1) *
+        a.name.localeCompare(b.name, "zh-CN", { numeric: true }),
+    );
+  const detail = snapshot.devices.find((device) => device.id === detailId);
   const [material, setMaterial] = useState("");
   const [localError, setLocalError] = useState("");
   const [enrollmentToken, setEnrollmentToken] = useState(() =>
@@ -81,7 +119,7 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
     >
       <div className="section-heading">
         <div>
-          <h2 id="devices-title">设备与检查</h2>
+          <h2 id="devices-title">设备清单</h2>
           <p>
             {snapshot.devices.filter((device) => device.online).length}{" "}
             台在线，共 {snapshot.devices.length} 台 · 每 3 秒刷新
@@ -129,114 +167,222 @@ export function Devices({ snapshot, disabled, onCreate, onRecheck }: Props) {
           </div>
         </div>
       )}
-      {snapshot.devices.length === 0 ? (
-        <p className="empty">
-          新增合成设备，启动 Windows 检查入口后即可选择下发目标。
-        </p>
-      ) : (
-        <div className="device-list">
-          {snapshot.devices.map((device) => (
-            <article className="device" key={device.id}>
-              <div className="device-summary">
-                <div>
-                  <strong>{device.name}</strong>
-                  <small>{device.id}</small>
-                </div>
-                <span
-                  className={device.online ? "status online-text" : "status"}
-                >
-                  {device.online ? "在线" : "离线"}
-                </span>
-                <div className="version-pair">
-                  <span>
-                    期望{" "}
-                    <b>
-                      {device.desired_version === null
-                        ? "—"
-                        : `v${device.desired_version}`}
-                    </b>
-                  </span>
-                  <span>
-                    实际{" "}
-                    <b>
-                      {device.result ? `v${device.result.config_version}` : "—"}
-                    </b>
-                  </span>
-                </div>
-                <span
-                  className={
-                    device.stale || device.expired ? "status stale" : "status"
-                  }
-                >
-                  {status(device)}
-                </span>
+      <div className="filter-bar device-filters">
+        <label className="search-field">
+          搜索设备
+          <input
+            type="search"
+            placeholder="设备、机房、座位号或 IP"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </label>
+        <label>
+          设备筛选
+          <select
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+          >
+            <option value="all">全部设备</option>
+            <option value="online">在线</option>
+            <option value="offline">离线</option>
+            <option value="unregistered">待注册</option>
+            <option value="unbound">未分配</option>
+            <option value="conflict">绑定冲突</option>
+          </select>
+        </label>
+        <span className="result-count">
+          {rows.length} / {snapshot.devices.length} 台设备
+        </span>
+      </div>
+      <div className="table-scroll fleet-table">
+        <table>
+          <thead>
+            <tr>
+              <th>
                 <button
-                  disabled={disabled || !device.desired_job}
-                  onClick={() => {
-                    void onRecheck(device.id).catch(() => {});
-                  }}
+                  className="table-sort"
+                  onClick={() => setDescending(!descending)}
                 >
-                  重新检查
+                  设备名称 {descending ? "↓" : "↑"}
                 </button>
-              </div>
-              <p className="device-time">
-                最后心跳 {time(device.last_seen)} · 结果回传{" "}
-                {time(device.received_at)}
-              </p>
-              {device.result && (
-                <details open>
-                  <summary>
-                    逐项检查结果 · {device.result.tools.length} 项
-                    {device.stale ? " · 旧任务结果" : ""}
-                  </summary>
-                  <div className="table-scroll">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>工具</th>
-                          <th>检查路径</th>
-                          <th>结果 / 失败原因</th>
-                          <th>文件版本</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {device.result.tools.map(({ tool, check }) => (
-                          <tr key={tool.id}>
-                            <td>
-                              {tool.name}
-                              <small>
-                                {tool.kind === "script" ? "脚本" : "可执行文件"}
-                              </small>
-                            </td>
-                            <td className="mono">{tool.path ?? "未配置"}</td>
-                            <td
-                              className={
-                                check.status === "available"
-                                  ? "online-text"
-                                  : "failure-text"
-                              }
-                            >
-                              {checkLabel(check)}
-                            </td>
-                            <td>
-                              {check.status === "available"
-                                ? check.value.file_version.status ===
-                                  "available"
-                                  ? check.value.file_version.value
-                                  : reasons[check.value.file_version.reason]
-                                : "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </details>
-              )}
-            </article>
-          ))}
-        </div>
+              </th>
+              <th>连接</th>
+              <th>机房 / 座位</th>
+              <th>观察 IP</th>
+              <th>期望 / 实际</th>
+              <th>工具检查</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((device) => (
+              <tr key={device.id}>
+                <td>
+                  <strong>{device.name}</strong>
+                  <small className="mono">{device.id}</small>
+                </td>
+                <td>
+                  <span className={device.online ? "online-text" : "status"}>
+                    {device.online
+                      ? "在线"
+                      : device.registered
+                        ? "离线"
+                        : "待注册"}
+                  </span>
+                </td>
+                <td>
+                  {bindings
+                    .get(device.id)
+                    ?.map(
+                      ({ room, seat }) =>
+                        `${room.name} / ${seat.number}${seat.status === "conflict" ? " · 冲突" : ""}`,
+                    )
+                    .join("、") || "未分配"}
+                </td>
+                <td className="mono">
+                  {addresses.get(device.id)?.observed_ip ?? "未知"}
+                </td>
+                <td>
+                  期望{" "}
+                  {device.desired_version === null
+                    ? "—"
+                    : `v${device.desired_version}`}
+                  <small>
+                    实际{" "}
+                    {device.result ? `v${device.result.config_version}` : "—"}
+                  </small>
+                </td>
+                <td>{checkStatus(device)}</td>
+                <td>
+                  <button onClick={() => setDetailId(device.id)}>
+                    查看详情
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length && (
+          <p className="empty">
+            {snapshot.devices.length
+              ? "没有符合条件的设备，请调整筛选。"
+              : "尚无设备。点击新增设备生成注册材料。"}
+          </p>
+        )}
+      </div>
+      {detail && (
+        <DetailsDialog title={detail.name} onClose={() => setDetailId(null)}>
+          <DeviceDetails
+            device={detail}
+            disabled={disabled}
+            onRecheck={onRecheck}
+          />
+        </DetailsDialog>
       )}
     </section>
+  );
+}
+
+export function DeviceDetails({
+  device,
+  disabled,
+  onRecheck,
+}: {
+  device: Device;
+  disabled: boolean;
+  onRecheck: (id: string) => Promise<void>;
+}) {
+  return (
+    <article className="device">
+      <div className="device-summary">
+        <div>
+          <strong>{device.name}</strong>
+          <small>{device.id}</small>
+        </div>
+        <span className={device.online ? "status online-text" : "status"}>
+          {device.online ? "在线" : "离线"}
+        </span>
+        <div className="version-pair">
+          <span>
+            期望{" "}
+            <b>
+              {device.desired_version === null
+                ? "—"
+                : `v${device.desired_version}`}
+            </b>
+          </span>
+          <span>
+            实际{" "}
+            <b>{device.result ? `v${device.result.config_version}` : "—"}</b>
+          </span>
+        </div>
+        <span
+          className={device.stale || device.expired ? "status stale" : "status"}
+        >
+          {checkStatus(device)}
+        </span>
+        <button
+          disabled={disabled || !device.desired_job}
+          onClick={() => {
+            void onRecheck(device.id).catch(() => {});
+          }}
+        >
+          重新检查
+        </button>
+      </div>
+      <p className="device-time">
+        最后心跳 {time(device.last_seen)} · 结果回传 {time(device.received_at)}
+      </p>
+      {device.result && (
+        <details open>
+          <summary>
+            逐项检查结果 · {device.result.tools.length} 项
+            {device.stale ? " · 旧任务结果" : ""}
+          </summary>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>工具</th>
+                  <th>检查路径</th>
+                  <th>结果 / 失败原因</th>
+                  <th>文件版本</th>
+                </tr>
+              </thead>
+              <tbody>
+                {device.result.tools.map(({ tool, check }) => (
+                  <tr key={tool.id}>
+                    <td>
+                      {tool.name}
+                      <small>
+                        {tool.kind === "script" ? "脚本" : "可执行文件"}
+                      </small>
+                    </td>
+                    <td className="mono">{tool.path ?? "未配置"}</td>
+                    <td
+                      className={
+                        check.status === "available"
+                          ? "online-text"
+                          : "failure-text"
+                      }
+                    >
+                      {checkLabel(check)}
+                    </td>
+                    <td>
+                      {check.status === "available"
+                        ? check.value.file_version.status === "available"
+                          ? check.value.file_version.value
+                          : reasons[check.value.file_version.reason]
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+    </article>
   );
 }

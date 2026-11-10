@@ -15,6 +15,8 @@ import {
 } from "./contracts";
 import { ConfigurationEditor } from "./ConfigurationEditor";
 import { Rooms } from "./Rooms";
+import { Seats } from "./Seats";
+import { pages, pageFromHash } from "./fleet";
 import { Devices } from "./Devices";
 
 function message(error: unknown): string {
@@ -24,6 +26,21 @@ function message(error: unknown): string {
 }
 
 export function App() {
+  const [page, setPage] = useState(() => pageFromHash(location.hash));
+  const [seatSelection, setSeatSelection] = useState<string[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const sessionEpoch = useRef(0);
+  const refreshSequence = useRef(0);
+  const pageInfo = pages[page];
+  useEffect(() => {
+    function navigate() {
+      setPage(pageFromHash(location.hash));
+      setMenuOpen(false);
+      window.scrollTo({ top: 0 });
+    }
+    window.addEventListener("hashchange", navigate);
+    return () => window.removeEventListener("hashchange", navigate);
+  }, []);
   const [session, setSession] = useState<Session | null>(null);
   const [checking, setChecking] = useState(true);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -54,17 +71,33 @@ export function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    const epoch = sessionEpoch.current;
+    const sequence = ++refreshSequence.current;
     try {
       const value = stateSchema.parse(await api("state"));
-      setSnapshot(value);
-      setConnected(true);
-      setConnectionError("");
+      if (epoch !== sessionEpoch.current) return value;
+      if (sequence === refreshSequence.current) {
+        setSnapshot(value);
+        setConnected(true);
+        setConnectionError("");
+      }
       return value;
     } catch (error) {
+      if (
+        epoch !== sessionEpoch.current ||
+        sequence !== refreshSequence.current
+      )
+        return;
       setConnected(false);
       if (error instanceof ApiError && error.status === 401) {
+        sessionEpoch.current++; // Retire in-flight reads from the previous login.
+        requestIds.current.clear();
+        setSeatSelection([]);
+        setMenuOpen(false);
         setSession(null);
         setSnapshot(null);
+        setNotice("");
+        setBusy(false);
       }
       throw error;
     }
@@ -98,6 +131,7 @@ export function App() {
     success: string,
   ) {
     if (!session) return;
+    const epoch = sessionEpoch.current;
     setBusy(true);
     setError("");
     setNotice("");
@@ -110,14 +144,16 @@ export function App() {
         path === "devices" ? body : { ...body, request_id: requestId },
         session.csrf,
       );
+      if (epoch !== sessionEpoch.current) return;
       await refresh();
+      if (epoch !== sessionEpoch.current) return;
       requestIds.current.delete(key);
       setNotice(success);
     } catch (error) {
-      setError(message(error));
+      if (epoch === sessionEpoch.current) setError(message(error));
       throw error;
     } finally {
-      setBusy(false);
+      if (epoch === sessionEpoch.current) setBusy(false);
     }
   }
 
@@ -127,14 +163,19 @@ export function App() {
     setError("");
     const form = new FormData(event.currentTarget);
     try {
-      setSession(
-        sessionSchema.parse(
-          await api("login", {
-            username: form.get("username"),
-            password: form.get("password"),
-          }),
-        ),
+      const authenticated = sessionSchema.parse(
+        await api("login", {
+          username: form.get("username"),
+          password: form.get("password"),
+        }),
       );
+      sessionEpoch.current++;
+      requestIds.current.clear();
+      setSeatSelection([]);
+      setMenuOpen(false);
+      setNotice("");
+      setConnectionError("");
+      setSession(authenticated);
     } catch (error) {
       setError(message(error));
     } finally {
@@ -153,11 +194,7 @@ export function App() {
       <main className="login">
         <section className="login-intro">
           <div className="brand">WCCS</div>
-          <h1>
-            赛场工具，
-            <br />
-            统一配置。
-          </h1>
+          <h1>赛场管理</h1>
           <p>Windows Contest Control System</p>
         </section>
         <form className="login-form" onSubmit={(event) => void login(event)}>
@@ -189,13 +226,31 @@ export function App() {
 
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">WCCS</div>
-        <p className="sidebar-caption">赛场管理台</p>
-        <nav aria-label="页面导航">
-          <a href="#rooms">机房与座位</a>
-          <a href="#configuration">工具配置</a>
-          <a href="#devices">设备与检查</a>
+      <aside className={`sidebar ${menuOpen ? "is-open" : ""}`}>
+        <div className="brand">
+          <span className="brand-mark">W</span>
+          <span>
+            WCCS<small>赛场管理</small>
+          </span>
+        </div>
+        <nav aria-label="页面导航" id="main-navigation">
+          {["赛场管理", "赛前准备"].map((group) => (
+            <div className="nav-group" key={group}>
+              <p>{group}</p>
+              {Object.entries(pages)
+                .filter(([, info]) => info.group === group)
+                .map(([id, info]) => (
+                  <a
+                    key={id}
+                    href={`#/${id}`}
+                    aria-current={page === id ? "page" : undefined}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    {info.label}
+                  </a>
+                ))}
+            </div>
+          ))}
         </nav>
         <div className="account">
           <span>{session.username}</span>
@@ -204,6 +259,11 @@ export function App() {
             onClick={() => {
               void api("logout", {}, session.csrf)
                 .then(() => {
+                  sessionEpoch.current++;
+                  requestIds.current.clear();
+                  setSeatSelection([]);
+                  setMenuOpen(false);
+                  setNotice("");
                   setSession(null);
                   setSnapshot(null);
                   setConnected(false);
@@ -217,14 +277,44 @@ export function App() {
         </div>
       </aside>
       <main className="workspace">
+        <div className="topbar">
+          <button
+            className="mobile-nav"
+            aria-expanded={menuOpen}
+            aria-controls="main-navigation"
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            导航
+          </button>
+          <span>{pageInfo.group}</span>
+          <span aria-hidden="true">›</span>
+          <strong>{pageInfo.label}</strong>
+        </div>
         <header className="page-header">
           <div>
-            <p className="eyebrow">环境准备</p>
-            <h1>机房与环境准备</h1>
+            <h1>{pageInfo.label}</h1>
+            <p className="page-description">{pageInfo.description}</p>
           </div>
           <div className="connection">
             <span className={connected ? "dot online" : "dot"} />
-            {connected ? "服务已连接" : "连接中断 · 状态已过期"}
+            <span>
+              {connected ? "服务已连接 · 每 3 秒刷新" : "连接中断 · 状态已过期"}
+              <small>
+                {snapshot
+                  ? `更新于 ${new Date(snapshot.server_time * 1000).toLocaleTimeString("zh-CN", { hour12: false })}`
+                  : "等待状态快照"}
+              </small>
+            </span>
+            <button
+              disabled={busy}
+              onClick={() =>
+                void refresh().catch((error) =>
+                  setConnectionError(message(error)),
+                )
+              }
+            >
+              立即刷新
+            </button>
           </div>
         </header>
         {(error || connectionError) && (
@@ -240,51 +330,78 @@ export function App() {
         )}
         {snapshot ? (
           <>
-            <Rooms
-              snapshot={snapshot}
-              csrf={session.csrf}
-              disabled={busy || !connected}
-              onMutate={mutate}
-            />
-            <ConfigurationEditor
-              key={editorKey}
-              snapshot={snapshot}
-              disabled={busy || !connected}
-              onReload={() => {
-                void refresh()
-                  .then(() => {
-                    setEditorKey((key) => key + 1);
-                    setError("");
-                  })
-                  .catch((error) => setError(message(error)));
-              }}
-              onPublish={async (body) => {
-                await mutate(
-                  "configuration",
-                  body,
-                  "配置已发布，等待目标设备回传检查结果。",
-                );
-                setEditorKey((key) => key + 1);
-              }}
-            />
-            <Devices
-              snapshot={snapshot}
-              disabled={busy || !connected}
-              onCreate={async (body) => {
-                await mutate(
-                  "devices",
-                  body,
-                  "设备已创建，请将注册材料用于 Windows 检查入口。",
-                );
-              }}
-              onRecheck={async (id) => {
-                await mutate(
-                  "recheck",
-                  { base_version: snapshot.version, targets: [id] },
-                  "重新检查任务已下发。",
-                );
-              }}
-            />
+            <div className="page-view" hidden={page !== "seats"}>
+              <Seats
+                selected={seatSelection}
+                onSelect={setSeatSelection}
+                snapshot={snapshot}
+                csrf={session.csrf}
+                disabled={busy || !connected}
+                onMutate={mutate}
+              />
+            </div>
+            <div className="page-view" hidden={page !== "targets"}>
+              <Seats
+                selected={seatSelection}
+                onSelect={setSeatSelection}
+                snapshot={snapshot}
+                csrf={session.csrf}
+                disabled={busy || !connected}
+                onMutate={mutate}
+                targetMode
+              />
+            </div>
+            <div className="page-view" hidden={page !== "rooms"}>
+              <Rooms
+                snapshot={snapshot}
+                csrf={session.csrf}
+                disabled={busy || !connected}
+                onMutate={mutate}
+              />
+            </div>
+            <div className="page-view" hidden={page !== "configuration"}>
+              <ConfigurationEditor
+                key={editorKey}
+                snapshot={snapshot}
+                disabled={busy || !connected}
+                onReload={() => {
+                  void refresh()
+                    .then(() => {
+                      setEditorKey((key) => key + 1);
+                      setError("");
+                    })
+                    .catch((error) => setError(message(error)));
+                }}
+                onPublish={async (body) => {
+                  await mutate(
+                    "configuration",
+                    body,
+                    "配置已发布，等待目标设备回传检查结果。",
+                  );
+                  setEditorKey((key) => key + 1);
+                }}
+              />
+            </div>
+            <div className="page-view" hidden={page !== "devices"}>
+              <Devices
+                snapshot={snapshot}
+                disabled={busy || !connected}
+                onCreate={async (body) => {
+                  await mutate(
+                    "devices",
+                    body,
+                    "设备已创建，请将注册材料用于 Windows 检查入口。",
+                  );
+                }}
+                onRecheck={async (id) => {
+                  await mutate(
+                    "recheck",
+                    { base_version: snapshot.version, targets: [id] },
+                    "重新检查任务已下发。",
+                  );
+                }}
+              />
+            </div>
           </>
         ) : (
           <p role="status">正在读取设备与配置…</p>

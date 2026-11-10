@@ -41,6 +41,11 @@ export function matchesSearch(
 }
 
 export const pages = {
+  waiting: {
+    label: "等待控制",
+    group: "赛场管理",
+    description: "预览固定选手与设备，批量进入或结束等待，核对逐机实际状态。",
+  },
   operators: {
     label: "操作员",
     group: "系统管理",

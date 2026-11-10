@@ -1,5 +1,5 @@
 import { participantLabel, type Contest } from "./roster-model";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { checkLabel, type Snapshot } from "./contracts";
 import {
   checkStatus,
@@ -17,6 +17,7 @@ type Props = {
   disabled: boolean;
   onMutate: Mutation;
   targetMode?: boolean;
+  children?: ReactNode;
   selected: string[];
   onSelect: (ids: string[]) => void;
 };
@@ -28,6 +29,7 @@ export function Seats({
   disabled,
   onMutate,
   targetMode = false,
+  children,
   selected,
   onSelect,
 }: Props) {
@@ -323,13 +325,15 @@ export function Seats({
             ))}
         </div>
       )}
-      <SeatChecks
-        snapshot={snapshot}
-        selected={selection}
-        csrf={csrf}
-        disabled={disabled}
-        onMutate={onMutate}
-      />
+      {children ?? (
+        <SeatChecks
+          snapshot={snapshot}
+          selected={selection}
+          csrf={csrf}
+          disabled={disabled}
+          onMutate={onMutate}
+        />
+      )}
       {detail && (
         <DetailsDialog
           title={`${detail.room.name} · 座位 ${detail.seat.number}`}

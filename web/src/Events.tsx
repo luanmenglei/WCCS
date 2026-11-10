@@ -71,7 +71,10 @@ const categories: Record<string, string> = {
 };
 const outcomes: Record<string, string> = {
   succeeded: "成功",
-  failed: "检查异常",
+  failed: "执行失败",
+  accepted: "设备已接收",
+  executing: "执行中",
+  expired: "已过期",
   cancelled: "已取消",
   pending: "等待结果",
   recorded: "已记录",
@@ -366,6 +369,13 @@ export function Events() {
                 href={`#/roster?contest_id=${encodeURIComponent(detail.contest_id)}`}
               >
                 查看比赛名单
+              </a>
+            )}
+            {detail.contest_id && detail.operation.startsWith("waiting_") && (
+              <a
+                href={`#/waiting?contest_id=${encodeURIComponent(detail.contest_id)}`}
+              >
+                查看等待控制
               </a>
             )}
             {detail.operation === "publish" && (

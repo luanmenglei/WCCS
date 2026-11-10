@@ -1,3 +1,4 @@
+import { Waiting } from "./Waiting";
 import { AccessContext, roleLabels } from "./access";
 import { Operators } from "./Operators";
 import { Events } from "./Events";
@@ -422,7 +423,7 @@ export function App() {
                 <p className="banner">
                   {session.role === "viewer"
                     ? "当前身份只读。"
-                    : "可在授权范围启停设备及重查工具。"}{" "}
+                    : "可在授权范围启停设备、重查工具及控制等待界面。"}{" "}
                   注册材料、机房/IP、全局名单和工具发布需要管理员权限。完整名单历史需要全场授权。
                 </p>
               )}
@@ -438,6 +439,18 @@ export function App() {
                   <p role="alert">操作员管理需要管理员权限。</p>
                 ))}
               {page === "events" && <Events />}
+              {page === "waiting" && (
+                <Waiting
+                  key={contestId}
+                  snapshot={snapshot}
+                  contestId={contestId}
+                  selected={seatSelection}
+                  onSelect={setSeatSelection}
+                  csrf={session.csrf}
+                  disabled={busy || !connected || session.role === "viewer"}
+                  onMutate={mutate}
+                />
+              )}
               <div className="page-view" hidden={page !== "roster"}>
                 <Roster
                   key={contestId}

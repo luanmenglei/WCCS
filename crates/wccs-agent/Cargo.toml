@@ -1,0 +1,16 @@
+[package]
+name = "wccs-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+wccs-protocol = { path = "../wccs-protocol" }
+wccs-inventory = { path = "../wccs-inventory" }
+
+[lints]
+workspace = true

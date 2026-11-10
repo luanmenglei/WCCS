@@ -1,0 +1,35 @@
+{
+  "protocol_version": 1,
+  "device_id": "synthetic-1",
+  "job_id": "job-1",
+  "config_version": "1",
+  "boot_id": "boot-1",
+  "tools": [
+    {
+      "id": "submit",
+      "name": "submit",
+      "kind": "script",
+      "path": null,
+      "check": {
+        "status": "unavailable",
+        "reason": "not_configured",
+        "code": null
+      }
+    },
+    {
+      "id": "shell",
+      "name": "PowerShell",
+      "kind": "executable",
+      "path": "C:\\tools\\shell.exe",
+      "check": {
+        "status": "available",
+        "value": {
+          "file_version": {
+            "status": "available",
+            "value": "1.2.3.4"
+          }
+        }
+      }
+    }
+  ]
+}

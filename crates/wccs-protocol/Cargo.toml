@@ -1,0 +1,15 @@
+[package]
+name = "wccs-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+sha2.workspace = true
+wccs-inventory = { path = "../wccs-inventory" }
+
+[lints]
+workspace = true

@@ -56,9 +56,9 @@ try {
     Invoke-Checked $rustBinary @()
 
     Invoke-Checked cargo @('fmt', '--all', '--', '--check')
-    Invoke-Checked cargo @('build', '--locked', '-p', 'wccs-inventory', '-p', 'wccs-session', '--target', $target, '--release')
-    Invoke-Checked cargo @('clippy', '--locked', '-p', 'wccs-inventory', '-p', 'wccs-session', '--target', $target, '--all-targets', '--', '-D', 'warnings')
-    Invoke-Checked cargo @('test', '--locked', '-p', 'wccs-inventory', '-p', 'wccs-session', '--target', $target)
+    Invoke-Checked cargo @('build', '--locked', '-p', 'wccs-inventory', '-p', 'wccs-session', '-p', 'wccs-protocol', '-p', 'wccs-server', '-p', 'wccs-agent', '--target', $target, '--release')
+    Invoke-Checked cargo @('clippy', '--locked', '-p', 'wccs-inventory', '-p', 'wccs-session', '-p', 'wccs-protocol', '-p', 'wccs-server', '-p', 'wccs-agent', '--target', $target, '--all-targets', '--', '-D', 'warnings')
+    Invoke-Checked cargo @('test', '--locked', '-p', 'wccs-inventory', '-p', 'wccs-session', '-p', 'wccs-protocol', '-p', 'wccs-server', '-p', 'wccs-agent', '--target', $target)
     Write-Output "Rust checks passed. Smoke artifacts: $smokeDirectory"
 } finally {
     Pop-Location

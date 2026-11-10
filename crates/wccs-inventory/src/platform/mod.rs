@@ -86,7 +86,7 @@ impl Buffer {
     }
 }
 
-fn file_version(path: &Path) -> Observation<String> {
+pub fn file_version(path: &Path) -> Observation<String> {
     observation(read_file_version(path))
 }
 

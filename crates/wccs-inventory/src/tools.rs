@@ -8,7 +8,7 @@ use std::{collections::HashSet, fs, io, path::Path};
 
 pub const TOOL_CATALOG: &str = include_str!("../../../config/tool-catalog.json");
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolConfiguration {
     pub schema_version: u32,

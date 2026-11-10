@@ -68,6 +68,8 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 机房操作从“机房与座位”进入，创建布局、应用编号规则和批量 IP 映射，预览后保存。选择整机房或部分座位可展开实际检查目标。详细步骤、代理配置与验收边界见 [机房座位表记录](docs/tasks/m2-room-seating.md)。
 
+管理台已按 Natsume 核心流程分为座位、设备、检查任务、机房设置与工具配置，默认入口为 `#/seats`。界面规范与功能对照见 [对齐记录](docs/tasks/natsume-alignment.md)。
+
 ## 文档导航
 
 | 文档 | 用途 |

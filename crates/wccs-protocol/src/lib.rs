@@ -123,6 +123,8 @@ pub struct Heartbeat {
     pub protocol_version: u32,
     pub boot_id: String,
     pub agent_version: String,
+    #[serde(default)]
+    pub reported_ips: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

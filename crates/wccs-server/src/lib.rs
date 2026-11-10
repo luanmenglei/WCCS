@@ -3,6 +3,7 @@
 mod auth;
 mod device;
 mod management;
+mod seating;
 
 use axum::{
     Json, Router,
@@ -33,6 +34,8 @@ pub struct Config {
     pub origin: String,
     pub database_url: String,
     pub static_dir: String,
+    #[serde(default)]
+    pub trusted_proxies: Vec<std::net::IpAddr>,
     pub admin_username: String,
     pub admin_password_hash: String,
 }
@@ -101,11 +104,21 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     let tx = db.transaction().await?;
     tx.batch_execute("SELECT pg_advisory_xact_lock(87127413)")
         .await?;
-    tx.batch_execute(include_str!("../migrations/001_tools.sql"))
-        .await?;
+    let exists: bool = tx
+        .query_one("SELECT to_regclass('schema_version') IS NOT NULL", &[])
+        .await?
+        .get(0);
+    if !exists {
+        tx.batch_execute(include_str!("../migrations/001_tools.sql"))
+            .await?;
+    }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || versions[0].get::<_, i32>(0) != 1 {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1 | 2) {
         return Err("数据库版本不受支持".into());
+    }
+    if versions[0].get::<_, i32>(0) == 1 {
+        tx.batch_execute(include_str!("../migrations/002_seating.sql"))
+            .await?;
     }
     tx.commit().await?;
     Ok(Arc::new(AppState {
@@ -148,6 +161,11 @@ pub fn router(app: App) -> Router {
         .route("/api/devices", post(management::create_device))
         .route("/api/configuration", post(management::publish))
         .route("/api/recheck", post(management::recheck))
+        .route("/api/rooms/preview", post(seating::preview))
+        .route("/api/rooms/save", post(seating::save))
+        .route("/api/seating/check-preview", post(seating::check_preview))
+        .route("/api/seating/check", post(seating::check))
+        .route("/api/seating/review", post(seating::review))
         .route("/api/device/register", post(device::register))
         .route("/api/device/heartbeat", post(device::heartbeat))
         .route("/api/device/result", post(device::result))

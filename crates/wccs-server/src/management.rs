@@ -65,9 +65,10 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
             "stale":result_job.is_some() && result_job != desired,
         })
     }).collect();
+    let seating = crate::seating::snapshot(&tx).await?;
     tx.commit().await?;
     Ok(Json(
-        json!({"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices}),
+        json!({"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices}),
     ))
 }
 
@@ -129,7 +130,7 @@ pub async fn create_device(
     Ok(Json(json!({"device_id":input.id,"ok":true})))
 }
 
-async fn previous(
+pub(crate) async fn previous(
     tx: &Transaction<'_>,
     id: &str,
     operation: &str,
@@ -173,7 +174,7 @@ async fn targets(tx: &Transaction<'_>, ids: &[String]) -> ApiResult<()> {
     Ok(())
 }
 
-async fn issue(tx: &Transaction<'_>, ids: &[String], version: i64) -> ApiResult<()> {
+pub(crate) async fn issue(tx: &Transaction<'_>, ids: &[String], version: i64) -> ApiResult<()> {
     for id in ids {
         let job = token();
         tx.execute(
@@ -187,7 +188,12 @@ async fn issue(tx: &Transaction<'_>, ids: &[String], version: i64) -> ApiResult<
     Ok(())
 }
 
-async fn audit(tx: &Transaction<'_>, actor: &str, operation: &str, id: &str) -> ApiResult<()> {
+pub(crate) async fn audit(
+    tx: &Transaction<'_>,
+    actor: &str,
+    operation: &str,
+    id: &str,
+) -> ApiResult<()> {
     tx.execute(
         "INSERT INTO audit_events (actor,operation,request_id,created_at) VALUES ($1,$2,$3,$4)",
         &[&actor, &operation, &id, &now()],
@@ -196,7 +202,7 @@ async fn audit(tx: &Transaction<'_>, actor: &str, operation: &str, id: &str) -> 
     Ok(())
 }
 
-async fn remember(
+pub(crate) async fn remember(
     tx: &Transaction<'_>,
     app: &App,
     id: &str,

@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .hash_password(password.as_bytes(), &salt)
             .map_err(|_| "password hash")?
             .to_string();
-        let config = Config { bind: "127.0.0.1:8787".into(), origin: "http://127.0.0.1:8787".into(), database_url: "host=127.0.0.1 port=55432 user=wccs dbname=wccs connect_timeout=5 options='-c statement_timeout=10000'".into(), static_dir: "web/dist".into(), admin_username: "admin".into(), admin_password_hash: hash };
+        let config = Config { bind: "127.0.0.1:8787".into(), origin: "http://127.0.0.1:8787".into(), database_url: "host=127.0.0.1 port=55432 user=wccs dbname=wccs connect_timeout=5 options='-c statement_timeout=10000'".into(), static_dir: "web/dist".into(), trusted_proxies: vec![], admin_username: "admin".into(), admin_password_hash: hash };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -54,10 +54,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = wccs_server::connect(config).await?;
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("WCCS listening on {address}");
-    axum::serve(listener, wccs_server::router(app))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        wccs_server::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
     Ok(())
 }

@@ -119,6 +119,7 @@ fn cycle(client: &Client, identity: &Identity, boot_id: &str, path: &Path) -> Re
         protocol_version: PROTOCOL_VERSION,
         boot_id: boot_id.into(),
         agent_version: env!("CARGO_PKG_VERSION").into(),
+        reported_ips: reported_ips(&identity.server),
     };
     let mut response = client
         .post(format!("{server}/api/device/heartbeat"))
@@ -213,4 +214,32 @@ fn cycle(client: &Client, identity: &Identity, boot_id: &str, path: &Path) -> Re
         identity.device_id, result.config_version, result.job_id
     );
     Ok(())
+}
+
+// The route-selected local address is diagnostic evidence only.
+fn reported_ips(server: &str) -> Vec<String> {
+    use std::net::{ToSocketAddrs, UdpSocket};
+    let Ok(url) = reqwest::Url::parse(server) else {
+        return vec![];
+    };
+    let Some(host) = url.host_str() else {
+        return vec![];
+    };
+    let Ok(addresses) = (host, url.port_or_known_default().unwrap_or(443)).to_socket_addrs() else {
+        return vec![];
+    };
+    for address in addresses {
+        let bind = if address.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        if let Ok(socket) = UdpSocket::bind(bind)
+            && socket.connect(address).is_ok()
+            && let Ok(local) = socket.local_addr()
+        {
+            return vec![local.ip().to_string()];
+        }
+    }
+    vec![]
 }

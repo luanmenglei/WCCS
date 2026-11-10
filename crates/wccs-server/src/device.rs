@@ -1,5 +1,9 @@
 use crate::{ApiError, ApiResult, App, auth};
-use axum::{Json, extract::State, http::HeaderMap};
+use axum::{
+    Json,
+    extract::{ConnectInfo, State},
+    http::HeaderMap,
+};
 use serde_json::{Value, json};
 use wccs_inventory::tools::ToolConfiguration;
 use wccs_protocol::{
@@ -55,6 +59,7 @@ pub async fn register(
 
 pub async fn heartbeat(
     State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Json(input): Json<Heartbeat>,
 ) -> ApiResult<Json<HeartbeatReply>> {
@@ -62,16 +67,27 @@ pub async fn heartbeat(
     if input.protocol_version != PROTOCOL_VERSION
         || !valid_id(&input.boot_id)
         || input.agent_version.len() > 80
+        || input.reported_ips.len() > 32
+        || input
+            .reported_ips
+            .iter()
+            .any(|ip| ip.parse::<std::net::IpAddr>().is_err())
     {
         return Err(ApiError::bad("心跳协议版本或字段错误"));
     }
-    let db = app.db.lock().await;
-    db.execute(
-        "UPDATE devices SET last_seen=$1,boot_id=$2,agent_version=$3 WHERE id=$4",
-        &[&now(), &input.boot_id, &input.agent_version, &id],
-    )
-    .await?;
-    let row = db.query_opt("SELECT j.id,j.expires_at,c.snapshot FROM devices d JOIN jobs j ON d.desired_job=j.id JOIN configurations c ON c.version=j.config_version WHERE d.id=$1 AND j.result IS NULL AND j.expires_at>$2", &[&id,&now()]).await?;
+    let (observed, source) = source_address(peer.ip(), &headers, &app.config.trusted_proxies);
+    let mut db = app.db.lock().await;
+    let tx = db.transaction().await?;
+    crate::seating::lock(&tx).await?;
+    tx.execute(
+        "UPDATE devices SET last_seen=$1,boot_id=$2,agent_version=$3,peer_ip=$5,
+        previous_ip=CASE WHEN observed_ip IS DISTINCT FROM $6 THEN observed_ip ELSE previous_ip END,
+        needs_review=needs_review OR (address_version>0 AND observed_ip IS DISTINCT FROM $6),
+        address_version=address_version + CASE WHEN address_version=0 OR observed_ip IS DISTINCT FROM $6 THEN 1 ELSE 0 END,
+        observed_ip=$6,address_source=$7,reported_ips=$8 WHERE id=$4",
+        &[&now(), &input.boot_id, &input.agent_version, &id, &peer.ip().to_canonical().to_string(), &observed, &source, &serde_json::to_value(&input.reported_ips).unwrap()],
+    ).await?;
+    let row = tx.query_opt("SELECT j.id,j.expires_at,c.snapshot FROM devices d JOIN jobs j ON d.desired_job=j.id JOIN configurations c ON c.version=j.config_version WHERE d.id=$1 AND j.result IS NULL AND j.expires_at>$2", &[&id,&now()]).await?;
     let job = match row {
         Some(row) => Some(Job {
             job_id: row.get(0),
@@ -80,6 +96,7 @@ pub async fn heartbeat(
         }),
         None => None,
     };
+    tx.commit().await?;
     Ok(Json(HeartbeatReply {
         protocol_version: PROTOCOL_VERSION,
         server_time: now(),
@@ -124,4 +141,61 @@ pub async fn result(
     let stale = desired.as_deref() != Some(&input.job_id);
     tx.commit().await?;
     Ok(Json(json!({"accepted":true,"stale":stale})))
+}
+
+// Walk X-Forwarded-For from the transport peer toward the client, stopping
+// at the first untrusted hop. A trusted proxy must append/replace this header.
+fn source_address(
+    peer: std::net::IpAddr,
+    headers: &HeaderMap,
+    trusted: &[std::net::IpAddr],
+) -> (Option<String>, &'static str) {
+    let peer = peer.to_canonical();
+    if !trusted.contains(&peer) {
+        return (Some(peer.to_string()), "transport_peer");
+    }
+    let values: Vec<_> = headers.get_all("x-forwarded-for").iter().collect();
+    if values.len() != 1 {
+        return (None, "invalid_proxy_header");
+    }
+    let Ok(value) = values[0].to_str() else {
+        return (None, "invalid_proxy_header");
+    };
+    let addresses: Result<Vec<std::net::IpAddr>, _> =
+        value.split(',').map(|ip| ip.trim().parse()).collect();
+    let Ok(addresses) = addresses else {
+        return (None, "invalid_proxy_header");
+    };
+    if addresses.is_empty() || addresses.len() > 16 {
+        return (None, "invalid_proxy_header");
+    }
+    let mut current = peer;
+    for address in addresses.iter().rev() {
+        if !trusted.contains(&current) {
+            break;
+        }
+        current = address.to_canonical();
+    }
+    (Some(current.to_string()), "trusted_proxy")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn proxy_trust_stops_at_first_untrusted_hop() {
+        let peer = "127.0.0.1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 10.1.0.9".parse().unwrap());
+        assert_eq!(
+            source_address(peer, &headers, &[]).0.as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            source_address(peer, &headers, &[peer]).0.as_deref(),
+            Some("10.1.0.9")
+        );
+        headers.insert("x-forwarded-for", "invalid".parse().unwrap());
+        assert_eq!(source_address(peer, &headers, &[peer]).0, None);
+    }
 }

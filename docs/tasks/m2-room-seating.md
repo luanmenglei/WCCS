@@ -168,3 +168,7 @@ HTTP 集成另外覆盖无会话、缺 CSRF、错误设备令牌、伪造转发�
 - 文档交接提交保存本记录、需求、架构、路线图、验证方案和 ADR 更新。
 
 `python scripts/check_repo.py` 通过 89 个文件，`python -m unittest discover -s scripts/tests -v` 的 14 项回归通过，工作区和逐次暂存区 `git diff --check` 通过。每个提交通过仓库 pre-commit 检查。最终完整检查日志来自提交前同一份代码，运行方式与环境缺口见上文。
+
+## 设备生命周期兼容更新
+
+版本 3 迁移及客户端 0.2.0 已回归原有机房、地址核对、配置与任务数据。disabled 继续占用座位并暂停领取，座位目标预览显示 disabled 跳过，revoked 释放占用。占用排除继续独立于设备认证。恢复身份需重新核对地址，详细实测见 [生命周期记录](m2-device-lifecycle.md)。

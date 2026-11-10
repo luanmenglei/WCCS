@@ -54,7 +54,7 @@ npm --prefix web run check
 & './target/x86_64-pc-windows-msvc/release/wccs-server.exe' --init local/m2-new/server.json
 ```
 
-在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。当前服务启动事务性创建版本 1 并升级到版本 2，已有版本 1 数据自动迁移，遇到未知 schema_version 拒绝启动。机房切片升级情况见 [座位表记录](m2-room-seating.md)。
+在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。当前服务启动事务性创建版本 1 并升级到版本 3，已有版本 1 / 2 数据自动迁移，遇到未知 schema_version 拒绝启动。机房切片升级情况见 [座位表记录](m2-room-seating.md)。
 
 ### Windows 检查入口
 
@@ -161,3 +161,7 @@ HTTP 集成还覆盖无会话 401、错误密码、来源/CSRF 403、错误设�
 ## 机房座位表切片补充
 
 后续 M2 已增加矩形机房、稳定座位 ID、IP 绑定及认证来源匹配，保留本记录的全局配置与完整目标集合语义。座位检查使用独立的目标预览与提交入口，只重查配置范围内的唯一在线设备，其余目标明确跳过，详见 [座位表记录](m2-room-seating.md) 和 [ADR 0006](../decisions/0006-m2-room-seating.md)。
+
+## 当前注册与客户端版本
+
+客户端 0.2.0 已加入持久注册审核和凭据轮换。原材料格式与 pending / completed 文件兼容，默认关闭注册窗口，旧注册设备升级后继续启用。新申请和重装恢复的操作方法见 [设备生命周期记录](m2-device-lifecycle.md)。本文件先前的注册行为描述保留首轮历史证据，当前状态语义以 ADR 0007 为准。

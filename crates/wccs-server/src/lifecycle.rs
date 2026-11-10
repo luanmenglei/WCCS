@@ -17,25 +17,22 @@ pub async fn history(
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, false).await?;
+    let session = auth::admin(&app, &headers, false).await?;
     let mut db = app.db.lock().await;
-    let tx = db
-        .build_transaction()
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .read_only(true)
-        .start()
-        .await?;
+    let tx = db.transaction().await?;
+    let identity = auth::authorize(&tx, &session, auth::Permission::Read).await?;
+    identity.devices(&tx, std::slice::from_ref(&id), "").await?;
     let event_rows = tx
         .query(
             "SELECT sequence,operation,request_id,version,created_at FROM device_events
-         WHERE device_id=$1 AND sequence<$2 ORDER BY sequence DESC LIMIT 100",
-            &[&id, &query.before.unwrap_or(i64::MAX)],
+         WHERE device_id=$1 AND sequence<$2 AND ($3 OR (cardinality(room_ids)>0 AND room_ids<@$4)) ORDER BY sequence DESC LIMIT 100",
+            &[&id, &query.before.unwrap_or(i64::MAX),&identity.all_rooms,&identity.room_ids],
         )
         .await?;
     let job_rows = tx.query(
         "SELECT sequence,id,config_version,expires_at,received_at,cancelled_at,cancellation_reason,result
-         FROM jobs WHERE device_id=$1 AND sequence<$2 ORDER BY sequence DESC LIMIT 100",
-        &[&id,&query.jobs_before.unwrap_or(i64::MAX)]).await?;
+         FROM jobs WHERE device_id=$1 AND sequence<$2 AND ($3 OR (cardinality(room_ids)>0 AND room_ids<@$4)) ORDER BY sequence DESC LIMIT 100",
+        &[&id,&query.jobs_before.unwrap_or(i64::MAX),&identity.all_rooms,&identity.room_ids]).await?;
     let events: Vec<Value> = event_rows
         .iter()
         .map(|row| {
@@ -127,10 +124,11 @@ pub async fn window(
     headers: HeaderMap,
     Json(input): Json<WindowRequest>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     seating::lock(&tx).await?;
     if let Some(response) =
         management::previous(&tx, &input.request_id, "registration_window", &payload).await?
@@ -179,7 +177,7 @@ pub async fn action(
     headers: HeaderMap,
     Json(input): Json<Action>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     if !valid_id(&input.device_id) {
         return Err(ApiError::bad("设备编号无效"));
     }
@@ -188,6 +186,19 @@ pub async fn action(
     payload["enrollment_token"] = json!(input.enrollment_token.as_ref().map(|value| digest(value)));
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
+    if identity.role != "admin" && !["enable", "disable"].contains(&input.action.as_str()) {
+        return Err(ApiError::forbidden(
+            "注册审核、撤销和凭据管理需要管理员权限",
+        ));
+    }
+    identity
+        .devices(
+            &tx,
+            std::slice::from_ref(&input.device_id),
+            &input.request_id,
+        )
+        .await?;
     seating::lock(&tx).await?;
     expire(&tx).await?;
     if let Some(response) =

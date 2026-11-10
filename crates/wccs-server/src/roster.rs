@@ -382,9 +382,10 @@ pub async fn preview(
     headers: HeaderMap,
     Json(input): Json<Write>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     seating::lock(&tx).await?;
     Ok(Json(plan(&tx, &input).await?.preview))
 }
@@ -393,10 +394,11 @@ pub async fn commit(
     headers: HeaderMap,
     Json(input): Json<Write>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     seating::lock(&tx).await?;
     if let Some(previous) =
         management::previous(&tx, &input.request_id, "roster_commit", &payload).await?
@@ -473,9 +475,13 @@ pub async fn history(
     Path(id): Path<String>,
     Query(cursor): Query<Cursor>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, false).await?;
-    let db = app.db.lock().await;
-    let rows=db.query("SELECT sequence,request_id,version,result,created_at FROM roster_events WHERE contest_id=$1 AND sequence<$2 ORDER BY sequence DESC LIMIT 50", &[&id,&cursor.before.unwrap_or(i64::MAX)]).await?;
+    let session = auth::admin(&app, &headers, false).await?;
+    let mut db = app.db.lock().await;
+    let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Read)
+        .await?
+        .global()?;
+    let rows=tx.query("SELECT sequence,request_id,version,result,created_at FROM roster_events WHERE contest_id=$1 AND sequence<$2 ORDER BY sequence DESC LIMIT 50", &[&id,&cursor.before.unwrap_or(i64::MAX)]).await?;
     Ok(Json(json!(rows.iter().map(|row| json!({"sequence":row.get::<_,i64>(0),"request_id":row.get::<_,String>(1),"version":row.get::<_,i64>(2),"result":row.get::<_,Value>(3),"created_at":row.get::<_,i64>(4)})).collect::<Vec<_>>())))
 }
 

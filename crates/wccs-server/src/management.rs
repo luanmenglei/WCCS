@@ -9,18 +9,11 @@ use wccs_protocol::{
 };
 
 pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, false).await?;
+    let session = auth::admin(&app, &headers, false).await?;
     let mut db = app.db.lock().await;
-    let expiry = db.transaction().await?;
-    crate::seating::lock(&expiry).await?;
-    crate::lifecycle::expire(&expiry).await?;
-    expiry.commit().await?;
-    let tx = db
-        .build_transaction()
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .read_only(true)
-        .start()
-        .await?;
+    let tx = db.transaction().await?;
+    let identity = auth::authorize(&tx, &session, auth::Permission::Read).await?;
+    crate::lifecycle::expire(&tx).await?;
     let version: i64 = tx
         .query_one("SELECT version FROM configuration_head WHERE id=1", &[])
         .await?
@@ -48,11 +41,11 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
          LEFT JOIN jobs j ON j.id=d.desired_job
          LEFT JOIN LATERAL (
              SELECT result, received_at, id FROM jobs
-             WHERE device_id=d.id AND result IS NOT NULL
+             WHERE device_id=d.id AND result IS NOT NULL AND ($1 OR (cardinality(room_ids)>0 AND room_ids<@$2))
              ORDER BY sequence DESC LIMIT 1
          ) r ON true
          ORDER BY d.id",
-            &[],
+            &[&identity.all_rooms,&identity.room_ids],
         )
         .await?;
     let devices: Vec<Value> = rows.iter().map(|row| {
@@ -84,15 +77,20 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
     let registration_window = json!({"version":window.get::<_,i64>(0),"closes_at":window.get::<_,i64>(1),"open":window.get::<_,i64>(1)>now()});
     let seating = crate::seating::snapshot(&tx).await?;
     let roster = crate::roster::snapshot(&tx).await?;
+    let mut value = json!({"identity":identity,"roster":roster,"registration_window":registration_window,"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices});
+    if !identity.all_rooms {
+        let allowed: Vec<String>=tx.query("SELECT id FROM devices WHERE cardinality(device_room_scope(id))>0 AND device_room_scope(id)<@$1",&[&identity.room_ids]).await?.iter().map(|r|r.get(0)).collect();
+        restrict_state(&mut value, &identity.room_ids, &allowed);
+    }
     tx.commit().await?;
-    Ok(Json(
-        json!({"roster":roster,"registration_window":registration_window,"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices}),
-    ))
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewDevice {
+    #[serde(default)]
+    request_id: Option<String>,
     id: String,
     name: String,
     enrollment_token: String,
@@ -103,7 +101,7 @@ pub async fn create_device(
     headers: HeaderMap,
     Json(input): Json<NewDevice>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     if !valid_id(&input.id)
         || input.name.trim().is_empty()
         || input.name.len() > 200
@@ -113,12 +111,21 @@ pub async fn create_device(
     }
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     tx.query_one(
         "SELECT version FROM configuration_head WHERE id=1 FOR UPDATE",
         &[],
     )
     .await?;
     let hash = digest(&input.enrollment_token);
+    let request_id = input
+        .request_id
+        .unwrap_or_else(|| digest(&format!("create-device:{}", input.id)));
+    let payload = json!({"id":input.id,"name":input.name,"enrollment_hash":hash});
+    if let Some(response) = previous(&tx, &request_id, "create_device", &payload).await? {
+        return Ok(Json(response));
+    }
+    auth::context(&tx, &request_id, None, std::slice::from_ref(&input.id)).await?;
     if let Some(row) = tx
         .query_opt(
             "SELECT name,enrollment_hash FROM devices WHERE id=$1",
@@ -142,11 +149,12 @@ pub async fn create_device(
             &[&input.id, &input.name, &hash, &(now() + 86400)],
         )
         .await?;
-        audit(&tx, &app.config.admin_username, "create_device", &input.id).await?;
-        crate::lifecycle::event(&tx, &input.id, "created", &input.id).await?;
+        crate::lifecycle::event(&tx, &input.id, "created", &request_id).await?;
     }
+    let response = json!({"device_id":input.id,"ok":true,"request_id":request_id});
+    record(&tx, &request_id, "create_device", &payload, &response).await?;
     tx.commit().await?;
-    Ok(Json(json!({"device_id":input.id,"ok":true})))
+    Ok(Json(response))
 }
 
 pub(crate) async fn previous(
@@ -160,11 +168,25 @@ pub(crate) async fn previous(
     }
     if let Some(row) = tx
         .query_opt(
-            "SELECT operation,payload,response FROM requests WHERE id=$1",
+            "SELECT operation,payload,response,actor_id FROM requests WHERE id=$1",
             &[&id],
         )
         .await?
     {
+        let actor: String = tx
+            .query_one("SELECT current_setting('wccs.actor_id')", &[])
+            .await?
+            .get(0);
+        let owner: Option<String> = row.get(3);
+        let legacy_admin: bool = tx
+            .query_one("SELECT role='admin' FROM operators WHERE id=$1", &[&actor])
+            .await?
+            .get(0);
+        if owner.as_deref().is_some_and(|id| id != actor) || (owner.is_none() && !legacy_admin) {
+            return Err(ApiError::forbidden(
+                "请求编号属于其他身份或历史管理员，请核对事件结果",
+            ));
+        }
         if row.get::<_, String>(0) != operation || row.get::<_, Value>(1) != *payload {
             return Err(ApiError::conflict("请求编号已用于不同内容"));
         }
@@ -209,10 +231,14 @@ pub(crate) async fn issue(tx: &Transaction<'_>, ids: &[String], version: i64) ->
 
 pub(crate) async fn audit(
     tx: &Transaction<'_>,
-    actor: &str,
+    _actor: &str,
     operation: &str,
     id: &str,
 ) -> ApiResult<()> {
+    let actor: String = tx
+        .query_one("SELECT current_setting('wccs.actor_name')", &[])
+        .await?
+        .get(0);
     tx.execute(
         "INSERT INTO audit_events (actor,operation,request_id,created_at) VALUES ($1,$2,$3,$4)",
         &[&actor, &operation, &id, &now()],
@@ -223,20 +249,70 @@ pub(crate) async fn audit(
 
 pub(crate) async fn remember(
     tx: &Transaction<'_>,
-    app: &App,
+    _app: &App,
     id: &str,
     operation: &str,
     payload: &Value,
     version: i64,
 ) -> ApiResult<Value> {
     let response = json!({"version":version,"request_id":id});
-    tx.execute(
-        "INSERT INTO requests (id,operation,payload,response,created_at) VALUES ($1,$2,$3,$4,$5)",
-        &[&id, &operation, payload, &response, &now()],
-    )
-    .await?;
-    audit(tx, &app.config.admin_username, operation, id).await?;
+    record(tx, id, operation, payload, &response).await?;
     Ok(response)
+}
+
+pub(crate) async fn record(
+    tx: &Transaction<'_>,
+    id: &str,
+    operation: &str,
+    payload: &Value,
+    response: &Value,
+) -> ApiResult<()> {
+    tx.execute("INSERT INTO requests(id,operation,payload,response,created_at,actor_id) VALUES($1,$2,$3,$4,$5,current_setting('wccs.actor_id'))",
+        &[&id,&operation,payload,response,&now()]).await?;
+    audit(tx, "", operation, id).await
+}
+
+fn restrict_state(value: &mut Value, rooms: &[String], devices: &[String]) {
+    value["devices"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|d| devices.iter().any(|id| d["id"] == *id));
+    value["targets"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|d| devices.iter().any(|id| *d == *id));
+    value["seating"]["devices"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|d| devices.iter().any(|id| d["id"] == *id));
+    for device in value["seating"]["devices"].as_array_mut().unwrap() {
+        device["previous_ip"] = Value::Null;
+        device["peer_ip"] = Value::Null;
+        device["reported_ips"] = json!([]);
+    }
+    value["seating"]["rooms"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|r| rooms.iter().any(|id| r["id"] == *id));
+    let mut seats = Vec::new();
+    for room in value["seating"]["rooms"].as_array_mut().unwrap() {
+        for seat in room["seats"].as_array_mut().unwrap() {
+            seats.push(seat["id"].clone());
+            seat["devices"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|d| devices.iter().any(|id| *d == *id));
+        }
+    }
+    let contests = value["roster"]["contests"].as_array_mut().unwrap();
+    for contest in contests.iter_mut() {
+        contest["participants"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|p| seats.contains(&p["seat_id"]));
+    }
+    contests.retain(|c| !c["participants"].as_array().unwrap().is_empty());
+    value["registration_window"] = json!({"version":0,"open":false,"closes_at":0});
 }
 
 pub async fn publish(
@@ -244,11 +320,13 @@ pub async fn publish(
     headers: HeaderMap,
     Json(input): Json<PublishRequest>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     validate_tools(&input.tools).map_err(|message| ApiError::bad(&message))?;
     let payload = serde_json::to_value(&input).unwrap();
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
+    auth::context(&tx, &input.request_id, None, &input.targets).await?;
     let version: i64 = tx
         .query_one(
             "SELECT version FROM configuration_head WHERE id=1 FOR UPDATE",
@@ -300,10 +378,14 @@ pub async fn recheck(
     headers: HeaderMap,
     Json(input): Json<RecheckRequest>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
+    identity
+        .devices(&tx, &input.targets, &input.request_id)
+        .await?;
     let version: i64 = tx
         .query_one(
             "SELECT version FROM configuration_head WHERE id=1 FOR UPDATE",

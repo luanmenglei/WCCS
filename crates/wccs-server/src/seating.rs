@@ -317,9 +317,10 @@ pub async fn preview(
     headers: HeaderMap,
     Json(input): Json<RoomWrite>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     lock(&tx).await?;
     Ok(Json(room_preview(&tx, &input).await?))
 }
@@ -329,10 +330,18 @@ pub async fn save(
     headers: HeaderMap,
     Json(input): Json<RoomWrite>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
+    auth::context(
+        &tx,
+        &input.request_id,
+        Some(std::slice::from_ref(&input.id)),
+        &[],
+    )
+    .await?;
     lock(&tx).await?;
     if let Some(response) =
         management::previous(&tx, &input.request_id, "room_save", &payload).await?
@@ -373,6 +382,7 @@ async fn selected_targets(
     tx: &Transaction<'_>,
     input: &Selection,
     version: i64,
+    identity: &auth::Identity,
 ) -> ApiResult<Value> {
     if version == 0 || version != input.base_version {
         return Err(ApiError::conflict(
@@ -426,6 +436,24 @@ async fn selected_targets(
             "status": status,
         }));
     }
+    if !identity.all_rooms {
+        for target in &mut targets {
+            let mut visible = Vec::new();
+            for id in target["device_ids"].as_array().unwrap() {
+                let rooms: Option<Vec<String>> = tx
+                    .query_one("SELECT device_room_scope($1)", &[&id.as_str().unwrap()])
+                    .await?
+                    .get(0);
+                if identity.rooms(rooms.as_deref()).is_ok() {
+                    visible.push(id.clone());
+                }
+            }
+            if !visible.contains(&target["device_id"]) {
+                target["device_id"] = Value::Null;
+            }
+            target["device_ids"] = json!(visible);
+        }
+    }
     let preview_token = digest(&json!([version, targets]).to_string());
     Ok(json!({"targets":targets,"preview_token":preview_token}))
 }
@@ -435,11 +463,17 @@ pub async fn check_preview(
     headers: HeaderMap,
     Json(input): Json<Selection>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
+    identity
+        .seats(&tx, &input.seat_ids, &input.request_id)
+        .await?;
     let version = lock(&tx).await?;
-    Ok(Json(selected_targets(&tx, &input, version).await?))
+    Ok(Json(
+        selected_targets(&tx, &input, version, &identity).await?,
+    ))
 }
 
 pub async fn check(
@@ -447,17 +481,21 @@ pub async fn check(
     headers: HeaderMap,
     Json(input): Json<Selection>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
+    identity
+        .seats(&tx, &input.seat_ids, &input.request_id)
+        .await?;
     let version = lock(&tx).await?;
     if let Some(response) =
         management::previous(&tx, &input.request_id, "seat_check", &payload).await?
     {
         return Ok(Json(response));
     }
-    let preview = selected_targets(&tx, &input, version).await?;
+    let preview = selected_targets(&tx, &input, version, &identity).await?;
     if input.preview_token.as_deref() != preview["preview_token"].as_str() {
         return Err(ApiError::conflict("实际设备目标或状态已变化，请重新预览"));
     }
@@ -469,21 +507,8 @@ pub async fn check(
         .map(|target| target["device_id"].as_str().unwrap().to_owned())
         .collect();
     management::issue(&tx, &ids, version).await?;
-    management::remember(
-        &tx,
-        &app,
-        &input.request_id,
-        "seat_check",
-        &payload,
-        version,
-    )
-    .await?;
     let response = json!({"version":version,"request_id":input.request_id,"targets":preview["targets"],"issued":ids});
-    tx.execute(
-        "UPDATE requests SET response=$1 WHERE id=$2",
-        &[&response, &input.request_id],
-    )
-    .await?;
+    management::record(&tx, &input.request_id, "seat_check", &payload, &response).await?;
     tx.commit().await?;
     Ok(Json(response))
 }
@@ -502,10 +527,11 @@ pub async fn review(
     headers: HeaderMap,
     Json(input): Json<Review>,
 ) -> ApiResult<Json<Value>> {
-    auth::admin(&app, &headers, true).await?;
+    let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
+    auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     lock(&tx).await?;
     if let Some(response) =
         management::previous(&tx, &input.request_id, "address_review", &payload).await?

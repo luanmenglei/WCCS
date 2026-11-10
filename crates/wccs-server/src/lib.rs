@@ -2,8 +2,10 @@
 
 mod auth;
 mod device;
+mod events;
 mod lifecycle;
 mod management;
+mod operators;
 mod roster;
 mod seating;
 
@@ -115,7 +117,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=4) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=5) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -129,6 +131,21 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     if versions[0].get::<_, i32>(0) <= 3 {
         tx.batch_execute(include_str!("../migrations/004_roster.sql"))
             .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 4 {
+        tx.batch_execute(include_str!("../migrations/005_operators_events.sql"))
+            .await?;
+        tx.execute(
+            "INSERT INTO operators VALUES($1,$2,$3,$2,'admin',true,true,'{}',1,$4,$5)",
+            &[
+                &wccs_protocol::token(),
+                &config.admin_username,
+                &auth::login_key(&config.admin_username),
+                &config.admin_password_hash,
+                &wccs_protocol::now(),
+            ],
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(Arc::new(AppState {
@@ -167,6 +184,9 @@ pub fn router(app: App) -> Router {
         .route("/api/login", post(auth::login))
         .route("/api/session", get(auth::session))
         .route("/api/logout", post(auth::logout))
+        .route("/api/operators", get(operators::list).post(operators::save))
+        .route("/api/events", get(events::list))
+        .route("/api/events/{id}", get(events::detail))
         .route("/api/state", get(management::state))
         .route("/api/roster/preview", post(roster::preview))
         .route("/api/roster/commit", post(roster::commit))

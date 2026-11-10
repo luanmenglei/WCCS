@@ -482,6 +482,42 @@ async fn enrollment_lifecycle_rotation_and_restart() {
     connection_handle.abort();
 }
 impl Harness {
+    async fn get(&self, path: &str) -> Response {
+        self.client
+            .get(format!("{}/api/{path}", self.url))
+            .header("Cookie", &self.cookie)
+            .send()
+            .await
+            .unwrap()
+    }
+    async fn identity(&self, username: &str, password: &str) -> Harness {
+        let response = self
+            .client
+            .post(format!("{}/api/login", self.url))
+            .header("Origin", &self.url)
+            .json(&json!({"username":username,"password":password}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+        let cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let csrf = response.json::<Value>().await.unwrap()["csrf"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        Harness {
+            url: self.url.clone(),
+            client: self.client.clone(),
+            cookie,
+            csrf,
+        }
+    }
     async fn login(&mut self) {
         let response = self
             .client
@@ -967,7 +1003,7 @@ async fn seating_migration_binding_and_concurrency() {
             .await
             .unwrap()
             .get::<_, i32>(0),
-        4
+        5
     );
     let mut room = room_input("A", 2, 3);
     room["seats"][0]["expected_ip"] = json!("127.0.0.1");
@@ -1719,4 +1755,509 @@ async fn roster_import_assignment_isolation_and_recovery() {
         .unwrap();
     drop(db);
     connection_handle.await.unwrap();
+}
+
+fn operator_write(id: &str, name: &str, role: &str, rooms: Value) -> Value {
+    json!({"request_id":token(),"id":id,"base_version":0,"username":name,"display_name":name,"role":role,"enabled":true,"all_rooms":rooms.is_null(),"room_ids":rooms.as_array().cloned().unwrap_or_default(),"password":"synthetic-operator-password"})
+}
+async fn expect_ok(response: Response) -> Value {
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, 200, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn operators_scopes_events_and_recovery() {
+    let database = std::env::var("WCCS_TEST_DATABASE_URL").unwrap();
+    let (db, connection) = tokio_postgres::connect(&database, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let connection_handle = tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let schema = format!("test_operators_{}", &token()[..24]);
+    db.batch_execute(&format!(
+        "CREATE SCHEMA {schema}; SET search_path TO {schema}"
+    ))
+    .await
+    .unwrap();
+    // Upgrade a real v4 database, including an actor that has no persistent identity.
+    for migration in [
+        include_str!("../migrations/001_tools.sql"),
+        include_str!("../migrations/002_seating.sql"),
+        include_str!("../migrations/003_lifecycle.sql"),
+        include_str!("../migrations/004_roster.sql"),
+    ] {
+        db.batch_execute(migration).await.unwrap();
+    }
+    db.batch_execute("INSERT INTO audit_events(actor,operation,request_id,created_at) VALUES('historical-admin','legacy_action','legacy-request',100)").await.unwrap();
+    let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
+    let config = Config {
+        bind: "127.0.0.1:0".into(),
+        origin: String::new(),
+        database_url: format!(
+            "{database} options='-c search_path={schema} -c statement_timeout=10000'"
+        ),
+        static_dir: "../../web/dist".into(),
+        trusted_proxies: vec![],
+        admin_username: "test-admin".into(),
+        admin_password_hash: Argon2::default()
+            .hash_password(b"synthetic-test-password", &salt)
+            .unwrap()
+            .to_string(),
+    };
+    let (mut admin, server) = start(config.clone()).await;
+    for path in [
+        "state",
+        "session",
+        "operators",
+        "events",
+        "events/1",
+        "devices/a/history",
+        "roster/c/history",
+    ] {
+        assert_eq!(admin.get(path).await.status(), 401, "{path}");
+    }
+    admin.login().await;
+    let admin_identity = expect_ok(admin.get("session").await).await;
+    let admin_id = admin_identity["id"].as_str().unwrap();
+    assert_eq!(
+        admin
+            .client
+            .get(format!("{}/api/state", admin.url))
+            .header("Cookie", &admin.cookie)
+            .header("X-WCCS-Session", "another-login")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
+    let mut last = operator_write(admin_id, "test-admin", "viewer", Value::Null);
+    last["base_version"] = json!(1);
+    last.as_object_mut().unwrap().remove("password");
+    assert_eq!(admin.post("operators", &last).await.status(), 409);
+    last["role"] = json!("admin");
+    last["enabled"] = json!(false);
+    assert_eq!(admin.post("operators", &last).await.status(), 409);
+    for (id, ip) in [("A", "10.0.1.1"), ("B", "10.0.2.1")] {
+        let mut room = room_input(id, 1, 1);
+        room["seats"][0]["expected_ip"] = json!(ip);
+        preview_room(&admin, &mut room).await;
+        expect_ok(admin.post("rooms/save", &room).await).await;
+    }
+    let scoped = operator_write("operator-a", " Room-A ", "operator", json!(["A"]));
+    let first = expect_ok(admin.post("operators", &scoped).await).await;
+    assert_eq!(
+        expect_ok(admin.post("operators", &scoped).await).await,
+        first
+    );
+    let mut different = scoped.clone();
+    different["display_name"] = json!("different");
+    assert_eq!(admin.post("operators", &different).await.status(), 409);
+    different = scoped.clone();
+    different["password"] = json!("different-password");
+    assert_eq!(admin.post("operators", &different).await.status(), 409);
+    different = scoped.clone();
+    different["request_id"] = json!(token());
+    different["id"] = json!("duplicate");
+    different["username"] = json!("room-a");
+    assert_eq!(admin.post("operators", &different).await.status(), 409);
+    let viewer_input = operator_write("viewer-a", "viewer-a", "viewer", json!(["A"]));
+    expect_ok(admin.post("operators", &viewer_input).await).await;
+    let global_input = operator_write("global-viewer", "global-viewer", "viewer", Value::Null);
+    expect_ok(admin.post("operators", &global_input).await).await;
+    let second_admin = operator_write("admin-two", "admin-two", "admin", Value::Null);
+    let (a, b) = tokio::join!(
+        admin.post("operators", &second_admin),
+        admin.post("operators", &second_admin)
+    );
+    assert_eq!(expect_ok(a).await, expect_ok(b).await);
+    let operator = admin
+        .identity("ROOM-A", "synthetic-operator-password")
+        .await;
+    let viewer = admin
+        .identity("viewer-a", "synthetic-operator-password")
+        .await;
+    let global = admin
+        .identity("global-viewer", "synthetic-operator-password")
+        .await;
+    assert_eq!(viewer.get("operators").await.status(), 403);
+    assert_eq!(operator.get("operators").await.status(), 403);
+    assert_eq!(viewer.post("operators", &scoped).await.status(), 403);
+    // Synthetic authenticated observations isolate room authorization from network topology.
+    let credential_a = token();
+    for (id, ip) in [
+        ("a", "10.0.1.1"),
+        ("b", "10.0.2.1"),
+        ("unmatched", "10.0.3.1"),
+    ] {
+        let material = token();
+        expect_ok(
+            admin
+                .post(
+                    "devices",
+                    &json!({"id":id,"name":id,"enrollment_token":material}),
+                )
+                .await,
+        )
+        .await;
+        db.execute("UPDATE devices SET lifecycle='enabled',credential_hash=$2,observed_ip=$3,last_seen=$4 WHERE id=$1",&[&id,&wccs_protocol::digest(if id=="a" {&credential_a} else {id}),&ip,&wccs_protocol::now()]).await.unwrap();
+    }
+    let published = json!({"request_id":token(),"base_version":0,"targets":["a","b","unmatched"],"tools":[{"id":"submit","name":"Submit","kind":"script","path":null}]});
+    assert_eq!(
+        operator.post("configuration", &published).await.status(),
+        403
+    );
+    expect_ok(admin.post("configuration", &published).await).await;
+    let current = viewer.state().await;
+    assert_eq!(current["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(current["devices"][0]["id"], "a");
+    assert_eq!(current["targets"], json!(["a"]));
+    assert_eq!(current["seating"]["rooms"].as_array().unwrap().len(), 1);
+    for path in [
+        "devices/b/history",
+        "devices/unmatched/history",
+        "roster/unknown/history",
+    ] {
+        assert_eq!(viewer.get(path).await.status(), 403);
+    }
+    for path in ["rooms/preview", "rooms/save"] {
+        assert_eq!(
+            operator.post(path, &room_input("A", 1, 1)).await.status(),
+            403
+        );
+    }
+    let mut roster = roster_input(
+        &admin,
+        "contest",
+        json!({"kind":"create","name":"Synthetic"}),
+    )
+    .await;
+    assert_eq!(operator.post("roster/preview", &roster).await.status(), 403);
+    assert_eq!(operator.post("roster/commit", &roster).await.status(), 403);
+    roster_commit(&admin, &mut roster).await;
+    let mut imported=roster_input(&admin,"contest",json!({"kind":"import","text":"code\tname\tschool\n001\tA person\tSchool\n002\tB person\tSchool\n003\tUnassigned\tSchool"})).await;
+    roster_commit(&admin, &mut imported).await;
+    let full = admin.state().await;
+    let rooms = full["seating"]["rooms"].as_array().unwrap();
+    let seat_a = rooms.iter().find(|r| r["id"] == "A").unwrap()["seats"][0]["id"].clone();
+    let seat_b = rooms.iter().find(|r| r["id"] == "B").unwrap()["seats"][0]["id"].clone();
+    let participants = &full["roster"]["contests"][0]["participants"];
+    let mut assign=roster_input(&admin,"contest",json!({"kind":"assign","changes":[{"participant_id":participants[0]["id"],"seat_id":seat_a},{"participant_id":participants[1]["id"],"seat_id":seat_b}]})).await;
+    roster_commit(&admin, &mut assign).await;
+    let filtered = viewer.state().await;
+    assert_eq!(
+        filtered["roster"]["contests"][0]["participants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        filtered["roster"]["contests"][0]["participants"][0]["code"],
+        "001"
+    );
+    for (path, body) in [
+        (
+            "registration-window",
+            json!({"request_id":token(),"base_version":1,"open":true}),
+        ),
+        (
+            "devices",
+            json!({"id":"forbidden","name":"forbidden","enrollment_token":token()}),
+        ),
+        (
+            "seating/review",
+            json!({"request_id":token(),"base_version":1,"device_id":"a","exclude":true}),
+        ),
+    ] {
+        assert_eq!(operator.post(path, &body).await.status(), 403);
+    }
+    let recheck = json!({"request_id":token(),"base_version":1,"targets":["a"]});
+    assert_eq!(viewer.post("recheck", &recheck).await.status(), 403);
+    expect_ok(operator.post("recheck", &recheck).await).await;
+    let mut cross = recheck.clone();
+    cross["request_id"] = json!(token());
+    cross["targets"] = json!(["a", "b"]);
+    assert_eq!(operator.post("recheck", &cross).await.status(), 403);
+    assert_eq!(admin.post("recheck", &recheck).await.status(), 403); // receipt is actor-bound
+    let disable = device_action(&admin, "a", "disable").await;
+    assert_eq!(viewer.post("devices/action", &disable).await.status(), 403);
+    expect_ok(operator.post("devices/action", &disable).await).await;
+    assert_eq!(
+        operator
+            .post(
+                "devices/action",
+                &device_action(&admin, "b", "disable").await
+            )
+            .await
+            .status(),
+        403
+    );
+    assert_eq!(
+        operator
+            .post(
+                "devices/action",
+                &device_action(&admin, "a", "rotate").await
+            )
+            .await
+            .status(),
+        403
+    );
+    expect_ok(
+        operator
+            .post(
+                "devices/action",
+                &device_action(&admin, "a", "enable").await,
+            )
+            .await,
+    )
+    .await;
+    let selected = json!({"request_id":token(),"base_version":1,"seat_ids":[seat_a]});
+    assert_eq!(
+        viewer
+            .post("seating/check-preview", &selected)
+            .await
+            .status(),
+        403
+    );
+    let preview = expect_ok(operator.post("seating/check-preview", &selected).await).await;
+    let mut commit = selected.clone();
+    commit["preview_token"] = preview["preview_token"].clone();
+    let mut cross = commit.clone();
+    cross["seat_ids"] = json!([seat_a, seat_b]);
+    assert_eq!(
+        operator
+            .post("seating/check-preview", &cross)
+            .await
+            .status(),
+        403
+    );
+    assert_eq!(operator.post("seating/check", &cross).await.status(), 403);
+    // Permission changes after preview retire every existing session, including retries.
+    let mut change = scoped.clone();
+    change["username"] = json!("Room-A");
+    change["request_id"] = json!(token());
+    change["base_version"] = json!(1);
+    change["role"] = json!("viewer");
+    change.as_object_mut().unwrap().remove("password");
+    expect_ok(admin.post("operators", &change).await).await;
+    assert_eq!(operator.post("seating/check", &commit).await.status(), 401);
+    assert_eq!(operator.post("recheck", &recheck).await.status(), 401);
+    assert_eq!(operator.get("events").await.status(), 401);
+    let downgraded = admin
+        .identity("room-a", "synthetic-operator-password")
+        .await;
+    assert_eq!(
+        downgraded.post("seating/check", &commit).await.status(),
+        403
+    );
+    // Competing permission edits share a baseline. Exactly one commits.
+    change["request_id"] = json!(token());
+    change["base_version"] = json!(2);
+    change["role"] = json!("operator");
+    let mut other = change.clone();
+    other["request_id"] = json!(token());
+    other["display_name"] = json!("Concurrent");
+    let (a, b) = tokio::join!(
+        admin.post("operators", &change),
+        admin.post("operators", &other)
+    );
+    let mut statuses = [a.status().as_u16(), b.status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [200, 409]);
+    let restored = admin
+        .identity("room-a", "synthetic-operator-password")
+        .await;
+    assert_eq!(
+        expect_ok(restored.post("recheck", &recheck).await).await["request_id"],
+        recheck["request_id"]
+    );
+    // Disable then re-enable cannot resurrect an old session. Password reset also revokes it.
+    change["request_id"] = json!(token());
+    change["base_version"] = json!(3);
+    change["enabled"] = json!(false);
+    expect_ok(admin.post("operators", &change).await).await;
+    assert_eq!(restored.get("state").await.status(), 401);
+    let denied = admin
+        .client
+        .post(format!("{}/api/login", admin.url))
+        .header("Origin", &admin.url)
+        .json(&json!({"username":"room-a","password":"synthetic-operator-password"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401);
+    change["request_id"] = json!(token());
+    change["base_version"] = json!(4);
+    change["enabled"] = json!(true);
+    change["password"] = json!("new-synthetic-password");
+    expect_ok(admin.post("operators", &change).await).await;
+    assert_eq!(restored.get("state").await.status(), 401);
+    let restored = admin.identity("room-a", "new-synthetic-password").await;
+    expect_ok(restored.post("seating/check", &commit).await).await;
+    let snapshot = admin.state().await;
+    let device = snapshot["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "a")
+        .unwrap();
+    let report = result(
+        &json!({"job_id":device["desired_job"],"configuration":snapshot["configuration"]}),
+        "a",
+    );
+    expect_ok(admin.device("result", &credential_a, &report).await).await;
+    expect_ok(admin.device("result", &credential_a, &report).await).await;
+    let results = expect_ok(
+        viewer
+            .get("events?device_id=a&category=task_result&outcome=failed")
+            .await,
+    )
+    .await;
+    assert_eq!(results["items"].as_array().unwrap().len(), 1);
+    let result_id = results["items"][0]["id"].as_str().unwrap();
+    db.batch_execute("UPDATE devices SET observed_ip='10.0.2.1' WHERE id='a'")
+        .await
+        .unwrap();
+    assert_eq!(viewer.get("devices/a/history").await.status(), 403);
+    assert_eq!(
+        expect_ok(viewer.get(&format!("events/{result_id}")).await).await["room_ids"],
+        json!(["A"])
+    );
+    db.batch_execute("UPDATE devices SET observed_ip='10.0.1.1' WHERE id='a'")
+        .await
+        .unwrap();
+
+    // Fault injection proves account update, receipt and event commit atomically.
+    db.batch_execute("CREATE FUNCTION fail_operator_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.operation='operator_save' THEN RAISE EXCEPTION 'synthetic failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_event BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION fail_operator_event()").await.unwrap();
+    let fault = operator_write("fault", "fault", "viewer", Value::Null);
+    assert_eq!(admin.post("operators", &fault).await.status(), 500);
+    assert_eq!(
+        db.query_one("SELECT count(*) FROM operators WHERE id='fault'", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    db.batch_execute(
+        "DROP TRIGGER fail_event ON audit_events; DROP FUNCTION fail_operator_event()",
+    )
+    .await
+    .unwrap();
+    expect_ok(admin.post("operators", &fault).await).await;
+    let all = expect_ok(admin.get("events?limit=100").await).await;
+    assert!(!all.to_string().contains("synthetic-operator-password"));
+    assert!(!all.to_string().contains("password_hash"));
+    assert!(!all.to_string().contains("enrollment_token"));
+    let scoped_events = expect_ok(viewer.get("events?limit=100").await).await;
+    assert!(!scoped_events["items"].as_array().unwrap().is_empty());
+    for event in scoped_events["items"].as_array().unwrap() {
+        assert_eq!(event["room_ids"], json!(["A"]));
+        assert_eq!(event["legacy"], false);
+    }
+    for filter in [
+        "device_id=b",
+        "room_id=B",
+        "request_id=legacy-request",
+        "operation=operator_save",
+    ] {
+        assert_eq!(
+            expect_ok(viewer.get(&format!("events?{filter}")).await).await["items"],
+            json!([])
+        );
+    }
+    assert_eq!(viewer.get("events/1").await.status(), 404);
+    let legacy = expect_ok(global.get("events/1").await).await;
+    assert_eq!(legacy["actor_name"], "historical-admin");
+    assert!(legacy["actor_id"].is_null());
+    assert!(legacy["room_ids"].is_null());
+    assert_eq!(legacy["legacy"], true);
+    let by_request = expect_ok(
+        viewer
+            .get(&format!(
+                "events?request_id={}",
+                recheck["request_id"].as_str().unwrap()
+            ))
+            .await,
+    )
+    .await;
+    assert!(by_request["items"].as_array().unwrap().len() >= 2);
+    let actor = by_request["items"][0]["actor_id"].as_str().unwrap();
+    assert_eq!(actor, "operator-a");
+    assert!(!expect_ok(viewer.get("events?actor_id=operator-a&device_id=a&room_id=A&category=management&outcome=succeeded").await).await["items"].as_array().unwrap().is_empty());
+    assert!(
+        !expect_ok(global.get("events?contest_id=contest").await).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        expect_ok(global.get("events?from=100&to=100").await).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(global.get("events?from=2&to=1").await.status(), 400);
+    // Pagination has a high water mark and a time/id tie-breaker, including backdated arrivals.
+    let first_page = expect_ok(global.get("events?limit=2").await).await;
+    let old_count: i64 = db
+        .query_one(
+            "SELECT count(*) FROM events WHERE operation<>'operator_save'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    db.batch_execute("INSERT INTO events(source,source_id,category,occurred_at,operation,outcome,detail) VALUES('synthetic','late','system',100,'late','recorded','{}')").await.unwrap();
+    let mut ids = std::collections::HashSet::new();
+    let mut page = first_page;
+    loop {
+        for event in page["items"].as_array().unwrap() {
+            assert_ne!(event["operation"], "late");
+            assert!(ids.insert(event["id"].as_str().unwrap().to_owned()));
+        }
+        let Some(cursor) = page["next_cursor"].as_str() else {
+            break;
+        };
+        page = expect_ok(global.get(&format!("events?limit=2&cursor={cursor}")).await).await;
+    }
+    assert_eq!(ids.len() as i64, old_count);
+    // Self demotion commits once, then requires a new login. Another admin remains usable.
+    let second = admin
+        .identity("admin-two", "synthetic-operator-password")
+        .await;
+    let mut self_edit = second_admin.clone();
+    self_edit["base_version"] = json!(1);
+    self_edit["request_id"] = json!(token());
+    self_edit["role"] = json!("viewer");
+    self_edit.as_object_mut().unwrap().remove("password");
+    expect_ok(second.post("operators", &self_edit).await).await;
+    assert_eq!(second.get("state").await.status(), 401);
+    assert_eq!(admin.post("operators", &last).await.status(), 409);
+    server.abort();
+    let _ = server.await;
+    let mut config = config;
+    config.admin_username = "changed-config-must-not-create-account".into();
+    let (mut restarted, server) = start(config).await;
+    assert_eq!(restarted.get("state").await.status(), 401);
+    restarted.login().await;
+    assert_eq!(
+        expect_ok(restarted.post("operators", &scoped).await).await,
+        first
+    );
+    let resumed = restarted.identity("room-a", "new-synthetic-password").await;
+    assert_eq!(resumed.state().await["identity"]["version"], 5);
+    assert_eq!(expect_ok(restarted.get("events/1").await).await, legacy);
+    server.abort();
+    let _ = server.await;
+    db.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+    connection_handle.abort();
 }

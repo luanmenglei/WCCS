@@ -20,7 +20,7 @@ WCCS 用于 Windows 10 多机房单人算法竞赛，目标规模为 200～300 �
 
 ## 当前阶段
 
-M1 已交付 `wccs-inventory` 和 `wccs-session`。采集器通过原生 Windows API 只读采集系统、账户权限、磁盘卷和网络，并按明确配置路径检查工具文件，输出 JSON 与脱敏摘要。会话原型使用 Win32 窗口展示合成身份、输入提示和退出入口，开发机交互与异常重启已验证。工具候选清单及客户端配置检查已实现，服务端路径管理页面和下发纳入 M2。机房镜像、多屏及系统会话切换仍待现场验证。
+M1 已交付 `wccs-inventory` 和 `wccs-session`。采集器通过原生 Windows API 只读采集系统、账户权限、磁盘卷和网络，并按明确配置路径检查工具文件，输出 JSON 与脱敏摘要。会话原型使用 Win32 窗口展示合成身份、输入提示和退出入口，开发机交互与异常重启已验证。工具候选清单及客户端配置检查已实现，M2 已提供 Rust 服务、PostgreSQL 持久化、管理页面、设备注册心跳与配置检查回传。Windows 开发机闭环通过，实际 Linux 运行待补。机房镜像、多屏及系统会话切换仍待现场验证。
 
 ## 开发入口
 
@@ -54,6 +54,18 @@ pwsh -NoProfile -File scripts/check-rust.ps1
 
 每屏展示合成姓名、学校、座位号与等待状态。触碰键鼠显示 3 秒冷却提示，聚合计数保存在忽略目录 `local/waiting/`。点击“退出开发测试”、按 Esc 或 Alt+F4 可退出全部窗口，Tab 后按 Enter 也可操作退出按钮。运行条件为 Windows 10 1703+ x64，详见[任务及验证记录](docs/tasks/m1-session-waiting.md)。
 
+## 工具配置管理闭环
+
+```powershell
+pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
+& './target/x86_64-pc-windows-msvc/release/wccs-server.exe' --config local/m2/server.json
+& './target/x86_64-pc-windows-msvc/release/wccs-agent.exe' --identity local/m2/device.json
+```
+
+服务与客户端分别运行在终端。浏览器访问 `http://127.0.0.1:8787/`，登录材料位于忽略目录 `local/m2/admin-access.json`。选择候选或自定义工具，编辑完整路径、选择目标并发布，设备区显示期望/实际配置版本和逐项结果。前端生产资源位于 `web/dist/`，由服务同源提供。
+
+上述命令使用本轮独立 PostgreSQL 测试集群。新环境初始化、Linux 原生启动、浏览器步骤及全部证据见 [M2 任务记录](docs/tasks/m2-tool-configuration.md)。本切片使用单管理员、一份全局配置及目标集合、HTTP(S) 轮询与普通 Windows 进程入口。
+
 ## 文档导航
 
 | 文档 | 用途 |
@@ -74,6 +86,6 @@ pwsh -NoProfile -File scripts/check-rust.ps1
 
 可以向 Codex 提交以下任务。
 
-> 阅读 AGENTS.md、需求基线和路线图，推进 M2 的 Linux 服务、设备注册及心跳、管理 UI 基础闭环。明确 Linux 验证环境，固定应用工程版本，首先交付工具路径管理、鉴权、版本化下发和检查回传的可验收切片。
+> 阅读 AGENTS.md、需求基线、路线图和 M2 工具配置记录，先补齐实际 Linux 运行及 HTTPS 跨机闭环，再推进设备凭据生命周期、WSS、Windows 服务和等待界面鉴权 IPC。
 
 机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。

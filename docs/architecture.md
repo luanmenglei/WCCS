@@ -1,6 +1,6 @@
 # 架构设计
 
-状态为初始设计。需求来源见 [需求基线](requirements.md)，当前技术方向见 [ADR 0002](decisions/0002-linux-rust-stack.md)。服务端运行在 Linux，两端主实现语言采用 Rust，Web 管理界面采用 React + TypeScript + Vite。
+状态为持续演进设计，M1 和 M2 首个工具配置切片已落地。需求来源见 [需求基线](requirements.md)，当前技术方向见 [ADR 0002](decisions/0002-linux-rust-stack.md)。服务端运行在 Linux，两端主实现语言采用 Rust，Web 管理界面采用 React + TypeScript + Vite。
 
 ## 组件与通信
 
@@ -39,7 +39,7 @@ Rust 使用 Cargo workspace，共享协议类型和纯状态逻辑。服务器�
 
 工具配置由服务端统一管理。项目提供候选工具清单，管理员选择工具并填写实际客户端文件路径。服务端生成针对目标机器的有效配置快照，包含工具 ID、显示名、文件种类、完整路径和配置版本。客户端读取快照中的逐项路径，返回存在性、可读版本资源及错误，结果携带该配置版本。未配置项返回 `not_configured`，配置路径缺失返回 `missing`，管理员据此修正配置。[ADR 0004](decisions/0004-server-managed-tool-paths.md)
 
-M1 的只读采集器通过 `--tools-config` 读取显式 JSON 快照，用于本地验证上述检查边界。M2 实现服务端配置存储、管理页面、授权下发和结果回传，按配置版本区分目标配置和过期检查结果。
+M1 的只读采集器通过 `--tools-config` 读取显式 JSON 快照，用于本地验证上述检查边界。M2 首个切片已实现服务端配置存储、管理页面、授权下发和结果回传，按配置版本及任务编号区分目标配置和过期检查结果。当前落地使用单管理员、一份全局配置及目标集合、HTTP(S) 轮询和普通 Windows 进程入口。WSS、Windows 服务、权限扩展及等待界面控制后续接入，见 [ADR 0005](decisions/0005-m2-tool-configuration-slice.md)。
 
 Web 管理端使用独立的前端工程。Node.js 用于构建，生成的静态资源随 Linux 服务端发布，由 Axum 同源提供页面、API 和 WSS 入口。客户端控制连接和管理员实时连接采用独立的权限及消息范围。HTTPS 证书与内网信任配置在部署阶段落实。
 

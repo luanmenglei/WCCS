@@ -44,7 +44,7 @@ git diff --check
 git diff --cached --check
 ```
 
-当前命令覆盖仓库基础设施与 M1 采集工具、用户会话等待界面的 Windows 构建、格式、Clippy 和测试。`check-rust.ps1` 固定 MSVC 与 Windows SDK 环境。原型窗口运行及退出方法见 `docs/tasks/m1-session-waiting.md`，机房真机验收条件和后续应用工程状态见 `docs/roadmap.md`。
+当前命令覆盖仓库基础设施及五个 Rust 包的 Windows 构建、格式、Clippy 和常规测试。M2 的 PostgreSQL 和前端完整检查使用 `scripts/check-m2.ps1 -ServerConfig local/m2/server.json`，Linux 原生入口为 `python3 scripts/check-linux.py`，运行条件见 `docs/tasks/m2-tool-configuration.md`。`check-rust.ps1` 固定 MSVC 与 Windows SDK 环境。原型窗口运行及退出方法见 `docs/tasks/m1-session-waiting.md`，机房真机验收条件和后续应用工程状态见 `docs/roadmap.md`。
 
 ## Git 与交付
 

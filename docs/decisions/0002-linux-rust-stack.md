@@ -55,3 +55,7 @@ unsafe 对应编译器无法核实的契约，代码审查需要验证相应前�
 服务端与客户端共享代码时保持协议版本兼容，服务端仍独立鉴权和校验。Web 前端使用生成或契约检查的 TypeScript 类型，并进行运行时输入校验。
 
 出现系统 API 兼容性、UI 实现成本或构建环境问题时，记录具体证据并更新决策。最终验收包括 Linux 服务运行、Windows 客户端行为及管理员浏览器全流程。
+
+## M2 首个切片落地
+
+2026-11-10 已建立 Axum/Tokio 服务、PostgreSQL 版本 1 迁移和 React/TypeScript/Vite 管理端，沿用 Rust 1.99.1，增加 Linux GNU 目标。Windows 检查入口复用采集器。当前 HTTP(S) 轮询、单管理员和普通进程的切片边界见 [ADR 0005](0005-m2-tool-configuration-slice.md)，实际 Linux 运行仍待环境。

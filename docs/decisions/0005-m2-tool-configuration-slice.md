@@ -1,0 +1,47 @@
+# ADR 0005 M2 工具配置首个闭环的实现边界
+
+日期为 2026-11-10。状态为首个切片的实现选择，Windows 开发机联调通过，实际 Linux 运行待补。
+
+## 背景
+
+本轮交付管理员浏览器维护路径、指定目标、Windows 检查与结果反馈。沿用 ADR 0002 的 Rust、Axum、PostgreSQL 和 React 技术栈，复用 ADR 0004 的候选清单及采集器检查逻辑。
+
+本机 WSL 提示尚未安装，无 Docker / Podman 命令或对应服务，SSH 配置文件不存在，当前任务也未提供远端连接目标。发现已有 PostgreSQL 18.4 二进制，使用独立 `local/m2/postgres` 数据目录及 55432 端口完成开发验证。
+
+## 决定
+
+- 新增 `wccs-protocol`、`wccs-server` 和 `wccs-agent`，沿用 Cargo workspace、Rust 1.99.1 和 Cargo.lock。共享协议复用采集器模型，Windows 文件版本查询通过既有安全封装导出。
+- 本切片维护一份全局工具配置及目标集合。每次发布生成不可变快照和新版本，替换当前目标集合。退出目标集合的设备取消期望任务，保留历史结果。多个机房独立配置档案在后续业务需求中扩展。
+- 管理员采用一个部署配置中的管理员身份，具备全设备范围权限。Argon2 摘要校验密码，浏览器使用 HttpOnly / SameSite=Strict Cookie，HTTPS origin 下附加 Secure。写操作检查 Origin 和 CSRF 令牌，会话有效 8 小时，服务重启后重新登录。登录每分钟最多 30 次，注册每分钟最多 600 次，分别限流。
+- 管理员创建设备及单设备注册材料，注册材料有效 24 小时。客户端先持久化自己的随机令牌，再进行注册。重复注册需要匹配已注册设备令牌，旧注册材料无法替换设备身份。服务端保存 SHA-256 摘要，并以唯一索引保证设备凭据单一归属，设备 API 使用独立 Bearer 认证。
+- 工具发布、重新检查、任务及请求去重记录使用 PostgreSQL 事务。发布和重查持有配置头行锁，校验基准版本。重复请求编号与内容匹配时返回原结果，内容不同返回 409。
+- 每个检查任务有独立编号和 24 小时有效期。回传校验设备、任务、配置版本及全部工具字段。相同结果可重复提交，不同结果返回 409。按任务创建序号选取最新检查证据，晚到的旧结果无法覆盖新结果。
+- 设备主动通过 HTTP(S) 心跳获取任务，成功周期 5～7 秒，失败退避至 60～62 秒。管理页面每 3 秒拉取完整快照，35 秒无心跳标记离线。此只读工具切片采用轮询，WSS 控制通道与批量等待界面在后续 M2 切片实施。
+- `wccs-agent` 目前为普通 Windows 前台进程入口，单次模式使用 `--once`。文件锁由 Windows 句柄控制，异常退出后自动释放。检查结果写入本地 pending 文件后发送，响应丢失或重启时重发相同内容。工具文件仅检查存在性及 PE 版本资源。
+- HTTP 限于本地回环开发，客户端远端 URL 需要 HTTPS，禁止跳转和凭据型 URL。部署使用同源 HTTPS 反向代理。PostgreSQL 驱动当前使用 NoTls，数据库安排在同机回环或 Unix socket，跨主机数据库 TLS 接入需另行实现。
+
+## 固定依赖
+
+| 部分 | 版本与用途 |
+| --- | --- |
+| HTTP 服务 | Axum 0.8.9、Tokio 1.54.1，异步请求与生命周期 |
+| 数据库 | tokio-postgres 0.7.18，参数化查询、事务与 JSONB |
+| 静态资源 | tower-http 0.7.1，同源发布前端 |
+| 密码及令牌 | argon2 0.5.3、rand 0.8.5、sha2 0.10.9 |
+| 客户端请求 | reqwest 0.12.28，rustls HTTPS、超时与 JSON |
+| 前端构建 | Node.js 26.13.0、npm 11.20.0、Vite 8.3.7、TypeScript 5.9.3 |
+| 管理界面 | React / React DOM 19.3.1、Zod 4.6.7，渲染与运行时协议校验 |
+| 字体 | @fontsource/geist 5.3.0，字体随静态资源离线交付，中文使用系统字体 |
+| 检查工具 | ESLint 10.14.0、Prettier 3.9.10、typescript-eslint 8.72.2、tsx 4.23.15，类型、格式、静态规则及组件测试 |
+
+完整直接依赖见 Cargo.toml 和 web/package.json，传递依赖由两个锁文件固定。minimatch 11.0.5 对 ESLint 与 typescript-eslint 的三处依赖进行精确 override，修复审计报告中的 glob 放大问题，已通过 lint 和安装重现检查。当前 `npm audit` 为 0 项。
+
+Axum 服务启动及 Vite 静态构建方式依据官方文档核对。[Axum 文档](https://docs.rs/axum/0.8.9/axum/fn.serve.html)、[Vite 构建说明](https://vite.dev/guide/)
+
+## 验证范围与后续条件
+
+实际 Windows 检查与 PostgreSQL 持久化通过，Linux GNU 目标交叉类型检查通过。实际 Linux 构建、进程运行、HTTPS 代理、证书信任、systemd 与机房网络仍需对应环境。
+
+完整角色和机房授权、设备凭据到期轮换与撤销、Windows 服务安装、WSS、等待界面 IPC、历史记录清理和容量测量按后续 M2/M6 实施。本切片的 PostgreSQL 连接由异步互斥量串行使用，尚无 500 客户端容量结论。数据库连接中断需要重启服务恢复，客户端可自动重连服务。
+
+compilecpp / submit 的脚本实现和独立发布继续按 M3 实施。运行方法与证据见 [M2 任务记录](../tasks/m2-tool-configuration.md)。

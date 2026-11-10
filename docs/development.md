@@ -65,7 +65,7 @@ Rust 纯业务模块采用 `#![forbid(unsafe_code)]`。平台适配模块逐处�
 
 首个 Rust 工程固定 `rust-toolchain.toml`、Cargo.lock、目标平台与最低系统条件。Windows 客户端使用 MSVC 工具链及 Windows SDK。Linux 服务在对应 Linux 环境构建和运行，共享模块在两个平台验证。
 
-已接入 `scripts/check-rust.ps1`，固定 Windows 开发工具集与 SDK，选择 `wccs-inventory` 和 `wccs-session` 包执行 `cargo fmt --all -- --check`、发布构建、Clippy 和测试。全部构建与测试使用 `--locked` 和 `--target x86_64-pc-windows-msvc`。具体命令见 [采集工具说明](inventory.md) 与 [等待界面任务记录](tasks/m1-session-waiting.md)。后续 Linux 构建按目标包选择依赖。
+已接入 `scripts/check-rust.ps1`，固定 Windows 开发工具集与 SDK，选择 `wccs-inventory`、`wccs-session`、`wccs-protocol`、`wccs-server` 和 `wccs-agent` 包执行 `cargo fmt --all -- --check`、发布构建、Clippy 和测试。全部构建与测试使用 `--locked` 和 `--target x86_64-pc-windows-msvc`。具体命令见 [采集工具说明](inventory.md) 与 [等待界面任务记录](tasks/m1-session-waiting.md)。后续 Linux 构建按目标包选择依赖。
 
 前端使用 React + TypeScript + Vite，创建工程时固定 Node.js、提交 package-lock.json，提供 `npm ci`、类型检查、lint、组件测试及生产构建入口。浏览器端到端测试覆盖真实服务端与客户端模拟器交互。
 
@@ -92,3 +92,9 @@ Rust 纯业务模块采用 `#![forbid(unsafe_code)]`。平台适配模块逐处�
 - 没有遗留的临时调试、真实凭据或无关文件。
 - 关键改动具备适合其风险的回归验证，相关文档同步。
 - 交付说明能让下一次 Codex 会话继续工作，无需依赖聊天历史。
+
+### M2 开发检查入口
+
+`pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json` 执行固定 Windows 检查、隔离 schema 的 PostgreSQL HTTP 集成、npm ci 和前端检查。配置文件必须指向独立测试数据库。数据库连接通过临时环境变量传给测试，脚本结束后恢复环境。
+
+Linux 使用 `python3 scripts/check-linux.py` 原生构建与检查。设置 `WCCS_TEST_DATABASE_URL` 后额外执行数据库 HTTP 测试。Windows 上 `cargo check --locked -p wccs-server -p wccs-protocol --target x86_64-unknown-linux-gnu` 提供交叉类型检查证据。详细运行边界见 [M2 记录](tasks/m2-tool-configuration.md)。

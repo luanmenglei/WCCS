@@ -3,6 +3,7 @@
 ## 当前可执行检查
 
 ```powershell
+pwsh -NoProfile -File scripts/check-rust.ps1
 python scripts/check_repo.py
 python scripts/check_repo.py --staged
 python -m unittest discover -s scripts/tests -v
@@ -12,9 +13,11 @@ git diff --cached --check
 
 仓库检查使用标准库，检查 Git 可见文件的文本编码、换行、行末空白、单文件大小、常见敏感文件名和 Markdown 相对文件链接。默认检查工作区及未忽略的新文件，`--staged` 检查暂存快照。外部网页和 Markdown 标题锚点由人工核对。
 
+`check-rust.ps1` 在 Windows 上固定 Rust 1.99.1、MSVC 14.44.35207 和 SDK 10.0.19041.0，编译运行最小 C / Rust 程序，并执行采集器发布构建、rustfmt、Clippy 和 17 项测试。权限不足及缺失字段使用合成数据和可替换查询验证，CLI 集成测试在独立临时目录运行真实 Windows 采集并清理自身产物。实际运行结果见 [M1 任务记录](tasks/m1-inventory.md)。
+
 ## 后续自动化验证
 
-首个应用切片需要同时提供构建和运行入口。协议状态逻辑、身份迁移、重试、删除范围和不确定提交结果需有回归验证。集成验证使用临时数据、合成选手与隔离的 DOMjudge 测试实例。
+采集切片已有构建和运行入口。后续协议状态逻辑、身份迁移、重试、删除范围和不确定提交结果需有回归验证。集成验证使用临时数据、合成选手与隔离的 DOMjudge 测试实例。
 
 容量验证由模拟客户端执行，模拟器应覆盖协议、认证和事件行为。Windows 会话及复原能力另外通过真实系统验证。
 

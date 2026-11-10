@@ -61,7 +61,7 @@ Rust 纯业务模块采用 `#![forbid(unsafe_code)]`。平台适配模块逐处�
 
 首个 Rust 工程固定 `rust-toolchain.toml`、Cargo.lock、目标平台与最低系统条件。Windows 客户端使用 MSVC 工具链及 Windows SDK。Linux 服务在对应 Linux 环境构建和运行，共享模块在两个平台验证。
 
-计划接入的 Rust 检查包括 `cargo fmt --all -- --check`，以及按目标平台选择包的 `cargo clippy --locked --all-targets -- -D warnings` 和 `cargo test --locked`。具体包选择由创建工程时的脚本固定，避免 Linux 构建引入 Windows 专用包。
+已接入 `scripts/check-rust.ps1`，固定 Windows 开发工具集与 SDK，选择 `wccs-inventory` 包执行 `cargo fmt --all -- --check`、发布构建、Clippy 和测试。全部构建与测试使用 `--locked` 和 `--target x86_64-pc-windows-msvc`。具体命令见 [采集工具说明](inventory.md)。后续 Linux 构建按目标包选择依赖。
 
 前端使用 React + TypeScript + Vite，创建工程时固定 Node.js、提交 package-lock.json，提供 `npm ci`、类型检查、lint、组件测试及生产构建入口。浏览器端到端测试覆盖真实服务端与客户端模拟器交互。
 

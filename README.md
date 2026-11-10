@@ -17,7 +17,7 @@ WCCS 用于 Windows 10 多机房单人算法竞赛，目标规模为 200～300 �
 
 ## 当前阶段
 
-项目处于仓库与架构初始化阶段，当前交付包括项目指令、需求基线、设计文档、开发规范和可执行的仓库检查。下一步为只读环境采集及 Windows 技术验证。
+M1 的首个切片已交付 `wccs-inventory`。它通过原生 Windows API 只读采集系统、账户权限、磁盘卷、网络和竞赛工具文件，输出 JSON 与脱敏摘要。下一步为 Rust 原生用户会话等待界面及机房环境验证。
 
 ## 开发入口
 
@@ -29,7 +29,16 @@ python scripts/check_repo.py
 python -m unittest discover -s scripts/tests -v
 ```
 
-`setup.ps1` 设置本仓库的换行和 hook 配置。新克隆或新的开发环境需要运行一次。应用工具链版本在首个应用工程落地时固定。
+`setup.ps1` 设置本仓库的换行和 hook 配置。新克隆或新的开发环境需要运行一次。
+
+构建并运行 Windows 采集工具需要 Rust 1.99.1、MSVC 工具集 14.44.35207 和 Windows SDK 10.0.19041.0。依赖已固定并提交 Cargo.lock。
+
+```powershell
+pwsh -NoProfile -File scripts/check-rust.ps1
+& ./target/x86_64-pc-windows-msvc/release/wccs-inventory.exe --output-dir local/environment --context development
+```
+
+每次在 `local/environment/report-*/` 生成 `report.json` 和 `summary.txt`。完整 JSON 包含真实机器信息，保存在忽略目录。当前发布程序依赖 VC++ x64 运行库中的 `VCRUNTIME140.dll`。工具参数、字段状态及采集范围见 [采集工具说明](docs/inventory.md)。
 
 ## 文档导航
 
@@ -42,12 +51,13 @@ python -m unittest discover -s scripts/tests -v
 | [Linux 与 Rust 决策](docs/decisions/0002-linux-rust-stack.md) | 当前实现语言、Web 管理界面及构建边界 |
 | [开发规范](docs/development.md) | 代码、Git、Codex 开发与交接流程 |
 | [验证方案](docs/validation.md) | 自动化检查、容量目标和真机演练 |
+| [采集工具说明](docs/inventory.md) | 构建、运行、报告结构及只读边界 |
 | [路线图](docs/roadmap.md) | 当前状态、任务顺序和完成条件 |
 
 ## 从 Codex 开始下一项工作
 
 可以向 Codex 提交以下任务。
 
-> 阅读 AGENTS.md、需求基线和路线图，执行 M1 的只读环境采集切片。实现可导出脱敏结果的采集工具及验证。依据已有证据推进，现场未知项记录下来。完成后更新路线图，并报告实际运行的检查和下一步。
+> 阅读 AGENTS.md、需求基线和路线图，执行 M1 的 Rust 原生用户会话等待界面切片。使用合成身份信息验证窗口、多屏、DPI、输入触碰提示、会话切换和异常退出，完成后更新路线图并报告验证证据。
 
-该任务只采集开发机或明确指定测试机的环境。机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。
+机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。

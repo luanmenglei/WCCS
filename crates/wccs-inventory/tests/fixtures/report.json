@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "collector_version": "0.1.0",
+  "evidence_context": "development",
+  "collected_at_unix_ms": 0,
+  "collection_mode": "read_only",
+  "system": {
+    "host_name": {"status": "available", "value": "SYNTHETIC-HOST"},
+    "version": {"status": "available", "value": "10.0.19045"},
+    "edition": {"status": "available", "value": "Education"},
+    "display_version": {"status": "unavailable", "reason": "missing", "code": 2},
+    "update_build_revision": {"status": "unavailable", "reason": "missing", "code": 2},
+    "native_architecture": "x86_64",
+    "process_architecture": "x86_64"
+  },
+  "account": {
+    "user_name": {"status": "available", "value": "synthetic-user"},
+    "sid": {"status": "available", "value": "S-1-5-21-123"},
+    "elevated": {"status": "unavailable", "reason": "permission_denied", "code": 5},
+    "elevation_type": {"status": "unavailable", "reason": "permission_denied", "code": 5},
+    "administrators_group": {"status": "unavailable", "reason": "permission_denied", "code": 5},
+    "session_id": {"status": "available", "value": 1}
+  },
+  "volumes": {
+    "enumeration": {"status": "available", "value": null},
+    "entries": [{
+      "volume_guid_path": "\\\\?\\Volume{00000000-0000-0000-0000-000000000001}\\",
+      "mount_paths": {"status": "available", "value": ["D:\\"]},
+      "drive_type": 3,
+      "identity": {"status": "available", "value": {"label": "PRIVATE-LABEL", "serial_number": "12345678", "file_system": "NTFS", "file_system_flags": 0}},
+      "space": {"status": "unavailable", "reason": "permission_denied", "code": 5}
+    }]
+  },
+  "network": {"status": "available", "value": [{
+    "name": "synthetic-adapter",
+    "description": "synthetic Ethernet",
+    "interface_index": 1,
+    "ipv6_interface_index": 1,
+    "interface_type": 6,
+    "operational_status": 1,
+    "mac_address": "02:00:00:00:00:01",
+    "mtu": 1500,
+    "addresses": [{"address": {"status": "available", "value": "192.0.2.42"}, "prefix_length": 24}],
+    "dns_servers": [],
+    "gateways": []
+  }]},
+  "tool_search_directories": ["C:\\synthetic"],
+  "tools": [
+    {"executable": "g++.exe", "detection": {"status": "unavailable", "reason": "not_found_in_search_scope", "code": null}, "search_errors": []},
+    {"executable": "python.exe", "detection": {"status": "available", "value": [{"path": "C:\\synthetic\\python.exe", "file_version": {"status": "unavailable", "reason": "missing", "code": 1813}}]}, "search_errors": []}
+  ]
+}

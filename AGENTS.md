@@ -35,13 +35,14 @@ Windows Contest Control System 服务于 Windows 10 多机房单人算法竞赛�
 
 ```powershell
 pwsh -NoProfile -File scripts/setup.ps1
+pwsh -NoProfile -File scripts/check-rust.ps1
 python scripts/check_repo.py
 python -m unittest discover -s scripts/tests -v
 git diff --check
 git diff --cached --check
 ```
 
-当前这些命令验证仓库基础设施。应用构建和 Windows 真机验收由后续阶段补齐，状态见 `docs/roadmap.md`。
+当前命令覆盖仓库基础设施与 M1 采集工具的 Windows 构建、格式、Clippy 和测试。`check-rust.ps1` 固定本切片的 MSVC 与 Windows SDK 环境。机房真机验收条件和后续应用工程状态见 `docs/roadmap.md`。
 
 ## Git 与交付
 

@@ -102,3 +102,9 @@ Linux 使用 `python3 scripts/check-linux.py` 原生构建与检查。设置 `WC
 ### M2 Windows 宿主验证
 
 等待控制继续使用 check-m2 / check-rust 的五包检查入口。前台验证显式使用独立 identity、session exe 与 `--test-mode`，SCM 使用 `scripts/waiting-service.ps1` 的明确服务名和受保护安装目录。真实服务需提升权限、LocalSystem 与独立交互式账户，具体目标、退出方法和证据分层见 [等待控制记录](tasks/m2-waiting-control.md)。
+
+## Windows 登录组件开发
+
+Credential Provider V2 的窄 COM 边界位于 native/credential-provider，采用固定 MSVC 与 Windows SDK，build-login-provider.ps1 已纳入 check-rust.ps1。其余客户端、协议与后端继续使用既有 Rust workspace。账户 FFI 集中在 login_windows，IPC 在 login_broker，回调窗口和 COM 引用在 provider.cpp 管理。新增平台依赖仅启用现有 windows 0.61.3 的 API feature。
+
+原生系统验证仅面向明确授权的独立 Windows 测试机，安装脚本复核机器名及 MachineGuid，操作前保留关机磁盘回滚点。文件模拟适配器显式使用 --simulate-login，模拟证据与原生证据分别记录。

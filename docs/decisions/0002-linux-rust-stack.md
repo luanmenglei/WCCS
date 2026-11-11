@@ -64,3 +64,7 @@ unsafe 对应编译器无法核实的契约，代码审查需要验证相应前�
 ## 机房座位表切片更新
 
 2026-11-10 已通过版本 2 迁移交付机房与座位、连续编号、批量 IP 绑定和认证来源匹配。工具路径继续由服务端统一管理，全局配置目标语义沿用既有决定。座位检查只展开并重查范围内的唯一在线设备，离线、冲突、未匹配及范围外目标明确跳过。并发、代理和验证边界见 [ADR 0006](0006-m2-room-seating.md) 与 [任务记录](../tasks/m2-room-seating.md)。
+
+## Credential Provider COM 边界
+
+2026-11-11 为 Windows 10 即时登录测试新增 Windows SDK C++17 Credential Provider V2 DLL，使用既有固定 MSVC 与 SDK，不增加第三方运行依赖。该 DLL 仅承担 LogonUI COM、回调和本地凭据序列化，账户状态机、网络、后端和服务宿主继续使用现有五包 Rust workspace。测试与部署条件见 [ADR 0011](0011-contest-login-offline.md)。

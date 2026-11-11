@@ -91,7 +91,7 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 可以向 Codex 提交以下任务。
 
-> 阅读 AGENTS.md、需求、路线图与 M2 等待控制记录，优先实施统一 Windows 登录与 Administrator 场景适配，使用选手已知统一密码的实际账户条件验证登录、等待控制和干预恢复，并补验 SCM / Session 0。Linux 与可信 HTTPS/WSS 按环境继续补齐。
+> 阅读 AGENTS.md、需求、路线图与 M2 比赛账户任务记录，继续补齐独立 Windows 10 原生登录和账户恢复矩阵，再按真实机房镜像验证 Administrator、SCM / Session 0、复原及干预恢复。Linux 原生运行与现场网络按环境继续补齐。
 
 机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。
 
@@ -100,3 +100,8 @@ M2 名单导入与座位分配已提供 `#/roster` 管理入口。启动、TSV �
 ## 等待界面批量控制
 
 管理入口为 `#/waiting`。选择比赛和座位，预览选手、设备与会话后批量进入等待，查看实际完成，再显式结束恢复桌面。服务重启和离线教学期间保持普通环境。独立 8788 开发实例、前台宿主、SCM 安装/卸载和实际验证见 [等待控制记录](docs/tasks/m2-waiting-control.md)。
+
+
+## 比赛专用账户与即时登录
+
+管理入口为 `#/login`。选择比赛和电脑、预览账户与会话、明确确认后准备并登录，核对实际 SID/桌面后进入等待。显式恢复教学和断线撤回本轮限制并保留当前桌面与文件。文件模拟和 Windows 原生测试能力在界面分别标记。测试机安装、恢复命令、验证结果与环境条件见 [比赛账户任务记录](docs/tasks/m2-contest-login.md)。

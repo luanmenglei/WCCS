@@ -91,7 +91,7 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 可以向 Codex 提交以下任务。
 
-> 阅读 AGENTS.md、需求、路线图与 M2 等待控制记录，在提升权限独立测试机补验 SCM、Session 0 和跨用户 IPC，准备 Linux 与可信 HTTPS/WSS 跨机闭环，再按路线图推进 M3 对应业务切片。
+> 阅读 AGENTS.md、需求、路线图与 M2 等待控制记录，优先实施统一 Windows 登录与 Administrator 场景适配，使用选手已知统一密码的实际账户条件验证登录、等待控制和干预恢复，并补验 SCM / Session 0。Linux 与可信 HTTPS/WSS 按环境继续补齐。
 
 机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。
 

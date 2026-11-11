@@ -81,3 +81,9 @@ SCM 安装脚本要求明确服务名、安装目录及身份文件，核对同�
 任务列表在授权过滤后按设备与比赛选取最新命令，最多返回 500 项，支持 contest_id 筛选。单设备的历史重试不会挤占其他设备状态。长期历史通过事件游标入口查询。当前实际界面属于其他命令时单独标明，避免将旧身份快照视作当前显示。服务端无输入内容采集，普通响应无注册材料和设备凭据。容量、真实 HTTPS/WSS、跨 VLAN、机房镜像与多屏继续按环境补验。
 
 进程启动缓解策略使用 STARTUPINFOEX 的 PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY，存储和策略参数在创建期间保持有效，并经 RAII 删除属性列表。该限制只作用于 WCCS 会话子进程，现场辅助软件兼容性需随机房镜像验收。[微软进程属性与扩展点文档](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+
+## Administrator 现场条件修正
+
+2026-11-11 用户确认选手使用 Administrator，密码统一且公开。既有数据目录及进程 DACL 对 SYSTEM 和管理员授予访问权限，因此本地管理员可修改配置、干预服务并接触设备凭据。前述普通权限 IPC 验证继续作为对应测试条件下的证据，生产防干预能力需按新确认的账户条件重新评估。
+
+下一优先切片为统一登录与 Administrator 场景适配，覆盖登录入口、实际会话完成证据、等待控制衔接及干预后的观测和恢复。Windows 登录三类机制尚未实现，技术选型待验证。

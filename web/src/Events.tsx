@@ -371,13 +371,17 @@ export function Events() {
                 查看比赛名单
               </a>
             )}
-            {detail.contest_id && detail.operation.startsWith("waiting_") && (
-              <a
-                href={`#/waiting?contest_id=${encodeURIComponent(detail.contest_id)}`}
-              >
-                查看等待控制
-              </a>
-            )}
+            {detail.contest_id &&
+              (detail.operation.startsWith("waiting_") ||
+                detail.operation.startsWith("login_")) && (
+                <a
+                  href={`#/${detail.operation.startsWith("login_") ? "login" : "waiting"}?contest_id=${encodeURIComponent(detail.contest_id)}`}
+                >
+                  {detail.operation.startsWith("login_")
+                    ? "查看比赛账户"
+                    : "查看等待控制"}
+                </a>
+              )}
             {detail.operation === "publish" && (
               <a href="#/configuration">查看当前工具配置</a>
             )}

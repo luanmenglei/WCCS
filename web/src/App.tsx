@@ -439,9 +439,10 @@ export function App() {
                   <p role="alert">操作员管理需要管理员权限。</p>
                 ))}
               {page === "events" && <Events />}
-              {page === "waiting" && (
+              {(page === "waiting" || page === "login") && (
                 <Waiting
-                  key={contestId}
+                  mode={page}
+                  key={`${page}:${contestId}`}
                   snapshot={snapshot}
                   contestId={contestId}
                   selected={seatSelection}

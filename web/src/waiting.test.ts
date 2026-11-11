@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   actualLabel,
+  accountLabel,
+  accountSchema,
   waitingItemSchema,
   waitingPreviewSchema,
 } from "./waiting-model";
@@ -46,6 +48,40 @@ test("waiting route and receipt preserve exact identity and generation", () => {
   assert.equal(item.command.identity.name, "林小禾");
   assert.equal(item.command.generation, 2);
   assert.equal(actualLabel(item), "离线 · 实际状态未知");
+});
+
+test("login route and simulated recovery evidence remain explicit", () => {
+  assert.equal(pageFromHash("#/login"), "login");
+  const account = accountSchema.parse({
+    adapter: "simulation",
+    revision: 1,
+    phase: "recovery_failed",
+    account: "owned",
+    target_sid: "S-1-5-21-1001",
+    session: "contest",
+    observed_sid: "S-1-5-21-1001",
+    desktop_confirmed: true,
+    recovery_ready: true,
+    tools_ready: true,
+    teaching_enabled: false,
+    detail: "recovery_conflict",
+  });
+  assert.match(accountLabel(account), /模拟.*恢复失败/);
+  assert.equal(accountLabel(undefined), "登录适配尚未就绪");
+  const item = waitingItemSchema.parse({
+    command: { ...command, action: "prepare_login" },
+    stage: "succeeded",
+    report: null,
+    online: false,
+    actual: null,
+    last_seen: 100,
+    updated_at: 100,
+  });
+  assert.equal(actualLabel(item), "离线 · 实际状态未知");
+  assert.equal(
+    accountSchema.safeParse({ ...account, adapter: "native" }).success,
+    false,
+  );
 });
 test("completed receipt never implies fresh actual waiting", () => {
   const item = waitingItemSchema.parse({

@@ -12,6 +12,54 @@ export const identitySchema = z.object({
   room_id: z.string(),
   room_version: z.number(),
 });
+export const accountSchema = z.object({
+  adapter: z.enum(["unavailable", "simulation", "windows_test"]),
+  revision: z.number(),
+  phase: z.enum([
+    "teaching",
+    "preparing",
+    "login_pending",
+    "controlled",
+    "recovering",
+    "recovery_failed",
+  ]),
+  account: z.enum(["unavailable", "absent", "owned", "conflict"]),
+  target_sid: z.string().nullable(),
+  session: z.string(),
+  observed_sid: z.string().nullable(),
+  desktop_confirmed: z.boolean(),
+  recovery_ready: z.boolean(),
+  tools_ready: z.boolean(),
+  teaching_enabled: z.boolean(),
+  detail: z.string(),
+});
+export const actionLabels = {
+  enter: "进入等待",
+  leave: "结束等待",
+  prepare_login: "准备并统一登录",
+  restore_teaching: "恢复教学账户",
+};
+export type ControlAction = keyof typeof actionLabels;
+const actionSchema = z.enum([
+  "enter",
+  "leave",
+  "prepare_login",
+  "restore_teaching",
+]);
+export function accountLabel(
+  account: z.infer<typeof accountSchema> | null | undefined,
+) {
+  if (!account || account.adapter === "unavailable") return "登录适配尚未就绪";
+  const phases = {
+    teaching: "教学可用",
+    preparing: "准备中",
+    login_pending: "等待登录确认",
+    controlled: "比赛账户已登录",
+    recovering: "恢复中",
+    recovery_failed: "恢复失败",
+  };
+  return `${account.adapter === "simulation" ? "模拟" : "Windows 测试"} · ${phases[account.phase]} · ${account.detail}`;
+}
 export const commandSchema = z.object({
   protocol_version: z.literal(1),
   command_id: z.string(),
@@ -22,9 +70,18 @@ export const commandSchema = z.object({
   device_version: z.number(),
   instance_id: z.string(),
   session_key: z.string(),
-  action: z.enum(["enter", "leave"]),
+  action: actionSchema,
   expires_at: z.number(),
   identity: identitySchema,
+  login: z
+    .object({
+      tool_version: z.number().optional(),
+      tool_paths: z.array(z.string()).optional(),
+      connection_id: z.string(),
+      snapshot: accountSchema,
+      confirm_session_end: z.boolean(),
+    })
+    .optional(),
 });
 const actualSchema = z.object({
   state: z.enum(["desktop", "waiting", "unknown", "failed", "no_session"]),
@@ -32,14 +89,17 @@ const actualSchema = z.object({
   session_key: z.string().nullable(),
   monitors: z.number(),
   detail: z.string(),
+  account: accountSchema.optional(),
 });
 export const waitingPreviewSchema = z.object({
   preview_token: z.string(),
   contest_id: z.string(),
   contest_name: z.string(),
   contest_version: z.number(),
-  action: z.enum(["enter", "leave"]),
+  action: actionSchema,
   duration_seconds: z.number(),
+  tool_version: z.number().optional(),
+  tool_paths: z.array(z.string()).optional(),
   targets: z.array(
     z.object({
       seat_id: z.string(),
@@ -55,12 +115,20 @@ export const waitingPreviewSchema = z.object({
         "no_participant",
         "disabled",
         "other_contest",
+        "login_unavailable",
+        "recovery_required",
+        "account_conflict",
+        "recovery_unavailable",
+        "tools_unavailable",
+        "session_confirmation_required",
+        "unsupported_session",
       ]),
       device_id: z.string().nullable(),
       identity: identitySchema.nullable(),
       generation: z.number().nullable(),
       instance_id: z.string().nullable(),
       session_key: z.string().nullable(),
+      account: accountSchema.nullable().optional(),
     }),
   ),
 });
@@ -110,7 +178,14 @@ export const skipLabels = {
   no_session: "无可用用户会话",
   no_participant: "未分配选手",
   disabled: "设备禁用",
-  other_contest: "正在等待另一场比赛",
+  other_contest: "另一场比赛仍在控制",
+  login_unavailable: "登录适配尚未就绪",
+  recovery_required: "需先完成恢复或登录",
+  account_conflict: "账户所有权或权限冲突",
+  recovery_unavailable: "离线恢复入口未就绪",
+  tools_unavailable: "工具或工作目录访问未通过",
+  session_confirmation_required: "需确认教学会话已保存并同意退出",
+  unsupported_session: "锁屏、多会话、RDP 或未知会话需现场处理",
 };
 export function actualLabel(item: WaitingItem) {
   if (!item.online || !item.actual) return "离线 · 实际状态未知";

@@ -41,6 +41,11 @@ export function matchesSearch(
 }
 
 export const pages = {
+  login: {
+    label: "比赛账户与登录",
+    group: "赛场管理",
+    description: "预览会话、准备比赛账户并查询登录与教学恢复状态。",
+  },
   waiting: {
     label: "等待控制",
     group: "赛场管理",

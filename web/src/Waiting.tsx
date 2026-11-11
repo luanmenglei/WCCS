@@ -63,7 +63,13 @@ export function Waiting({
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const value = waitingListSchema.parse(await api("waiting"));
+        const value = waitingListSchema.parse(
+          await api(
+            contestId
+              ? `waiting?contest_id=${encodeURIComponent(contestId)}`
+              : "waiting",
+          ),
+        );
         if (owner !== requestSequence.current) return;
         setItems(value.items);
         setFresh(true);
@@ -78,7 +84,7 @@ export function Waiting({
       requestSequence.current++;
       clearTimeout(timer);
     };
-  }, [refresh]);
+  }, [refresh, contestId]);
   async function run(operation: () => Promise<void>) {
     setBusy(true);
     setError("");

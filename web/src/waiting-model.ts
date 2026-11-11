@@ -114,6 +114,11 @@ export const skipLabels = {
 };
 export function actualLabel(item: WaitingItem) {
   if (!item.online || !item.actual) return "离线 · 实际状态未知";
+  if (
+    item.actual.state === "waiting" &&
+    item.actual.command_id !== item.command.command_id
+  )
+    return "另一命令的等待界面";
   const labels = {
     waiting: "等待界面已显示",
     desktop: "普通桌面",

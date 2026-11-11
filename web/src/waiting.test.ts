@@ -88,3 +88,22 @@ test("waiting previews reject unsupported actions and unknown skip states", () =
     false,
   );
 });
+
+test("another command's actual display cannot confirm this identity snapshot", () => {
+  const item = waitingItemSchema.parse({
+    command,
+    stage: "cancelled",
+    report: null,
+    online: true,
+    actual: {
+      state: "waiting",
+      command_id: "another-command",
+      session_key: "session",
+      monitors: 1,
+      detail: "ui_observed",
+    },
+    last_seen: 100,
+    updated_at: 100,
+  });
+  assert.equal(actualLabel(item), "另一命令的等待界面");
+});

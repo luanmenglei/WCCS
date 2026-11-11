@@ -1,5 +1,9 @@
 use crate::{ApiError, ApiResult, App, auth, management, seating};
-use axum::{Json, extract::State, http::HeaderMap};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::HeaderMap,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_postgres::Transaction;
@@ -233,7 +237,20 @@ pub async fn commit(
     Ok(Json(result))
 }
 
-pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Filter {
+    contest_id: Option<String>,
+}
+
+pub async fn list(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(filter): Query<Filter>,
+) -> ApiResult<Json<Value>> {
+    if filter.contest_id.as_ref().is_some_and(|id| !valid_id(id)) {
+        return Err(ApiError::bad("比赛 ID 无效"));
+    }
     let session = auth::admin(&app, &headers, false).await?;
     let mut db = app.db.lock().await;
     let tx = db.transaction().await?;
@@ -241,10 +258,12 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
     expire(&tx).await?;
     let rows = tx.query("SELECT w.*,c.actual,c.last_seen,c.connected,c.server_epoch,($1 OR COALESCE((cardinality(device_room_scope(w.device_id))>0
             AND device_room_scope(w.device_id)<@$2),false)) AS live_allowed
-            FROM waiting_commands w LEFT JOIN control_devices c ON c.device_id=w.device_id
-            WHERE ($1 OR (cardinality(w.room_ids)>0
-            AND w.room_ids<@$2))
-            ORDER BY w.sequence DESC LIMIT 500", &[&actor.all_rooms,&actor.room_ids]).await?;
+            FROM (SELECT DISTINCT ON (device_id,contest_id) * FROM waiting_commands
+                WHERE ($1 OR (cardinality(room_ids)>0 AND room_ids<@$2))
+                AND ($3::text IS NULL OR contest_id=$3)
+                ORDER BY device_id,contest_id,sequence DESC) w
+            LEFT JOIN control_devices c ON c.device_id=w.device_id
+            ORDER BY w.sequence DESC LIMIT 500", &[&actor.all_rooms,&actor.room_ids,&filter.contest_id]).await?;
     let items: Vec<Value> = rows.iter().map(|r| {
         let online = r.get::<_,bool>("live_allowed") && r.get::<_,Option<bool>>("connected")==Some(true) && r.get::<_,Option<String>>("server_epoch").as_deref()==Some(&app.server_epoch) && r.get::<_,Option<i64>>("last_seen").is_some_and(|t| now()-t<LEASE_SECONDS as i64);
         json!({"command":r.get::<_,Value>("command"),"stage":r.get::<_,String>("stage"),"report":r.get::<_,Option<Value>>("report"),"online":online,"actual":if online {r.get::<_,Option<Value>>("actual")} else {None},"last_seen":if r.get::<_,bool>("live_allowed") {r.get::<_,Option<i64>>("last_seen")} else {None},"updated_at":r.get::<_,i64>("updated_at")})

@@ -483,6 +483,20 @@ async fn waiting_authorization_control_and_recovery() {
     );
     let mut ws = socket(&restarted, &rotated).await;
     assert!(poll(&mut ws, &observation).await.unwrap()["command"].is_null());
+    // More than 500 retries on one device cannot hide another device's latest status.
+    db.batch_execute("WITH noise AS MATERIALIZED (SELECT nextval(pg_get_serial_sequence('waiting_commands','sequence')) AS seq,'noise-'||n::text AS id FROM generate_series(1,501) n), base AS (SELECT * FROM waiting_commands WHERE device_id='a' ORDER BY sequence DESC LIMIT 1)
+        INSERT INTO waiting_commands(sequence,id,request_id,device_id,actor_id,actor_version,room_ids,contest_id,generation,instance_id,session_key,expires_at,command,stage,updated_at)
+        SELECT noise.seq,noise.id,'capacity-synthetic',base.device_id,base.actor_id,base.actor_version,base.room_ids,base.contest_id,base.generation,base.instance_id,base.session_key,base.expires_at,
+        base.command||jsonb_build_object('sequence',noise.seq,'command_id',noise.id,'request_id','capacity-synthetic'),'cancelled',base.updated_at FROM noise CROSS JOIN base").await.unwrap();
+    let fleet = expect_ok(restarted.get("waiting?contest_id=contest").await).await;
+    assert_eq!(fleet["items"].as_array().unwrap().len(), 2);
+    assert!(
+        fleet["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["command"]["device_id"] == "b")
+    );
     let _ = ws.close(None).await;
     server.abort();
     let _ = server.await;

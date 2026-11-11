@@ -77,6 +77,7 @@ unsafe extern "system" fn main_callback(_count: u32, _args: *mut PWSTR) {
             settings.path.clone(),
             settings.executable.clone(),
             false,
+            false,
             settings.stop.clone(),
         );
         status(SERVICE_STOPPED, if result.is_ok() { 0 } else { 1 });
@@ -110,4 +111,10 @@ pub fn dispatch(name: String, path: PathBuf, executable: PathBuf) -> crate::host
         StartServiceCtrlDispatcherW(table.as_ptr())?;
     }
     Ok(())
+}
+
+/// Boot-relative Windows clock includes sleep and ignores wall-clock changes.
+pub fn monotonic_ms() -> u64 {
+    // SAFETY: GetTickCount64 takes no pointers, owns no handles, and is callable on any thread.
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
 }

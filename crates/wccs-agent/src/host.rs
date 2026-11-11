@@ -22,6 +22,7 @@ pub fn run(
     path: PathBuf,
     executable: PathBuf,
     test_mode: bool,
+    simulate_login: bool,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -37,6 +38,25 @@ pub fn run(
     if !test_mode && !ipc::is_system()? {
         return Err("service_requires_local_system".into());
     }
+    if simulate_login && !test_mode {
+        return Err("simulation_requires_test_mode".into());
+    }
+    let accounts: Option<Box<dyn crate::login::Runtime>> = if simulate_login {
+        let identity: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        Some(Box::new(crate::login::Simulator::open(
+            path.with_extension("login-simulation"),
+            identity["device_id"].as_str().ok_or("device_missing")?,
+        )?))
+    } else if !test_mode && path.with_extension("login-native.json").exists() {
+        let identity: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        Some(Box::new(crate::login_native::Native::open(
+            &path.with_extension("login-native.json"),
+            identity["device_id"].as_str().ok_or("device_missing")?,
+            executable.clone(),
+        )?))
+    } else {
+        None
+    };
     log(&path, "host_started")?;
     let runtime = tokio::runtime::Runtime::new()?;
     let worker_path = path.clone();
@@ -55,6 +75,7 @@ pub fn run(
         let mut host = Controller {
             path,
             executable,
+            accounts,
             test_mode,
             instance: token(),
             child: None,
@@ -81,12 +102,14 @@ pub fn run(
             }
             let delay = backoff + rand::random::<u64>() % 3;
             for _ in 0..delay * 5 {
+                let _ = host.recover_accounts();
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
+        let _ = host.fail("control_disconnected");
         host.child = None;
         let _ = log(&host.path, "host_stopped");
     });
@@ -97,6 +120,7 @@ pub fn run(
 
 struct Controller {
     path: PathBuf,
+    accounts: Option<Box<dyn crate::login::Runtime>>,
     executable: PathBuf,
     test_mode: bool,
     instance: String,
@@ -109,6 +133,20 @@ struct Controller {
     command_deadline: Instant,
 }
 impl Controller {
+    fn observe_accounts(&mut self) {
+        self.actual.account = Some(
+            self.accounts
+                .as_ref()
+                .map_or_else(wccs_protocol::login::AccountState::unavailable, |s| {
+                    s.state()
+                }),
+        );
+    }
+    fn recover_accounts(&mut self) -> Result<()> {
+        let result = self.accounts.as_mut().map_or(Ok(()), |s| s.recover());
+        self.observe_accounts();
+        result
+    }
     fn stop_child(&mut self) -> Result<()> {
         if let Some(child) = &mut self.child {
             child.stop()?;
@@ -164,14 +202,40 @@ impl Controller {
         {
             return Err("control_protocol_mismatch".into());
         }
+        let mut last_sync = crate::service::monotonic_ms();
         while !stop.load(Ordering::Relaxed) {
+            if crate::service::monotonic_ms().saturating_sub(last_sync) > 5_000 {
+                return Err("control_heartbeat_expired".into());
+            }
+            self.observe_accounts();
+            if self
+                .actual
+                .account
+                .as_ref()
+                .is_some_and(|s| s.phase == "controlled" && !s.login_complete())
+            {
+                self.recover_accounts()?;
+                self.stop_child()?;
+            }
             let session = ipc::discover(self.test_mode).ok();
             let session_key = session.as_ref().map(|s| s.key.clone());
             let poll = ControlPoll {
                 protocol_version: CONTROL_VERSION,
                 instance_id: self.instance.clone(),
                 session_key: session_key.clone(),
-                capabilities: vec!["waiting-v1".into()],
+                capabilities: if self.accounts.is_some() {
+                    vec![
+                        "waiting-v1".into(),
+                        if self.test_mode {
+                            "contest-login-simulation-v1"
+                        } else {
+                            "contest-login-windows-test-v1"
+                        }
+                        .into(),
+                    ]
+                } else {
+                    vec!["waiting-v1".into()]
+                },
                 actual: self.actual.clone(),
                 report: self.report.clone(),
             };
@@ -185,6 +249,11 @@ impl Controller {
             else {
                 return Err("control_transport_closed".into());
             };
+            let received_at = crate::service::monotonic_ms();
+            if received_at.saturating_sub(last_sync) > 8_000 {
+                return Err("control_heartbeat_expired".into());
+            }
+            last_sync = received_at;
             let reply: ControlReply = serde_json::from_str(&text)?;
             if reply.protocol_version != CONTROL_VERSION
                 || reply.lease_seconds == 0
@@ -198,7 +267,12 @@ impl Controller {
                     || command.instance_id != self.instance
                     || command.protocol_version != CONTROL_VERSION
                     || command.expires_at <= reply.server_time
-                    || !["enter", "leave"].contains(&command.action.as_str())
+                    || !["enter", "leave", "prepare_login", "restore_teaching"]
+                        .contains(&command.action.as_str())
+                    || command
+                        .login
+                        .as_ref()
+                        .is_some_and(|p| p.connection_id != reply.connection_id)
                 {
                     return Err("control_command_rejected".into());
                 }
@@ -216,6 +290,7 @@ impl Controller {
                     )?;
                 }
             } else {
+                self.recover_accounts()?;
                 self.stop_child()?;
                 self.actual = if session.is_some() {
                     Actual::default()
@@ -227,6 +302,8 @@ impl Controller {
                     }
                 };
                 self.report = None;
+                self.observe_accounts();
+                self.persist()?;
             }
             for _ in 0..5 {
                 if stop.load(Ordering::Relaxed) {
@@ -239,6 +316,7 @@ impl Controller {
         Ok(())
     }
     fn stage(&mut self, stage: &str) -> Result<()> {
+        self.observe_accounts();
         if let Some(command) = &self.command {
             self.report = Some(Report {
                 command_id: command.command_id.clone(),
@@ -250,10 +328,15 @@ impl Controller {
         self.persist()
     }
     fn fail(&mut self, detail: &str) -> Result<()> {
-        self.stop_child()?;
+        let recovery = self.recover_accounts();
+        let stopped = self.stop_child();
+        self.observe_accounts();
+        recovery?;
+        stopped?;
         self.actual = Actual {
             state: "failed".into(),
             detail: detail.into(),
+            account: self.actual.account.clone(),
             ..Default::default()
         };
         if self
@@ -284,6 +367,13 @@ impl Controller {
                 .is_some_and(|c| c.sequence >= command.sequence)
             {
                 return Err("control_sequence_regression".into());
+            }
+            if ["prepare_login", "restore_teaching"].contains(&command.action.as_str()) {
+                self.stop_child()?;
+                self.accounts
+                    .as_mut()
+                    .ok_or("native_login_unavailable")?
+                    .accept(&command)?;
             }
             self.command = Some(command);
             self.stage_started = Instant::now();
@@ -316,6 +406,43 @@ impl Controller {
                 match Child::start(&self.executable, session, self.test_mode) {
                     Ok(child) => self.child = Some(child),
                     Err(_) => return self.fail("session_launch_failed"),
+                }
+            }
+            return Ok(());
+        }
+        if ["prepare_login", "restore_teaching"].contains(&command.action.as_str()) {
+            if self.report.as_ref().is_some_and(|r| r.stage == "succeeded") {
+                return Ok(());
+            }
+            let result = self
+                .accounts
+                .as_mut()
+                .ok_or("native_login_unavailable")?
+                .advance(&command, crate::service::monotonic_ms());
+            self.observe_accounts();
+            match result {
+                Ok(true) => {
+                    self.actual.state = "desktop".into();
+                    self.actual.detail = "standby".into();
+                    self.stage("succeeded")?;
+                }
+                Ok(false) => self.persist()?,
+                Err(error) => {
+                    // Only bounded machine codes enter the diagnostic log, never arbitrary error text.
+                    let detail = error.to_string();
+                    if detail.len() <= 80
+                        && detail
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                    {
+                        let _ = log(&self.path, &format!("account_operation_failed {detail}"));
+                    } else if let Some(error) = error.downcast_ref::<windows::core::Error>() {
+                        let _ = log(
+                            &self.path,
+                            &format!("account_operation_failed hresult={:08x}", error.code().0),
+                        );
+                    }
+                    self.fail("ipc_or_session_failed")?;
                 }
             }
             return Ok(());
@@ -409,6 +536,7 @@ mod tests {
             session_key: "session".into(),
             action: "enter".into(),
             expires_at: wccs_protocol::now() + 900,
+            login: None,
             identity: WaitingIdentity {
                 contest_id: "contest".into(),
                 contest_name: "Synthetic".into(),
@@ -425,6 +553,7 @@ mod tests {
         (
             Controller {
                 path: directory.join("device.json"),
+                accounts: None,
                 executable: directory.join("unused.exe"),
                 test_mode: true,
                 instance: "instance".into(),

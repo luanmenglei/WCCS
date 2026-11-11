@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod control;
+pub mod login;
 
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};

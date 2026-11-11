@@ -506,3 +506,251 @@ async fn waiting_authorization_control_and_recovery() {
     drop(db);
     connection_handle.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn login_preview_connection_fencing_and_completion() {
+    let database = std::env::var("WCCS_TEST_DATABASE_URL").unwrap();
+    let (db, connection) = tokio_postgres::connect(&database, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let connection_handle = tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let schema = format!("test_login_{}", &token()[..24]);
+    db.batch_execute(&format!(
+        "CREATE SCHEMA {schema}; SET search_path TO {schema}"
+    ))
+    .await
+    .unwrap();
+    let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
+    let config = Config {
+        bind: "127.0.0.1:0".into(),
+        origin: String::new(),
+        database_url: format!(
+            "{database} options='-c search_path={schema} -c statement_timeout=10000'"
+        ),
+        static_dir: "../../web/dist".into(),
+        trusted_proxies: vec![],
+        admin_username: "test-admin".into(),
+        admin_password_hash: Argon2::default()
+            .hash_password(b"synthetic-test-password", &salt)
+            .unwrap()
+            .to_string(),
+    };
+    let (mut admin, server) = start(config.clone()).await;
+    let mut input = json!({"request_id":token(),"contest_id":"contest","seat_ids":["seat"],"action":"enter","duration_seconds":900});
+    assert_eq!(admin.get("waiting").await.status(), 401);
+    for path in ["waiting/preview", "waiting/commit"] {
+        assert_eq!(admin.post(path, &input).await.status(), 401);
+    }
+    admin.login().await;
+    for (id, ip) in [("A", "10.9.1.1"), ("B", "10.9.2.1")] {
+        let mut room = room_input(id, 1, 1);
+        room["seats"][0]["expected_ip"] = json!(ip);
+        preview_room(&admin, &mut room).await;
+        expect_ok(admin.post("rooms/save", &room).await).await;
+    }
+    let credential = token();
+    expect_ok(
+        admin
+            .post(
+                "devices",
+                &json!({"id":"a","name":"Synthetic control","enrollment_token":token()}),
+            )
+            .await,
+    )
+    .await;
+    db.execute("UPDATE devices SET lifecycle='enabled',credential_hash=$1,observed_ip='10.9.1.1',last_seen=$2 WHERE id='a'",&[&wccs_protocol::digest(&credential),&wccs_protocol::now()]).await.unwrap();
+    let mut create = roster_input(
+        &admin,
+        "contest",
+        json!({"kind":"create","name":"合成等待比赛"}),
+    )
+    .await;
+    roster_commit(&admin, &mut create).await;
+    let mut import = roster_input(
+        &admin,
+        "contest",
+        json!({"kind":"import","text":"code\tname\tschool\n001\t林小禾\t合成学校"}),
+    )
+    .await;
+    roster_commit(&admin, &mut import).await;
+    let state = admin.state().await;
+    let seat = state["seating"]["rooms"][0]["seats"][0]["id"].clone();
+    let seat_b = state["seating"]["rooms"][1]["seats"][0]["id"].clone();
+    let participant = state["roster"]["contests"][0]["participants"][0]["id"].clone();
+    let mut assign = roster_input(
+        &admin,
+        "contest",
+        json!({"kind":"assign","changes":[{"participant_id":participant,"seat_id":seat}]}),
+    )
+    .await;
+    roster_commit(&admin, &mut assign).await;
+    input["seat_ids"] = json!([seat]);
+    let operator_input = operator_write(
+        "control-operator",
+        "control-operator",
+        "operator",
+        json!(["A"]),
+    );
+    let viewer_input = operator_write("control-viewer", "control-viewer", "viewer", json!(["A"]));
+    expect_ok(admin.post("operators", &operator_input).await).await;
+    expect_ok(admin.post("operators", &viewer_input).await).await;
+    let operator = admin
+        .identity("control-operator", "synthetic-operator-password")
+        .await;
+    let viewer = admin
+        .identity("control-viewer", "synthetic-operator-password")
+        .await;
+    for path in ["waiting/preview", "waiting/commit"] {
+        assert_eq!(viewer.post(path, &input).await.status(), 403);
+        let mut cross = input.clone();
+        cross["seat_ids"] = json!([seat, seat_b]);
+        assert_eq!(operator.post(path, &cross).await.status(), 403);
+    }
+    assert_eq!(
+        preview(&operator, &mut input).await["targets"][0]["status"],
+        "offline"
+    );
+
+    let mut ws = socket(&admin, &credential).await;
+    let account = json!({"adapter":"simulation","revision":0,"phase":"teaching","account":"absent","target_sid":null,"session":"none","observed_sid":null,"desktop_confirmed":false,"recovery_ready":true,"tools_ready":true,"teaching_enabled":true,"detail":"standby"});
+    let mut observation = json!({"protocol_version":1,"instance_id":"host-one","session_key":null,"capabilities":["waiting-v1","contest-login-simulation-v1"],"actual":{"state":"desktop","command_id":null,"session_key":null,"monitors":0,"detail":"standby","account":account},"report":null});
+    poll(&mut ws, &observation).await.unwrap();
+    input["action"] = json!("prepare_login");
+    assert_eq!(
+        preview(&operator, &mut input).await["targets"][0]["status"],
+        "ready"
+    );
+    for (field, value, reason) in [
+        ("tools_ready", json!(false), "tools_unavailable"),
+        ("recovery_ready", json!(false), "recovery_unavailable"),
+        (
+            "session",
+            json!("teaching"),
+            "session_confirmation_required",
+        ),
+        ("session", json!("rdp"), "unsupported_session"),
+        ("account", json!("conflict"), "account_conflict"),
+        ("phase", json!("recovery_failed"), "recovery_required"),
+    ] {
+        observation["actual"]["account"][field] = value;
+        poll(&mut ws, &observation).await.unwrap();
+        assert_eq!(
+            preview(&operator, &mut input).await["targets"][0]["status"],
+            reason
+        );
+        observation["actual"]["account"] = account.clone();
+    }
+    poll(&mut ws, &observation).await.unwrap();
+    preview(&operator, &mut input).await;
+    assert_eq!(viewer.post("waiting/commit", &input).await.status(), 403);
+    let result = expect_ok(operator.post("waiting/commit", &input).await).await;
+    assert_eq!(
+        expect_ok(operator.post("waiting/commit", &input).await).await,
+        result
+    );
+    let mut changed = input.clone();
+    changed["confirm_session_end"] = json!(true);
+    assert_eq!(
+        operator.post("waiting/commit", &changed).await.status(),
+        409
+    );
+    let command = result["commands"][0].clone();
+    assert_eq!(
+        poll(&mut ws, &observation).await.unwrap()["command"],
+        command
+    );
+    observation["actual"]["account"]["phase"] = json!("preparing");
+    for stage in ["accepted", "executing"] {
+        observation["report"] = json!({"command_id":command["command_id"],"sequence":command["sequence"],"stage":stage,"actual":observation["actual"]});
+        poll(&mut ws, &observation).await.unwrap();
+    }
+    // Successful submission without SID/desktop proof is rejected and closes the socket.
+    observation["report"]["stage"] = json!("succeeded");
+    assert!(poll(&mut ws, &observation).await.is_none());
+    observation["report"] = Value::Null;
+    observation["actual"]["account"] = account.clone();
+    let mut ws = socket(&admin, &credential).await;
+    assert!(poll(&mut ws, &observation).await.unwrap()["command"].is_null());
+    assert_eq!(
+        expect_ok(operator.get("waiting").await).await["items"][0]["stage"],
+        "cancelled"
+    );
+    preview(&operator, &mut input).await;
+    // A new connection invalidates even a pre-commit preview.
+    let mut replacement = socket(&admin, &credential).await;
+    poll(&mut replacement, &observation).await.unwrap();
+    assert_eq!(operator.post("waiting/commit", &input).await.status(), 409);
+    assert!(poll(&mut ws, &observation).await.is_none());
+    preview(&operator, &mut input).await;
+    let command =
+        expect_ok(operator.post("waiting/commit", &input).await).await["commands"][0].clone();
+    observation["actual"]["account"] = json!({"adapter":"simulation","revision":8,"phase":"controlled","account":"owned","target_sid":"S-1-5-21-1001","session":"contest","observed_sid":"S-1-5-21-1001","desktop_confirmed":true,"recovery_ready":true,"tools_ready":true,"teaching_enabled":false,"detail":"desktop_observed"});
+    observation["report"] = json!({"command_id":command["command_id"],"sequence":command["sequence"],"stage":"succeeded","actual":observation["actual"]});
+    poll(&mut replacement, &observation).await.unwrap();
+    poll(&mut replacement, &observation).await.unwrap();
+    assert_eq!(
+        expect_ok(operator.get("waiting").await).await["items"][0]["stage"],
+        "succeeded"
+    );
+    let events = expect_ok(
+        operator
+            .get(&format!(
+                "events?request_id={}",
+                input["request_id"].as_str().unwrap()
+            ))
+            .await,
+    )
+    .await;
+    assert!(
+        events["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["operation"] == "login_succeeded")
+    );
+    input["action"] = json!("restore_teaching");
+    preview(&operator, &mut input).await;
+    let restore =
+        expect_ok(operator.post("waiting/commit", &input).await).await["commands"][0].clone();
+    observation["actual"]["account"]["phase"] = json!("teaching");
+    observation["actual"]["account"]["teaching_enabled"] = json!(true);
+    observation["actual"]["account"]["detail"] = json!("restored");
+    observation["report"] = json!({"command_id":restore["command_id"],"sequence":restore["sequence"],"stage":"succeeded","actual":observation["actual"]});
+    poll(&mut replacement, &observation).await.unwrap();
+    assert_eq!(
+        expect_ok(operator.get("waiting").await).await["items"][0]["actual"]["account"]["desktop_confirmed"],
+        true
+    );
+    // Protocol simulation of native capability verifies tool-version fencing, not Windows login.
+    observation["report"] = Value::Null;
+    observation["actual"]["account"]["adapter"] = json!("windows_test");
+    observation["capabilities"] = json!(["waiting-v1", "contest-login-windows-test-v1"]);
+    poll(&mut replacement, &observation).await.unwrap();
+    input["action"] = json!("prepare_login");
+    assert_eq!(
+        preview(&operator, &mut input).await["targets"][0]["status"],
+        "tools_unavailable"
+    );
+    let mut publish = json!({"request_id":token(),"base_version":0,"tools":[{"id":"compiler","name":"Synthetic compiler","kind":"executable","path":"C:/Synthetic/compiler.exe"}],"targets":["a"]});
+    expect_ok(admin.post("configuration", &publish).await).await;
+    let planned = preview(&operator, &mut input).await;
+    assert_eq!(planned["tool_paths"], json!(["C:/Synthetic/compiler.exe"]));
+    assert_eq!(planned["targets"][0]["status"], "ready");
+    expect_ok(operator.post("waiting/commit", &input).await).await;
+    assert!(poll(&mut replacement, &observation).await.unwrap()["command"].is_object());
+    publish["request_id"] = json!(token());
+    publish["base_version"] = json!(1);
+    publish["tools"][0]["path"] = json!("C:/Synthetic/changed.exe");
+    expect_ok(admin.post("configuration", &publish).await).await;
+    assert!(poll(&mut replacement, &observation).await.unwrap()["command"].is_null());
+    drop(ws);
+    drop(replacement);
+    server.abort();
+    db.batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+    connection_handle.abort();
+}

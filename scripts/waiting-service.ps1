@@ -56,11 +56,11 @@ switch ($Action) {
         $parent = Split-Path -Parent $installRoot
         $acl = Get-Acl -LiteralPath $parent
         $trusted = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
-        $ownerSid = ([Security.Principal.NTAccount]::new($acl.Owner)).Translate([Security.Principal.SecurityIdentifier]).Value
+        $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
         if ($ownerSid -notin $trusted) { throw 'Service parent owner can replace its ACL. Select a protected parent.' }
         $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
-        foreach ($rule in $acl.Access) {
-            $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            $sid = $rule.IdentityReference.Value
             if ($rule.AccessControlType -eq 'Allow' -and -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and ($rule.FileSystemRights -band $writeMask) -and $sid -notin $trusted) {
                 throw 'Service parent permits unprivileged replacement. Use a dedicated directory under protected Program Files.'
             }

@@ -120,7 +120,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=6) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=7) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -152,6 +152,10 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     }
     if versions[0].get::<_, i32>(0) <= 5 {
         tx.batch_execute(include_str!("../migrations/006_waiting.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 6 {
+        tx.batch_execute(include_str!("../migrations/007_contest_login.sql"))
             .await?;
     }
     tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$1 WHERE stage NOT IN ('failed','cancelled','expired')", &[&wccs_protocol::now()]).await?;

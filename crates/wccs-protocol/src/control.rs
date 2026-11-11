@@ -36,6 +36,8 @@ pub struct Command {
     pub action: String,
     pub expires_at: i64,
     pub identity: WaitingIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<crate::login::LoginPlan>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -46,6 +48,8 @@ pub struct Actual {
     pub session_key: Option<String>,
     pub monitors: u32,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<crate::login::AccountState>,
 }
 impl Default for Actual {
     fn default() -> Self {
@@ -55,12 +59,15 @@ impl Default for Actual {
             session_key: None,
             monitors: 0,
             detail: "teaching_standby".into(),
+            account: None,
         }
     }
 }
 impl Actual {
     pub fn valid(&self) -> bool {
-        ["desktop", "waiting", "unknown", "failed", "no_session"].contains(&self.state.as_str())
+        self.account.as_ref().is_none_or(|s| s.valid())
+            && ["desktop", "waiting", "unknown", "failed", "no_session"]
+                .contains(&self.state.as_str())
             && [
                 "teaching_standby",
                 "ui_observed",

@@ -129,6 +129,32 @@ pub struct Session {
     sid: String,
 }
 
+impl Session {
+    pub fn sid(&self) -> &str {
+        &self.sid
+    }
+}
+
+pub fn default_desktop() -> Result<bool> {
+    use windows::Win32::System::StationsAndDesktops::*;
+    let mut name = [0u16; 128];
+    // SAFETY: borrowed thread desktop is never closed; output is a bounded UTF-16 array.
+    unsafe {
+        let desktop = GetThreadDesktop(GetCurrentThreadId())?;
+        GetUserObjectInformationW(
+            HANDLE(desktop.0),
+            UOI_NAME,
+            Some(name.as_mut_ptr().cast()),
+            std::mem::size_of_val(&name) as u32,
+            None,
+        )?;
+    }
+    Ok(
+        String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())])
+            .eq_ignore_ascii_case("default"),
+    )
+}
+
 pub fn discover(test_mode: bool) -> Result<Session> {
     let current = process_session()?;
     let (id, token) = if test_mode {
@@ -315,8 +341,60 @@ pub struct Child {
     connected: bool,
     launched: Instant,
 }
+
+fn allow_process_query(session: &Session) -> Result<()> {
+    let user = token_information(session.token.0, TokenUser)?;
+    let mut old_acl = std::ptr::null_mut();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: current process is owned here. The SID and old ACL remain allocated
+    // through SetEntriesInAcl. Only limited image querying is granted to this SID.
+    // The merged ACL preserves existing grants and expires with the service process.
+    unsafe {
+        GetSecurityInfo(
+            GetCurrentProcess(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut old_acl),
+            None,
+            Some(&mut descriptor),
+        )
+        .ok()?;
+        let _descriptor = Descriptor(descriptor);
+        let entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: PROCESS_QUERY_LIMITED_INFORMATION.0,
+            grfAccessMode: GRANT_ACCESS,
+            Trustee: TRUSTEE_W {
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: PWSTR((*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid.0.cast()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut new_acl = std::ptr::null_mut();
+        SetEntriesInAclW(Some(&[entry]), Some(old_acl), &mut new_acl).ok()?;
+        let result = SetSecurityInfo(
+            GetCurrentProcess(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(new_acl),
+            None,
+        );
+        let _ = LocalFree(Some(HLOCAL(new_acl.cast())));
+        result.ok()?;
+    }
+    Ok(())
+}
+
 impl Child {
     pub fn start(exe: &Path, session: &Session, test_mode: bool) -> Result<Self> {
+        if !test_mode {
+            allow_process_query(session)?;
+        }
         let name = format!(r"\\.\pipe\WCCS.Waiting.{}", wccs_protocol::token());
         let pipe = server_pipe(&name, &session.sid)?;
         let executable = exe.canonicalize()?;
@@ -410,7 +488,9 @@ impl Child {
                 return Ok(true);
             }
             if WaitForSingleObject(self.process.0, 0) != WAIT_TIMEOUT {
-                return Err("session_process_exited".into());
+                let mut exit_code = 0;
+                GetExitCodeProcess(self.process.0, &mut exit_code)?;
+                return Err(format!("session_process_exited_{exit_code:08x}").into());
             }
             let result = ConnectNamedPipe(self.pipe.handle.0, None);
             if let Err(error) = result {
@@ -480,14 +560,36 @@ pub fn connect(name: &str, parent: u32, test_mode: bool) -> Result<Pipe> {
             false,
             parent,
         )?);
-        let mut token = HANDLE::default();
-        OpenProcessToken(process.0, TOKEN_QUERY, &mut token)?;
-        let token = Handle(token);
-        if !test_mode && user_sid(token.0)? != "S-1-5-18" {
-            return Err("ipc_server_not_system".into());
-        }
-        if test_mode && user_sid(token.0)? != user_sid(current_token()?.0)? {
-            return Err("ipc_test_user_mismatch".into());
+        if test_mode {
+            let mut token = HANDLE::default();
+            OpenProcessToken(process.0, TOKEN_QUERY, &mut token)?;
+            let token = Handle(token);
+            if user_sid(token.0)? != user_sid(current_token()?.0)? {
+                return Err("ipc_test_user_mismatch".into());
+            }
+        } else {
+            // An ordinary session cannot query a SYSTEM process token. Authenticate the
+            // kernel-held pipe owner instead, together with the live PID, session and image.
+            // Ordinary users cannot create a SYSTEM-owned pipe or take its server handle.
+            let mut owner = PSID::default();
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            GetSecurityInfo(
+                pipe.handle.0,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                Some(&mut descriptor),
+            )
+            .ok()?;
+            let _descriptor = Descriptor(descriptor);
+            let mut server_session = 0;
+            GetNamedPipeServerSessionId(pipe.handle.0, &mut server_session)?;
+            if !IsWellKnownSid(owner, WinLocalSystemSid).as_bool() || server_session != 0 {
+                return Err("ipc_server_not_system".into());
+            }
         }
         let mut buffer = vec![0u16; 32768];
         let mut length = buffer.len() as u32;
@@ -520,7 +622,12 @@ fn check_peer(pipe: &Pipe, expected: u32) -> Result<()> {
 
 fn server_pipe(name: &str, sid: &str) -> Result<Pipe> {
     let path = wide(name);
-    let descriptor = Descriptor::new(&format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{})", sid))?;
+    // LocalSystem's default owner can be Administrators. Bind the pipe owner to
+    // the creator's actual user SID so an ordinary client can authenticate it.
+    let owner = user_sid(current_token()?.0)?;
+    let descriptor = Descriptor::new(&format!(
+        "O:{owner}D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"
+    ))?;
     let attributes = descriptor.attributes();
     // SAFETY: unique first instance, local-only pipe. Security allocation outlives creation.
     let handle = unsafe {
@@ -555,8 +662,29 @@ mod tests {
 
     #[test]
     fn first_instance_and_wrong_server_pid_are_rejected() {
-        let (name, _server) = fixture();
+        let (name, server) = fixture();
         let sid = user_sid(current_token().unwrap().0).unwrap();
+        let mut owner = PSID::default();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let token = current_token().unwrap();
+        let user = token_information(token.0, TokenUser).unwrap();
+        // SAFETY: this test retains both the pipe and the SID-bearing allocations.
+        unsafe {
+            GetSecurityInfo(
+                server.handle.0,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                Some(&mut descriptor),
+            )
+            .ok()
+            .unwrap();
+            let _descriptor = Descriptor(descriptor);
+            assert!(EqualSid(owner, (*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid).is_ok());
+        }
         assert!(server_pipe(&name, &sid).is_err());
         assert!(connect(&name, std::process::id().wrapping_add(1), true).is_err());
     }

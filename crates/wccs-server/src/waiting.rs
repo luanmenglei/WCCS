@@ -17,8 +17,14 @@ pub struct Write {
     seat_ids: Vec<String>,
     action: String,
     duration_seconds: i64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    confirm_session_end: bool,
     #[serde(default)]
     preview_token: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value> {
@@ -32,7 +38,7 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
             .collect::<std::collections::HashSet<_>>()
             .len()
             != input.seat_ids.len()
-        || !["enter", "leave"].contains(&input.action.as_str())
+        || !["enter", "leave", "prepare_login", "restore_teaching"].contains(&input.action.as_str())
         || !(30..=3600).contains(&input.duration_seconds)
     {
         return Err(ApiError::bad(
@@ -46,6 +52,24 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
         )
         .await?
         .ok_or_else(|| ApiError::bad("请选择有效比赛"))?;
+    let tool_version: i64 = tx
+        .query_one("SELECT version FROM configuration_head WHERE id=1", &[])
+        .await?
+        .get(0);
+    let tools = tx
+        .query_opt(
+            "SELECT snapshot FROM configurations WHERE version=$1",
+            &[&tool_version],
+        )
+        .await?
+        .map(|r| r.get::<_, Value>(0))
+        .unwrap_or(json!({"tools":[]}));
+    let tool_paths: Option<Vec<String>> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["path"].as_str().map(String::from))
+        .collect();
     let seating = seating::snapshot(tx).await?;
     let mut targets = Vec::new();
     for seat_id in &input.seat_ids {
@@ -89,7 +113,7 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
             target["address_version"] = json!(d.get::<_, i64>(3));
             let previous = tx.query_opt("SELECT command,stage,sequence FROM waiting_commands WHERE device_id=$1 ORDER BY sequence DESC LIMIT 1", &[&id]).await?;
             target["head"] = json!(previous.as_ref().map(|r| r.get::<_, i64>(2)));
-            if input.action != "enter"
+            if ["leave", "restore_teaching"].contains(&input.action.as_str())
                 && let Some(old) = &previous
             {
                 let command: Value = old.get(0);
@@ -104,13 +128,16 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
             {
                 target["instance_id"] = json!(c.get::<_, String>("instance_id"));
                 target["session_key"] = json!(c.get::<_, Option<String>>("session_key"));
+                target["connection_id"] = json!(c.get::<_, String>("connection_id"));
+                let actual: Value = c.get("actual");
+                target["account"] = actual["account"].clone();
                 let online = c.get::<_, bool>("connected")
                     && c.get::<_, String>("server_epoch") == app.server_epoch
                     && now() - c.get::<_, i64>("last_seen") < LEASE_SECONDS as i64;
                 if online || input.action == "leave" {
                     target["status"] = json!("ready");
                 }
-                if online && target["session_key"].is_null() {
+                if online && input.action == "enter" && target["session_key"].is_null() {
                     target["status"] = json!("no_session");
                 }
             }
@@ -123,7 +150,8 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
             if let Some(old) = &previous {
                 let command: Value = old.get(0);
                 if command["identity"]["contest_id"] != input.contest_id
-                    && command["action"] == "enter"
+                    && ["enter", "prepare_login"]
+                        .contains(&command["action"].as_str().unwrap_or(""))
                     && !["cancelled", "expired", "failed"]
                         .contains(&old.get::<_, String>(1).as_str())
                 {
@@ -131,9 +159,43 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
                 }
             }
         }
+        if ["prepare_login", "restore_teaching"].contains(&input.action.as_str())
+            && target["status"] == "ready"
+        {
+            let account = serde_json::from_value::<wccs_protocol::login::AccountState>(
+                target["account"].clone(),
+            )
+            .ok();
+            let reason = account.as_ref().map_or(Some("login_unavailable"), |a| {
+                a.skip_reason(&input.action, input.confirm_session_end)
+            });
+            if let Some(reason) = reason {
+                target["status"] = json!(reason);
+            }
+        }
+        if input.action == "enter"
+            && target["status"] == "ready"
+            && ["simulation", "windows_test"]
+                .contains(&target["account"]["adapter"].as_str().unwrap_or(""))
+            && target["account"]["phase"] != "controlled"
+        {
+            target["status"] = json!("recovery_required");
+        }
+        if input.action == "prepare_login"
+            && target["status"] == "ready"
+            && target["account"]["adapter"] == "windows_test"
+            && tool_paths.as_ref().is_none_or(Vec::is_empty)
+        {
+            target["status"] = json!("tools_unavailable");
+        }
         targets.push(target);
     }
     let mut result = json!({"contest_id":input.contest_id,"contest_name":contest.get::<_,String>(0),"contest_version":contest.get::<_,i64>(1),"action":input.action,"duration_seconds":input.duration_seconds,"targets":targets});
+    if ["prepare_login", "restore_teaching"].contains(&input.action.as_str()) {
+        result["confirm_session_end"] = json!(input.confirm_session_end);
+        result["tool_version"] = json!(tool_version);
+        result["tool_paths"] = json!(tool_paths.unwrap_or_default());
+    }
     result["preview_token"] = json!(digest(&result.to_string()));
     Ok(result)
 }
@@ -211,6 +273,19 @@ pub async fn commit(
             session_key: target["session_key"].as_str().unwrap_or("none").into(),
             action: input.action.clone(),
             expires_at: now() + input.duration_seconds,
+            login: if !target["account"].is_null() {
+                Some(wccs_protocol::login::LoginPlan {
+                    tool_version: planned["tool_version"].as_i64().unwrap_or(0),
+                    tool_paths: serde_json::from_value(planned["tool_paths"].clone())
+                        .unwrap_or_default(),
+                    connection_id: target["connection_id"].as_str().unwrap().into(),
+                    snapshot: serde_json::from_value(target["account"].clone())
+                        .map_err(|_| ApiError::internal())?,
+                    confirm_session_end: input.confirm_session_end,
+                })
+            } else {
+                None
+            },
             identity: serde_json::from_value(target["identity"].clone())
                 .map_err(|_| ApiError::internal())?,
         };
@@ -355,8 +430,27 @@ pub async fn current(
         .await?
         .get(0);
     let mut valid = valid && command.instance_id == instance;
-    if command.action == "enter" {
-        valid &= session == Some(command.session_key.as_str());
+    if let Some(login) = &command.login {
+        let connection: String = tx
+            .query_one(
+                "SELECT connection_id FROM control_devices WHERE device_id=$1",
+                &[&id],
+            )
+            .await?
+            .get(0);
+        valid &= connection == login.connection_id;
+        if command.action == "prepare_login" && login.snapshot.adapter == "windows_test" {
+            let version: i64 = tx
+                .query_one("SELECT version FROM configuration_head WHERE id=1", &[])
+                .await?
+                .get(0);
+            valid &= version == login.tool_version;
+        }
+    }
+    if ["enter", "prepare_login"].contains(&command.action.as_str()) {
+        if command.action == "enter" {
+            valid &= session == Some(command.session_key.as_str());
+        }
         let unchanged: bool = tx
             .query_one(
                 "SELECT EXISTS(SELECT 1

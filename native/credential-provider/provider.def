@@ -1,0 +1,4 @@
+LIBRARY wccs-login-provider.dll
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE

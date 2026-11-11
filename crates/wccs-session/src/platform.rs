@@ -623,12 +623,33 @@ pub fn controlled() -> Result<u8, Box<dyn std::error::Error>> {
     let session = ipc::discover(true).map_err(|_| "session_unavailable")?;
     if request.protocol_version != CONTROL_VERSION
         || request.command.protocol_version != CONTROL_VERSION
-        || request.command.action != "enter"
+        || !["enter", "probe_desktop"].contains(&request.command.action.as_str())
         || request.command.session_key != session.key
         || request.lease_seconds == 0
         || request.lease_seconds > LEASE_SECONDS
     {
         return Err("ipc_command_rejected".into());
+    }
+    if request.command.action == "probe_desktop" {
+        if request
+            .command
+            .login
+            .as_ref()
+            .and_then(|p| p.snapshot.target_sid.as_deref())
+            != Some(session.sid())
+            || !ipc::default_desktop().map_err(|_| "desktop_query_failed")?
+        {
+            return Err("desktop_identity_mismatch".into());
+        }
+        pipe.send(&Actual {
+            state: "desktop".into(),
+            command_id: Some(request.command.command_id),
+            session_key: Some(session.key),
+            detail: "ui_observed".into(),
+            ..Default::default()
+        })
+        .map_err(|_| "desktop_report_failed")?;
+        return Ok(0);
     }
     let control = Control {
         pipe,
@@ -856,6 +877,7 @@ fn report_control(control: &Control, app: &App) -> Result<(), Box<dyn std::error
         session_key: Some(control.command.session_key.clone()),
         monitors: app.windows.len() as u32,
         detail: "ui_observed".into(),
+        account: None,
     };
     control
         .pipe

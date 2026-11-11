@@ -112,7 +112,27 @@ async fn run(app: App, headers: HeaderMap, id: String, mut socket: WebSocket) {
             || !valid_id(&poll.instance_id)
             || poll.session_key.as_ref().is_some_and(|s| !valid_id(s))
             || !poll.actual.valid()
-            || poll.capabilities != ["waiting-v1"]
+            || !(poll.capabilities == ["waiting-v1"]
+                || poll.capabilities == ["waiting-v1", "contest-login-simulation-v1"]
+                || poll.capabilities == ["waiting-v1", "contest-login-windows-test-v1"])
+            || (poll
+                .actual
+                .account
+                .as_ref()
+                .is_some_and(|s| s.adapter == "windows_test")
+                && !poll
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "contest-login-windows-test-v1"))
+            || (poll
+                .actual
+                .account
+                .as_ref()
+                .is_some_and(|s| s.adapter == "simulation")
+                && !poll
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "contest-login-simulation-v1"))
             || instance.as_ref().is_some_and(|s| *s != poll.instance_id)
         {
             break;
@@ -251,6 +271,26 @@ async fn exchange(
                         && report.actual.command_id.as_deref() == Some(&saved.command_id)
                         && report.actual.session_key.as_deref() == Some(&saved.session_key)
                         && report.actual.monitors > 0
+                } else if saved.action == "prepare_login" {
+                    saved.login.as_ref().is_some_and(|plan| {
+                        report.actual.account.as_ref().is_some_and(|s| {
+                            s.login_complete()
+                                && s.adapter == plan.snapshot.adapter
+                                && plan
+                                    .snapshot
+                                    .target_sid
+                                    .as_ref()
+                                    .is_none_or(|sid| s.target_sid.as_ref() == Some(sid))
+                        })
+                    })
+                } else if saved.action == "restore_teaching" {
+                    saved.login.as_ref().is_some_and(|plan| {
+                        report.actual.account.as_ref().is_some_and(|s| {
+                            s.adapter == plan.snapshot.adapter
+                                && s.phase == "teaching"
+                                && s.detail == "restored"
+                        })
+                    })
                 } else {
                     report.actual.state == "desktop"
                 };

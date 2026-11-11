@@ -54,7 +54,7 @@ npm --prefix web run check
 & './target/x86_64-pc-windows-msvc/release/wccs-server.exe' --init local/m2-new/server.json
 ```
 
-在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。当前服务启动事务性创建版本 1 并升级到版本 5，已有版本 1 / 2 / 3 / 4 数据自动迁移，遇到未知 schema_version 拒绝启动。机房切片升级情况见 [座位表记录](m2-room-seating.md)。
+在生成的配置中填写 `database_url`，按实际部署修改 `bind`、`origin` 和 `static_dir`。默认连接本机 55432 的 `wccs` 数据库。初始化命令拒绝覆盖现有配置或登录材料。当前服务启动事务性创建版本 1 并升级到版本 6，已有版本 1 / 2 / 3 / 4 数据自动迁移，遇到未知 schema_version 拒绝启动。机房切片升级情况见 [座位表记录](m2-room-seating.md)。
 
 ### Windows 检查入口
 
@@ -169,3 +169,7 @@ HTTP 集成还覆盖无会话 401、错误密码、来源/CSRF 403、错误设�
 ## 操作员与事件后续更新
 
 持久账号、权限及事件查询已接入。配置管理员首次迁入，后续配置文件不覆盖账号，当前运行和合成登录材料见 [操作员与事件记录](m2-operator-events.md)。
+
+## 等待控制后续更新
+
+wccs-agent 0.3.0 的 SCM 与前台宿主复用本工具 worker、凭据轮换和待回传文件，HTTP 独占工具任务，WSS 单独处理等待命令。原 `--identity [--once]` 继续可用。同身份目录的宿主与旧入口共享独占锁。具体启动、停止、服务安装/卸载及边界见 [等待控制记录](m2-waiting-control.md)。

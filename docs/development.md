@@ -98,3 +98,7 @@ Rust 纯业务模块采用 `#![forbid(unsafe_code)]`。平台适配模块逐处�
 `pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json` 执行固定 Windows 检查、隔离 schema 的 PostgreSQL HTTP 集成、npm ci 和前端检查。配置文件必须指向独立测试数据库。数据库连接通过临时环境变量传给测试，脚本结束后恢复环境。
 
 Linux 使用 `python3 scripts/check-linux.py` 原生构建与检查。设置 `WCCS_TEST_DATABASE_URL` 后额外执行数据库 HTTP 测试。Windows 上 `cargo check --locked -p wccs-server -p wccs-protocol --target x86_64-unknown-linux-gnu` 提供交叉类型检查证据。详细运行边界见 [M2 记录](tasks/m2-tool-configuration.md)。
+
+### M2 Windows 宿主验证
+
+等待控制继续使用 check-m2 / check-rust 的五包检查入口。前台验证显式使用独立 identity、session exe 与 `--test-mode`，SCM 使用 `scripts/waiting-service.ps1` 的明确服务名和受保护安装目录。真实服务需提升权限、LocalSystem 与独立交互式账户，具体目标、退出方法和证据分层见 [等待控制记录](tasks/m2-waiting-control.md)。

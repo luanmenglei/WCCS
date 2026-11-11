@@ -64,7 +64,7 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 服务与客户端分别运行在终端。浏览器访问 `http://127.0.0.1:8787/`，登录材料位于忽略目录 `local/m2/admin-access.json`。选择候选或自定义工具，编辑完整路径、选择目标并发布，设备区显示期望/实际配置版本和逐项结果。前端生产资源位于 `web/dist/`，由服务同源提供。
 
-上述命令使用本轮独立 PostgreSQL 测试集群。新环境初始化、Linux 原生启动、浏览器步骤及全部证据见 [M2 任务记录](docs/tasks/m2-tool-configuration.md)。当前使用持久操作员、角色与机房授权、一份全局配置及目标集合、HTTP(S) 轮询与普通 Windows 进程入口。操作员页面、全局事件、迁移及完整验证见 [操作员与事件记录](docs/tasks/m2-operator-events.md)。
+上述命令使用本轮独立 PostgreSQL 测试集群。新环境初始化、Linux 原生启动、浏览器步骤及全部证据见 [M2 任务记录](docs/tasks/m2-tool-configuration.md)。工具检查使用持久操作员、角色与机房授权、一份全局配置及目标集合、HTTP(S) 轮询。普通进程入口与本轮新增的 Windows 服务宿主复用同一检查逻辑。操作员页面、全局事件、迁移及完整验证见 [操作员与事件记录](docs/tasks/m2-operator-events.md)。
 
 机房操作从“机房与座位”进入，创建布局、应用编号规则和批量 IP 映射，预览后保存。选择整机房或部分座位可展开实际检查目标。详细步骤、代理配置与验收边界见 [机房座位表记录](docs/tasks/m2-room-seating.md)。
 
@@ -91,8 +91,12 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 可以向 Codex 提交以下任务。
 
-> 阅读 AGENTS.md、需求基线、路线图与 M2 任务记录，继续 Natsume 核心管理对齐的选手名单导入与座位分配。Windows 服务、WSS 及等待界面鉴权 IPC 按后续独立切片实施。同步完成管理页面、协议回归和浏览器验收，Linux 与 HTTPS 跨机闭环按可用环境补验。
+> 阅读 AGENTS.md、需求、路线图与 M2 等待控制记录，在提升权限独立测试机补验 SCM、Session 0 和跨用户 IPC，准备 Linux 与可信 HTTPS/WSS 跨机闭环，再按路线图推进 M3 对应业务切片。
 
 机房真实复原、设备策略和自动登录演练按验证文档在对应环境开展。
 
 M2 名单导入与座位分配已提供 `#/roster` 管理入口。启动、TSV 样例、验证和后续条件见 [名单分配记录](docs/tasks/m2-participant-seating.md)。
+
+## 等待界面批量控制
+
+管理入口为 `#/waiting`。选择比赛和座位，预览选手、设备与会话后批量进入等待，查看实际完成，再显式结束恢复桌面。服务重启和离线教学期间保持普通环境。独立 8788 开发实例、前台宿主、SCM 安装/卸载和实际验证见 [等待控制记录](docs/tasks/m2-waiting-control.md)。

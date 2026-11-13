@@ -364,6 +364,14 @@ impl Drop for Revert {
         }
     }
 }
+pub fn as_user<T>(token: HANDLE, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    // SAFETY: token remains live, operation is synchronous and guard always reverts on this thread.
+    unsafe {
+        ImpersonateLoggedOnUser(token)?;
+    }
+    let _revert = Revert;
+    operation()
+}
 pub fn check_access(token: HANDLE, tools: &[String], work: &Path) -> Result<()> {
     if tools.is_empty() || administrator(token)? {
         return Err("ordinary_account_required".into());

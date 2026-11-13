@@ -36,14 +36,21 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
                 d.credential_hash IS NOT NULL AS registered, d.desired_job,
                 d.lifecycle,d.lifecycle_version,d.application_id,d.application_at,d.enrollment_expires,
                 d.enrollment_generation,d.rotation_id,d.rotation_expires,
-                j.config_version, j.expires_at, r.result, r.received_at, r.id AS result_job
+                j.config_version, j.expires_at, r.result, r.received_at, r.id AS result_job,
+                diagnostic.report AS diagnostic_report, diagnostic.received_at AS diagnostic_received_at, health.report AS health_report, health.received_at AS health_received_at
          FROM devices d
+         LEFT JOIN device_health health ON health.device_id=d.id AND health.enrollment_generation=d.enrollment_generation
          LEFT JOIN jobs j ON j.id=d.desired_job
          LEFT JOIN LATERAL (
              SELECT result, received_at, id FROM jobs
              WHERE device_id=d.id AND result IS NOT NULL AND ($1 OR (cardinality(room_ids)>0 AND room_ids<@$2))
              ORDER BY sequence DESC LIMIT 1
          ) r ON true
+         LEFT JOIN LATERAL (
+             SELECT report,received_at FROM device_diagnostics
+             WHERE device_id=d.id AND enrollment_generation=d.enrollment_generation
+             ORDER BY received_at DESC,request_id DESC LIMIT 1
+         ) diagnostic ON true
          ORDER BY d.id",
             &[&identity.all_rooms,&identity.room_ids],
         )
@@ -55,6 +62,10 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
         let expires: Option<i64> = row.get("expires_at");
         json!({
             "id":row.get::<_,String>("id"), "name":row.get::<_,String>("name"),
+            "health":row.get::<_,Option<Value>>("health_report"),
+            "health_received_at":row.get::<_,Option<i64>>("health_received_at"),
+            "diagnostics":row.get::<_,Option<Value>>("diagnostic_report"),
+            "diagnostics_received_at":row.get::<_,Option<i64>>("diagnostic_received_at"),
             "lifecycle":row.get::<_,String>("lifecycle"), "lifecycle_version":row.get::<_,i64>("lifecycle_version"),
             "application_id":row.get::<_,Option<String>>("application_id"),"application_at":row.get::<_,Option<i64>>("application_at"),
             "enrollment_expires":row.get::<_,i64>("enrollment_expires"),"enrollment_generation":row.get::<_,i64>("enrollment_generation"),

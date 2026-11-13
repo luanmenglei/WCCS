@@ -121,6 +121,7 @@ export const waitingPreviewSchema = z.object({
         "recovery_unavailable",
         "tools_unavailable",
         "session_confirmation_required",
+        "maintenance_active",
         "unsupported_session",
       ]),
       device_id: z.string().nullable(),
@@ -171,6 +172,7 @@ export const stageLabels = {
   expired: "已过期",
 };
 export const skipLabels = {
+  maintenance_active: "维护任务正在执行",
   ready: "可执行",
   unbound: "未匹配设备",
   conflict: "地址冲突",
@@ -202,4 +204,16 @@ export function actualLabel(item: WaitingItem) {
     no_session: "无用户会话",
   };
   return labels[item.actual.state];
+}
+
+const waitingDetails: Record<string, string> = {
+  waiting_focus_lost: "等待窗口失去前台，正在尝试恢复显示",
+  waiting_account_required: "需先完成普通比赛账户准备与桌面确认",
+  waiting_policy_apply_failed: "任务管理器限制应用失败，已请求撤回",
+  waiting_policy_changed: "任务管理器策略被外部修改，已停止等待",
+  waiting_policy_recovery_failed:
+    "等待策略恢复失败，需核对本机日志并执行恢复工具",
+};
+export function waitingDetail(detail: string | undefined) {
+  return detail ? (waitingDetails[detail] ?? detail) : "尚未回传";
 }

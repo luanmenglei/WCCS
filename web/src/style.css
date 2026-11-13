@@ -272,6 +272,51 @@ a {
   margin-bottom: 24px;
   min-width: 0;
 }
+
+.operations-panel {
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+}
+.operations-panel h2,
+.operations-panel p {
+  margin: 0;
+}
+.operations-panel fieldset,
+.operations-panel details[open] {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.operations-panel fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.operations-panel label {
+  display: grid;
+  gap: 8px;
+}
+.operations-panel .maintenance-targets label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.operations-panel input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+.operations-panel textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: monospace;
+}
+.operations-panel button {
+  justify-self: start;
+}
+.operations-panel td p {
+  overflow-wrap: anywhere;
+}
 .section-heading,
 .section-header {
   display: flex;

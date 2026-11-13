@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { rosterSchema } from "./roster-model";
 import { seatingSchema } from "./seating";
+import { healthSchema } from "./health-model";
+import { diagnosticSchema } from "./diagnostics-model";
 
 export const toolSchema = z.object({
   id: z.string(),
@@ -47,6 +49,10 @@ export const resultSchema = z.object({
   ),
 });
 export const deviceSchema = z.object({
+  health: healthSchema.nullable().default(null),
+  health_received_at: z.number().nullable().default(null),
+  diagnostics: diagnosticSchema.nullable().default(null),
+  diagnostics_received_at: z.number().nullable().default(null),
   lifecycle: z.enum([
     "pending",
     "enabled",

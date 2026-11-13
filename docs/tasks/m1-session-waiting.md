@@ -1,5 +1,29 @@
 # M1 原生用户会话等待界面
 
+2026-11-12 用户随后要求替换为 xcpc-tools 展示界面，当前布局、三秒停止触碰后消退规则和验证结果见 [审查与替换记录](xcpc-waiting-review.md)。下方 Natsume 改版及最初原型部分记录各自实施时的行为。
+
+2026-11-12 后续加固已覆盖正式模式退出入口、置顶与快捷键、前台和安全桌面观察，开发模式保留本记录中的便捷退出。下文视觉改版时记录的正式 Esc / Alt+F4 可退出行为属于加固前状态。当前实现及 Windows 10 实测见 [等待加固记录](m2-waiting-hardening.md)。
+
+本轮已在 Windows 10 虚拟机通过真实管理页面验证深色身份展示与统一结束，开发预览的按钮、Esc、Alt+F4 均实测正常。真实多屏混合 DPI 仍受第二虚拟显卡驱动条件限制。
+
+## 2026-11-12 深色等待界面改版
+
+本次分支为 `feat/waiting-screen-design`，从干净的 `feat/contest-login-offline` 工作区建立。按用户选择参照 Natsume 的深色等待界面，交付原生 Win32 实现。顶部赛事、上方学校、下方姓名与座位分栏，底部保留等待和键鼠提示。布局及配色见 [界面规范](../ui-design.md)。下文 2026-11-10 内容保留为最初原型的历史记录。
+
+沿用 `windows 0.61.3`，增加 `Win32_System_SystemServices` feature 以使用静态控件样式常量。每个文本控件独立持有字体，布局先完成可失败操作，再统一切换字体并释放旧资源。GDI 测量恢复所选对象并释放 DC，颜色绘制使用系统共享画刷。身份仍通过现有 Command 接入，多屏重建、会话通知、租约和 IPC 流程沿用当前实现。
+
+开发模式保留计数和退出按钮。正式受控窗口隐藏开发信息，Tab 仅在开发模式定位退出按钮。现有 Esc 和 Alt+F4 退出路径继续可用，退出后的实际状态由宿主观察。键鼠输入保持类别聚合和三秒单调时钟冷却。
+
+实际检查如下。
+
+- `pwsh -NoProfile -File scripts/check-rust.ps1` 通过发布构建、rustfmt、Clippy、61 项常规 Rust 测试和 Credential Provider 构建。7 项依赖 PostgreSQL 的测试由该入口按既定规则忽略。
+- 新增原生隐藏窗口回归，验证 640×480、800×600、1080×1920、1920×1080、3840×2160 下的真实控件测量，100 字姓名、200 字学校、无空格英文和 `&` 字面文本，以及正式模式隐藏测试控件、开发窗口重复布局。
+- `python scripts/check_repo.py`、`python -m unittest discover -s scripts/tests -v` 和工作区/暂存区 diff 检查通过，Python 共 14 项。
+- 开发机实际全屏显示，单显示器 DPI 144。工具读取到身份文字和触碰提示，用户补充的 3840×2160 截图确认整体布局，保存在忽略目录 `artifacts/waiting-design/preview.png`。
+- 独立记录 `local/waiting-design-final/session-<会话号>/status.json` 最终显示 `clean_exit=true`、`visible=false`，键盘、鼠标和提示计数均有记录。窗口自动化的激活/退出调用曾返回前台窗口错误，退出结果按实际记录和进程状态核对。
+
+构建日志为 `local/waiting-design-check.log`。本轮未重跑服务端到会话窗口的管理页面闭环。Windows 10 现场镜像、多屏混合 DPI 切换和跨会话部署仍需实际环境，下一步将新构建放入独立 Windows 10 测试机，从等待控制页面验证正式受控样式及统一开放。
+
 日期为 2026-11-10。本切片交付 `wccs-session` 0.1.0，使用合成身份在当前 Windows 用户会话中独立运行。开发分支为 `feat/session-waiting`。
 
 ## 已有改动收口

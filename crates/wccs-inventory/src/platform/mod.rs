@@ -1,7 +1,12 @@
 mod account;
+pub mod health;
 mod network;
 mod system;
 mod volumes;
+
+pub fn network() -> crate::model::Observation<Vec<crate::model::NetworkAdapter>> {
+    observation(network::collect())
+}
 
 use crate::{
     model::{EvidenceContext, Observation, Report},
@@ -26,6 +31,7 @@ pub fn collect(
     let (tool_configuration, tools) =
         tools::check_configuration(configuration, tools::inspect_file, file_version)?;
     Ok(Report {
+        health: Some(health::HealthCollector::default().collect()),
         schema_version: 3,
         collector_version: env!("CARGO_PKG_VERSION").into(),
         evidence_context: context,

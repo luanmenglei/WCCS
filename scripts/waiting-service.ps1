@@ -87,12 +87,16 @@ switch ($Action) {
         Copy-Item -LiteralPath (Join-Path $BinaryDirectory 'wccs-agent.exe') -Destination $agent
         Copy-Item -LiteralPath (Join-Path $BinaryDirectory 'wccs-session.exe') -Destination $session
         Copy-Item -LiteralPath $source -Destination $identityFile
-        foreach ($extension in @('credential','pending.json','completed','rotation.json')) {
+        foreach ($extension in @('credential','pending.json','completed','rotation.json','connection.json','deployment.json')) {
             $companion = [IO.Path]::ChangeExtension($source, $extension)
             if (Test-Path -LiteralPath $companion) {
                 Copy-Item -LiteralPath $companion -Destination ([IO.Path]::ChangeExtension($identityFile, $extension))
             }
         }
+        # Fixed relative arguments avoid embedding staff-supplied paths in batch code.
+        # The operator explicitly launches this console; installation itself opens no UI.
+        $setupLauncher = '@echo off' + "`r`n" + '"%~dp0bin\wccs-agent.exe" --setup "%~dp0data\device.json"' + "`r`n" + 'pause' + "`r`n"
+        [IO.File]::WriteAllText((Join-Path $installRoot 'configure.cmd'), $setupLauncher, [Text.Encoding]::ASCII)
         Invoke-ServiceTool -Arguments @('create', $Name, 'binPath=', $expected, 'start=', 'auto', 'obj=', 'LocalSystem', 'DisplayName=', $Name)
         Invoke-ServiceTool -Arguments @('failure', $Name, 'reset=', '86400', 'actions=', 'restart/10000/restart/30000/none/0')
         Write-Output "Installed $Name in $installRoot. Start it explicitly after checking the target session."

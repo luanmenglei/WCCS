@@ -1,3 +1,5 @@
+import { Health } from "./Health";
+import { healthAbnormal, healthStale, versionMismatch } from "./health-model";
 import { participantLabel, type Contest } from "./roster-model";
 import { useState, type ReactNode } from "react";
 import { checkLabel, type Snapshot } from "./contracts";
@@ -36,15 +38,31 @@ export function Seats({
   const [roomId, setRoomId] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [agentVersion, setAgentVersion] = useState("");
+  const [deploymentVersion, setDeploymentVersion] = useState("");
   const [view, setView] = useState(targetMode ? "list" : "map");
   const [detailId, setDetailId] = useState<string | null>(null);
   const all = seatRows(snapshot);
+  const healthMatches = (ids: string[], kind: string) =>
+    ids.some((id) => {
+      const device = snapshot.devices.find((d) => d.id === id);
+      return (
+        device &&
+        (kind === "health"
+          ? healthAbnormal(device)
+          : kind === "stale_health"
+            ? healthStale(device, snapshot.server_time)
+            : kind === "version" &&
+              versionMismatch(device, agentVersion, deploymentVersion))
+      );
+    });
   const scoped = all.filter(({ room }) => !roomId || room.id === roomId);
   const visible = scoped.filter(
     ({ room, seat }) =>
       (filter === "all" ||
         seat.status === filter ||
-        (filter === "bound" && ["online", "offline"].includes(seat.status))) &&
+        (filter === "bound" && ["online", "offline"].includes(seat.status)) ||
+        healthMatches(seat.devices, filter)) &&
       matchesSearch(
         [
           room.name,
@@ -140,6 +158,9 @@ export function Seats({
           >
             <option value="all">全部状态</option>
             <option value="bound">已绑定</option>
+            <option value="health">健康异常 / 未知</option>
+            <option value="stale_health">健康数据过期</option>
+            <option value="version">版本不一致 / 未知</option>
             {Object.entries(seatStatusLabels).map(([value, label]) => (
               <option key={value} value={value}>
                 {label}
@@ -147,6 +168,29 @@ export function Seats({
             ))}
           </select>
         </label>
+        {filter === "version" && (
+          <>
+            <label>
+              基准客户端版本
+              <input
+                value={agentVersion}
+                onChange={(e) => setAgentVersion(e.target.value)}
+                placeholder="填写待核对版本"
+              />
+            </label>
+            <label>
+              基准部署版本
+              <input
+                value={deploymentVersion}
+                onChange={(e) => setDeploymentVersion(e.target.value)}
+                placeholder="填写镜像 / 部署版本"
+              />
+            </label>
+            {!agentVersion && !deploymentVersion && (
+              <p>填写至少一项版本基准以筛选。</p>
+            )}
+          </>
+        )}
         <span className="result-count">
           {visible.length} / {scoped.length} 个座位
         </span>
@@ -293,6 +337,14 @@ export function Seats({
                                       <span>
                                         {seatStatusLabels[seat.status]}
                                       </span>
+                                      {healthMatches(
+                                        seat.devices,
+                                        "health",
+                                      ) && <small>健康待核对</small>}
+                                      {healthMatches(
+                                        seat.devices,
+                                        "stale_health",
+                                      ) && <small>健康数据已过期</small>}
                                       <small className="mono">
                                         {seat.expected_ip ?? "IP 未配置"}
                                       </small>
@@ -379,6 +431,9 @@ export function Seats({
                   <dt>工具检查</dt>
                   <dd>{device ? checkStatus(device) : "尚无结果"}</dd>
                 </dl>
+                {device && (
+                  <Health device={device} now={snapshot.server_time} />
+                )}
                 {device?.result?.tools.map(({ tool, check }) => (
                   <p key={tool.id}>
                     {tool.name} · {checkLabel(check)}

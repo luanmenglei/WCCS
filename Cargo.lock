@@ -1957,6 +1957,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-tungstenite",
  "tower-http 0.7.1",
+ "url",
  "wccs-inventory",
  "wccs-protocol",
 ]

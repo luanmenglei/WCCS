@@ -15,6 +15,7 @@ import {
   stageLabels,
   waitingListSchema,
   waitingPreviewSchema,
+  waitingDetail,
   type WaitingItem,
 } from "./waiting-model";
 
@@ -394,7 +395,7 @@ export function Waiting({
                   <td>
                     {fresh ? actualLabel(item) : "状态未知"}
                     <br />
-                    {item.actual?.detail}
+                    {waitingDetail(item.actual?.detail)}
                     {fresh && item.online && item.actual?.account && (
                       <>
                         <br />
@@ -433,8 +434,9 @@ export function Waiting({
           <p>
             阶段 {stageLabels[detail.stage]} · {actualLabel(detail)}
           </p>
+          <p>当前状态说明 {waitingDetail(detail.actual?.detail)}</p>
           <p>
-            完成证据 {detail.report?.actual.detail ?? "尚未回传"} · 屏幕{" "}
+            完成证据 {waitingDetail(detail.report?.actual.detail)} · 屏幕{" "}
             {detail.report?.actual.monitors ?? 0}
           </p>
           <p>

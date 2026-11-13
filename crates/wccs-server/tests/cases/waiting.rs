@@ -619,6 +619,20 @@ async fn login_preview_connection_fencing_and_completion() {
     let mut observation = json!({"protocol_version":1,"instance_id":"host-one","session_key":null,"capabilities":["waiting-v1","contest-login-simulation-v1"],"actual":{"state":"desktop","command_id":null,"session_key":null,"monitors":0,"detail":"standby","account":account},"report":null});
     poll(&mut ws, &observation).await.unwrap();
     input["action"] = json!("prepare_login");
+    observation["actual"]["state"] = json!("failed");
+    observation["actual"]["detail"] = json!("waiting_policy_recovery_failed");
+    for action in ["prepare_login", "enter"] {
+        input["action"] = json!(action);
+        poll(&mut ws, &observation).await.unwrap();
+        assert_eq!(
+            preview(&operator, &mut input).await["targets"][0]["status"],
+            "recovery_required"
+        );
+    }
+    observation["actual"]["state"] = json!("desktop");
+    observation["actual"]["detail"] = json!("standby");
+    input["action"] = json!("prepare_login");
+    poll(&mut ws, &observation).await.unwrap();
     assert_eq!(
         preview(&operator, &mut input).await["targets"][0]["status"],
         "ready"

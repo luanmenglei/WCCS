@@ -12,7 +12,7 @@ use windows::{
         Foundation::*,
         Security::{Authorization::*, *},
         Storage::FileSystem::*,
-        System::{Environment::*, Pipes::*, RemoteDesktop::*, Threading::*},
+        System::{Environment::*, JobObjects::*, Pipes::*, RemoteDesktop::*, Threading::*},
     },
     core::{PCWSTR, PWSTR},
 };
@@ -338,6 +338,7 @@ impl Drop for Mitigations {
 pub struct Child {
     pub pipe: Pipe,
     process: Handle,
+    job: Handle,
     connected: bool,
     launched: Instant,
 }
@@ -425,6 +426,21 @@ impl Child {
         let process_descriptor =
             Descriptor::new("O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;RC;;;OW)")?;
         let process_attributes = process_descriptor.attributes();
+        // The unnamed job is never inherited. Closing its only handle also ends
+        // descendants after a service crash, including a parent that already exited.
+        // SAFETY: initialized structure and valid owned job handle; no raw pointer escapes.
+        let job = unsafe {
+            let job = Handle(CreateJobObjectW(None, PCWSTR::null())?);
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )?;
+            job
+        };
         // SAFETY: explicit application path, mutable terminated command, no inherited handles.
         // CreateProcessAsUser creates a separate console user's desktop process from Session 0.
         unsafe {
@@ -435,7 +451,7 @@ impl Child {
                     None,
                     None,
                     false,
-                    CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                    CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
                     None,
                     None,
                     &startup.StartupInfo,
@@ -451,7 +467,10 @@ impl Child {
                     Some(&process_attributes),
                     Some(&process_attributes),
                     false,
-                    CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                    CREATE_UNICODE_ENVIRONMENT
+                        | CREATE_NO_WINDOW
+                        | EXTENDED_STARTUPINFO_PRESENT
+                        | CREATE_SUSPENDED,
                     Some(environment),
                     None,
                     &startup.StartupInfo,
@@ -460,11 +479,28 @@ impl Child {
                 let _ = DestroyEnvironmentBlock(environment);
                 result?;
             }
-            let _ = CloseHandle(process.hThread);
+        }
+        let process_handle = Handle(process.hProcess);
+        let thread = Handle(process.hThread);
+        // SAFETY: new child is suspended until assigned, so it cannot spawn an
+        // uncontained descendant. Failure terminates that exact child before returning.
+        unsafe {
+            if let Err(error) = AssignProcessToJobObject(job.0, process_handle.0) {
+                let _ = TerminateProcess(process_handle.0, 1);
+                let _ = WaitForSingleObject(process_handle.0, 3000);
+                return Err(error.into());
+            }
+            if ResumeThread(thread.0) == u32::MAX {
+                let error = windows::core::Error::from_win32();
+                let _ = TerminateJobObject(job.0, 1);
+                let _ = WaitForSingleObject(process_handle.0, 3000);
+                return Err(error.into());
+            }
         }
         Ok(Self {
             pipe,
-            process: Handle(process.hProcess),
+            process: process_handle,
+            job,
             connected: false,
             launched: Instant::now(),
         })
@@ -472,9 +508,7 @@ impl Child {
     pub fn stop(&mut self) -> Result<()> {
         // SAFETY: retained exact child handle owns termination/synchronization rights.
         unsafe {
-            if WaitForSingleObject(self.process.0, 0) == WAIT_TIMEOUT {
-                TerminateProcess(self.process.0, 1)?;
-            }
+            TerminateJobObject(self.job.0, 1)?;
             if WaitForSingleObject(self.process.0, 3000) != WAIT_OBJECT_0 {
                 return Err("session_stop_unconfirmed".into());
             }
@@ -515,13 +549,11 @@ impl Child {
 }
 impl Drop for Child {
     fn drop(&mut self) {
-        // SAFETY: only the exact child process handle is terminated. No PID lookup.
+        // SAFETY: only our non-inherited job and its exact process tree are terminated.
         // Normal leave is cooperative; this fallback handles crashed/hung UI and service stop.
         unsafe {
-            if WaitForSingleObject(self.process.0, 0) == WAIT_TIMEOUT {
-                let _ = TerminateProcess(self.process.0, 1);
-                let _ = WaitForSingleObject(self.process.0, 3000);
-            }
+            let _ = TerminateJobObject(self.job.0, 1);
+            let _ = WaitForSingleObject(self.process.0, 3000);
         }
     }
 }

@@ -111,9 +111,10 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
     }
     let devices: HashMap<_, _> = tx
         .query(
-            "SELECT lifecycle,enrollment_generation,lifecycle_version,address_version,id
+            "SELECT lifecycle,enrollment_generation,lifecycle_version,address_version,id,
+             EXISTS(SELECT 1 FROM maintenance_jobs j WHERE j.device_id=devices.id AND j.stage IN ('queued','accepted','executing') AND j.expires_at>$2) AS maintenance
              FROM devices WHERE id=ANY($1)",
-            &[&device_ids],
+            &[&device_ids, &now()],
         )
         .await?
         .into_iter()
@@ -194,9 +195,18 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
                 if online && input.action == "enter" && target["session_key"].is_null() {
                     target["status"] = json!("no_session");
                 }
+                if online
+                    && ["enter", "prepare_login"].contains(&input.action.as_str())
+                    && actual["detail"] == "waiting_policy_recovery_failed"
+                {
+                    target["status"] = json!("recovery_required");
+                }
             }
             if target["identity"].is_null() {
                 target["status"] = json!("no_participant");
+            }
+            if d.get::<_, bool>("maintenance") && input.action != "leave" {
+                target["status"] = json!("maintenance_active");
             }
             if d.get::<_, String>(0) != "enabled" {
                 target["status"] = json!("disabled");

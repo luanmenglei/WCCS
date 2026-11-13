@@ -9,16 +9,16 @@ use wccs_protocol::{
     CheckResult, Heartbeat, HeartbeatReply, PROTOCOL_VERSION, Registration, token, valid_id,
 };
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Identity {
-    server: String,
-    device_id: String,
-    enrollment_token: String,
+pub(crate) struct Identity {
+    pub server: String,
+    pub device_id: String,
+    pub enrollment_token: String,
     #[serde(default)]
-    device_token: Option<String>,
+    pub device_token: Option<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -46,23 +46,10 @@ pub fn run() -> Result<()> {
 
 fn run_locked(path: &Path, once: bool) -> Result<()> {
     let mut identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
-    validate_server(&identity.server)?;
     if !valid_id(&identity.device_id) {
         return Err("设备 ID 无效".into());
     }
-    let credential_path = path.with_extension("credential");
-    let credential = match fs::read_to_string(&credential_path) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let value = identity.device_token.clone().unwrap_or_else(token);
-            persist(&credential_path, value.as_bytes())?;
-            value
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if credential.len() != 64 {
-        return Err("设备令牌长度错误".into());
-    }
+    let credential = crate::diagnostics::credential(path, &identity)?;
     identity.device_token = Some(credential.clone());
     let client = Client::builder()
         .timeout(Duration::from_secs(12))
@@ -92,6 +79,7 @@ fn run_locked(path: &Path, once: bool) -> Result<()> {
 }
 
 fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -> Result<()> {
+    identity.server = crate::connection::server(path, identity)?;
     let server = identity.server.trim_end_matches('/');
     let credential = identity.device_token.as_ref().unwrap().clone();
     let heartbeat = Heartbeat {
@@ -161,6 +149,8 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
         rotate(client, identity, path, rotation_id)?;
         return Ok(());
     }
+    // Diagnostic retransmission shares HTTP ownership and cannot stall WSS renewals.
+    let _ = crate::diagnostics::flush(client, path, identity, &credential, server);
     // Retry a persisted exact result before executing a newly assigned task.
     let pending = path.with_extension("pending.json");
     if pending.exists() {
@@ -341,19 +331,7 @@ pub fn validate_server(server: &str) -> Result<reqwest::Url> {
 pub fn run_worker(path: &Path, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let initialize = || -> Result<(Identity, Client)> {
         let mut identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
-        validate_server(&identity.server)?;
-        let credential_path = path.with_extension("credential");
-        if !credential_path.exists() {
-            persist(
-                &credential_path,
-                identity
-                    .device_token
-                    .clone()
-                    .unwrap_or_else(token)
-                    .as_bytes(),
-            )?;
-        }
-        identity.device_token = Some(fs::read_to_string(credential_path)?);
+        identity.device_token = Some(crate::diagnostics::credential(path, &identity)?);
         let client = Client::builder()
             .timeout(Duration::from_secs(12))
             .connect_timeout(Duration::from_secs(5))

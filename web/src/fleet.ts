@@ -41,6 +41,17 @@ export function matchesSearch(
 }
 
 export const pages = {
+  presentation: {
+    label: "等待展示",
+    group: "赛前准备",
+    description:
+      "设置开赛时间、DOMjudge 状态来源与学校校徽，查看逐机展示诊断。",
+  },
+  maintenance: {
+    label: "批量维护",
+    group: "赛场管理",
+    description: "预览固定操作模板、显示设备识别并核对逐机执行结果。",
+  },
   login: {
     label: "比赛账户与登录",
     group: "赛场管理",

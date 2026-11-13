@@ -4,10 +4,15 @@ mod auth;
 mod control;
 mod database;
 mod device;
+mod diagnostics;
 mod events;
+mod health;
 mod lifecycle;
+mod maintenance;
 mod management;
 mod operators;
+mod preparation;
+mod presentation;
 mod roster;
 mod seating;
 mod waiting;
@@ -130,7 +135,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=7) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=12) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -166,6 +171,26 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     }
     if versions[0].get::<_, i32>(0) <= 6 {
         tx.batch_execute(include_str!("../migrations/007_contest_login.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 7 {
+        tx.batch_execute(include_str!("../migrations/008_diagnostics.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 8 {
+        tx.batch_execute(include_str!("../migrations/009_maintenance.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 9 {
+        tx.batch_execute(include_str!("../migrations/010_health.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 10 {
+        tx.batch_execute(include_str!("../migrations/011_presentation.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 11 {
+        tx.batch_execute(include_str!("../migrations/012_preparation.sql"))
             .await?;
     }
     tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$1 WHERE stage NOT IN ('failed','cancelled','expired')", &[&wccs_protocol::now()]).await?;
@@ -208,10 +233,25 @@ async fn response_policy(request: Request, next: Next) -> Response {
 
 pub fn router(app: App) -> Router {
     Router::new()
+        .route("/api/health", get(|| async { Json(json!({"service":"wccs","protocol_version":1,"server_time":wccs_protocol::now()})) }))
         .route("/api/waiting/preview", post(waiting::preview))
         .route("/api/waiting/commit", post(waiting::commit))
         .route("/api/waiting", get(waiting::list))
         .route("/api/device/control", get(control::upgrade))
+        .route("/api/device/diagnostics/context", get(diagnostics::context))
+        .route("/api/device/diagnostics/probe", get(diagnostics::probe))
+        .route("/api/presentation", get(presentation::get).post(presentation::save))
+        .route("/api/device/presentation", post(presentation::device))
+        .route("/api/device/presentation/report", post(presentation::report))
+        .route("/api/device/health", post(health::report))
+        .route("/api/device/diagnostics", post(diagnostics::receive))
+        .route("/api/maintenance/preview", post(maintenance::preview))
+        .route("/api/maintenance/commit", post(maintenance::commit))
+        .route("/api/preparation", get(preparation::get).post(preparation::save))
+        .route("/api/maintenance", get(maintenance::list))
+        .route("/api/maintenance/cancel", post(maintenance::cancel))
+        .route("/api/device/maintenance/poll", post(maintenance::poll))
+        .route("/api/device/maintenance/result", post(maintenance::result))
         .route("/api/login", post(auth::login))
         .route("/api/session", get(auth::session))
         .route("/api/logout", post(auth::logout))

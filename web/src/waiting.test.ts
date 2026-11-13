@@ -6,6 +6,7 @@ import {
   accountSchema,
   waitingItemSchema,
   waitingPreviewSchema,
+  waitingDetail,
 } from "./waiting-model";
 import { pageFromHash } from "./fleet";
 
@@ -34,6 +35,12 @@ const command = {
     room_version: 2,
   },
 };
+test("waiting recovery and focus failures remain visible with legacy detail compatibility", () => {
+  assert.match(waitingDetail("waiting_policy_recovery_failed"), /本机日志/);
+  assert.match(waitingDetail("waiting_focus_lost"), /前台/);
+  assert.equal(waitingDetail("legacy_detail"), "legacy_detail");
+  assert.equal(waitingDetail(undefined), "尚未回传");
+});
 test("waiting route and receipt preserve exact identity and generation", () => {
   assert.equal(pageFromHash("#/waiting"), "waiting");
   const item = waitingItemSchema.parse({

@@ -41,30 +41,7 @@ pub async fn upgrade(
         tx.commit().await?;
         id
     };
-    let key = headers
-        .get("sec-websocket-key")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| s.len() == 24)
-        .ok_or_else(|| ApiError::bad("WebSocket 握手无效"))?;
-    if headers
-        .get("sec-websocket-version")
-        .and_then(|v| v.to_str().ok())
-        != Some("13")
-        || !headers
-            .get("upgrade")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
-        || !headers
-            .get("connection")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                v.split(',')
-                    .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
-            })
-    {
-        return Err(ApiError::bad("WebSocket 握手无效"));
-    }
-    let accept = derive_accept_key(key.as_bytes());
+    let accept = handshake(&headers)?;
     tokio::spawn(async move {
         if let Ok(Ok(upgraded)) =
             tokio::time::timeout(Duration::from_secs(5), hyper::upgrade::on(request)).await
@@ -93,6 +70,33 @@ pub async fn upgrade(
         ],
     )
         .into_response())
+}
+
+pub(crate) fn handshake(headers: &HeaderMap) -> ApiResult<String> {
+    let key = headers
+        .get("sec-websocket-key")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| s.len() == 24)
+        .ok_or_else(|| ApiError::bad("WebSocket 握手无效"))?;
+    if headers
+        .get("sec-websocket-version")
+        .and_then(|v| v.to_str().ok())
+        != Some("13")
+        || !headers
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+        || !headers
+            .get("connection")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                v.split(',')
+                    .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
+            })
+    {
+        return Err(ApiError::bad("WebSocket 握手无效"));
+    }
+    Ok(derive_accept_key(key.as_bytes()))
 }
 
 async fn run(app: App, headers: HeaderMap, id: String, mut socket: WebSocket) {

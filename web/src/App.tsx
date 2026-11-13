@@ -1,3 +1,5 @@
+import { Presentation } from "./Presentation";
+import { Maintenance } from "./Maintenance";
 import { Waiting } from "./Waiting";
 import { AccessContext, roleLabels } from "./access";
 import { Operators } from "./Operators";
@@ -439,6 +441,28 @@ export function App() {
                   <p role="alert">操作员管理需要管理员权限。</p>
                 ))}
               {page === "events" && <Events />}
+              {page === "presentation" && (
+                <Presentation
+                  key={contestId}
+                  contestId={contestId}
+                  csrf={session.csrf}
+                  disabled={
+                    busy ||
+                    !connected ||
+                    session.role !== "admin" ||
+                    !session.all_rooms
+                  }
+                  onMutate={mutate}
+                />
+              )}
+              {page === "maintenance" && (
+                <Maintenance
+                  snapshot={snapshot}
+                  csrf={session.csrf}
+                  disabled={busy || !connected || session.role === "viewer"}
+                  onMutate={mutate}
+                />
+              )}
               {(page === "waiting" || page === "login") && (
                 <Waiting
                   mode={page}

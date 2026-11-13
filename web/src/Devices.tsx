@@ -1,4 +1,6 @@
 import { useAccess } from "./access";
+import { Health } from "./Health";
+import { Diagnostics } from "./Diagnostics";
 import { participantLabel, type Contest } from "./roster-model";
 import { useEffect, useState, type FormEvent } from "react";
 import {
@@ -409,6 +411,8 @@ export function DeviceDetails({
       <p className="device-time">
         最后心跳 {time(device.last_seen)} · 结果回传 {time(device.received_at)}
       </p>
+      <Diagnostics device={device} />
+      <Health device={device} now={Date.now() / 1000} />
       {device.result && (
         <details open>
           <summary>

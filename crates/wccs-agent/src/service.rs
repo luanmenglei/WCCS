@@ -118,3 +118,33 @@ pub fn monotonic_ms() -> u64 {
     // SAFETY: GetTickCount64 takes no pointers, owns no handles, and is callable on any thread.
     unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
 }
+
+pub fn query(name: &str) -> windows::core::Result<(bool, u32)> {
+    struct ServiceHandle(SC_HANDLE);
+    impl Drop for ServiceHandle {
+        fn drop(&mut self) {
+            // SAFETY: each successful SCM open is owned by this wrapper exactly once.
+            unsafe {
+                let _ = CloseServiceHandle(self.0);
+            }
+        }
+    }
+    let name = wide(name);
+    // SAFETY: name is terminated. Both SCM handles and output storage remain live through the calls.
+    unsafe {
+        let manager = ServiceHandle(OpenSCManagerW(None, None, SC_MANAGER_CONNECT)?);
+        let service = ServiceHandle(OpenServiceW(
+            manager.0,
+            PCWSTR(name.as_ptr()),
+            SERVICE_QUERY_STATUS,
+        )?);
+        let mut status = SERVICE_STATUS_PROCESS::default();
+        let mut needed = 0;
+        let buffer = std::slice::from_raw_parts_mut(
+            (&mut status as *mut SERVICE_STATUS_PROCESS).cast::<u8>(),
+            size_of::<SERVICE_STATUS_PROCESS>(),
+        );
+        QueryServiceStatusEx(service.0, SC_STATUS_PROCESS_INFO, Some(buffer), &mut needed)?;
+        Ok((status.dwCurrentState == SERVICE_RUNNING, status.dwProcessId))
+    }
+}

@@ -108,3 +108,15 @@ Linux 使用 `python3 scripts/check-linux.py` 原生构建与检查。设置 `WC
 Credential Provider V2 的窄 COM 边界位于 native/credential-provider，采用固定 MSVC 与 Windows SDK，build-login-provider.ps1 已纳入 check-rust.ps1。其余客户端、协议与后端继续使用既有 Rust workspace。账户 FFI 集中在 login_windows，IPC 在 login_broker，回调窗口和 COM 引用在 provider.cpp 管理。新增平台依赖仅启用现有 windows 0.61.3 的 API feature。
 
 原生系统验证仅面向明确授权的独立 Windows 测试机，安装脚本复核机器名及 MachineGuid，操作前保留关机磁盘回滚点。文件模拟适配器显式使用 --simulate-login，模拟证据与原生证据分别记录。
+
+### 固定维护与脚本包开发
+
+`python scripts/package-contest-scripts.py --help` 提供独立 UTF-8 脚本包构建入口，只使用 Python 3.11+ 标准库。显式指定源目录、包/配置版本、解释器工具 ID、解释器 PE 文件版本、来源、许可和新输出路径。输出通过管理端“批量维护”的配置面板导入，发布后重新预览目标。工具路径仍取自服务端工具配置。
+
+示例（均为合成输入）：
+
+```powershell
+python scripts/package-contest-scripts.py --source-directory local/scripts-src --id contest --version v1 --configuration-version config1 --runtime-tool-id powershell --runtime-file-version 7.5.0.0 --source project --license MIT --output local/contest-v1.json
+```
+
+脚本包仅部署和激活，实际编译/提交命令契约另行验收。新增维护任务不得绕过任务日志、配置版本、普通账户访问检查和文件回退。参见 [对齐记录](tasks/machine-tools-alignment.md)。

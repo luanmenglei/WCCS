@@ -71,6 +71,11 @@ impl Actual {
             && [
                 "teaching_standby",
                 "ui_observed",
+                "waiting_focus_lost",
+                "waiting_account_required",
+                "waiting_policy_apply_failed",
+                "waiting_policy_changed",
+                "waiting_policy_recovery_failed",
                 "control_disconnected",
                 "session_changed",
                 "session_launch_failed",
@@ -128,6 +133,8 @@ pub struct ControlReply {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IpcRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<crate::presentation::Display>,
     pub protocol_version: u32,
     pub command: Command,
     pub lease_seconds: u64,
@@ -149,5 +156,25 @@ mod tests {
         assert!(actual.valid());
         actual.detail = "unexpected payload with credentials".into();
         assert!(!actual.valid());
+    }
+    #[test]
+    fn waiting_hardening_details_survive_the_authenticated_report_contract() {
+        for detail in [
+            "waiting_focus_lost",
+            "waiting_account_required",
+            "waiting_policy_apply_failed",
+            "waiting_policy_changed",
+            "waiting_policy_recovery_failed",
+        ] {
+            let actual = Actual {
+                state: "failed".into(),
+                detail: detail.into(),
+                ..Default::default()
+            };
+            assert!(actual.valid());
+            let decoded: Actual =
+                serde_json::from_slice(&serde_json::to_vec(&actual).unwrap()).unwrap();
+            assert_eq!(decoded, actual);
+        }
     }
 }

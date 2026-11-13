@@ -4,13 +4,6 @@ use serde::{Deserialize, Serialize};
 
 pub const COOLDOWN_MS: u64 = 3_000;
 
-pub fn content_scale(width: i32, height: i32, dpi: u32) -> f64 {
-    (dpi as f64 / 96.0)
-        .min(width as f64 / 760.0)
-        .min(height as f64 / 650.0)
-        .max(0.25)
-}
-
 #[derive(Clone, Copy)]
 pub enum InputKind {
     Keyboard,
@@ -54,8 +47,8 @@ impl WaitingState {
         *count = count.saturating_add(1);
         if self.remaining_ms(now_ms) == 0 {
             self.prompts = self.prompts.saturating_add(1);
-            self.last_prompt_ms = Some(now_ms);
         }
+        self.last_prompt_ms = Some(now_ms);
     }
 
     pub fn remaining_ms(&self, now_ms: u64) -> u64 {
@@ -100,26 +93,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn content_fits_small_large_portrait_and_scaled_displays() {
-        for (width, height) in [
-            (640, 480),
-            (800, 600),
-            (1080, 1920),
-            (1920, 1080),
-            (3840, 2160),
-        ] {
-            for dpi in [96, 120, 144, 192, 288] {
-                let scale = content_scale(width, height, dpi);
-                assert!(680.0 * scale <= width as f64);
-                assert!(580.0 * scale <= height as f64);
-                assert!(scale <= dpi as f64 / 96.0);
-                assert!(23.0 * scale >= 12.0);
-            }
-        }
-    }
-
-    #[test]
-    fn cooldown_counts_every_message_without_extending_prompt() {
+    fn continuous_input_keeps_warning_visible_until_three_seconds_of_idle() {
         let mut state = WaitingState::default();
         state.touch(InputKind::Keyboard, 10);
         state.touch(InputKind::Mouse, 11);
@@ -128,10 +102,11 @@ mod tests {
             (state.keyboard_events, state.mouse_events, state.prompts),
             (2, 1, 1)
         );
-        assert_eq!(state.remaining_ms(3009), 1);
-        state.touch(InputKind::Mouse, 3010);
+        assert_eq!(state.remaining_ms(3009), COOLDOWN_MS);
+        assert_eq!(state.remaining_ms(6008), 1);
+        state.touch(InputKind::Mouse, 6009);
         assert_eq!(state.prompts, 2);
-        assert_eq!(state.remaining_ms(3010), COOLDOWN_MS);
+        assert_eq!(state.remaining_ms(6009), COOLDOWN_MS);
     }
 
     #[test]

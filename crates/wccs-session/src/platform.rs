@@ -2,12 +2,16 @@
 //! Callbacks have static lifetimes, keep no Rust references, and post scalar
 //! notifications to the message loop. No Rust borrow crosses a reentrant call.
 
-use crate::state::{InputKind, SessionEvent, Snapshot, WaitingState, content_scale};
+mod presentation;
+
+use crate::state::{InputKind, SessionEvent, Snapshot, WaitingState};
+use presentation::{BACKGROUND, CARD, FOREGROUND, Layout, MUTED};
 use std::{
     fs::{self, File},
     io::{self, Write},
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use windows::{
@@ -15,10 +19,21 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW},
-        System::{LibraryLoader::*, RemoteDesktop::*, Threading::*},
+        System::{
+            LibraryLoader::*,
+            RemoteDesktop::*,
+            StationsAndDesktops::*,
+            SystemInformation::{GetLocalTime, GetTickCount64},
+            SystemServices::{
+                SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_LEFTNOWORDWRAP, SS_NOPREFIX,
+                SS_OWNERDRAW, SS_RIGHT,
+            },
+            Threading::*,
+        },
         UI::{
+            Controls::DRAWITEMSTRUCT,
             HiDpi::*,
-            Input::KeyboardAndMouse::{GetFocus, SetFocus, VK_ESCAPE, VK_RETURN, VK_TAB},
+            Input::KeyboardAndMouse::{GetFocus, SetFocus, VK_ESCAPE, VK_F1, VK_RETURN, VK_TAB},
             WindowsAndMessaging::*,
         },
     },
@@ -31,7 +46,44 @@ use wccs_session::ipc;
 const REBUILD: u32 = WM_APP + 1;
 const LAYOUT: u32 = WM_APP + 2;
 const SESSION: u32 = WM_APP + 3;
+const GUARDED_INPUT: u32 = WM_APP + 4;
+static GUARDED: AtomicBool = AtomicBool::new(false);
+static INTERNAL_EXIT: AtomicBool = AtomicBool::new(false);
+
+struct KeyboardGuard(HHOOK);
+impl KeyboardGuard {
+    fn install(module: HINSTANCE) -> WinResult<Self> {
+        // SAFETY: static callback, UI-thread message loop owns the hook until Drop.
+        let hook =
+            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(module), 0)? };
+        GUARDED.store(true, Ordering::Relaxed);
+        Ok(Self(hook))
+    }
+}
+impl Drop for KeyboardGuard {
+    fn drop(&mut self) {
+        GUARDED.store(false, Ordering::Relaxed);
+        // SAFETY: this thread owns the hook. No callback retains borrowed state.
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.0);
+        }
+    }
+}
+unsafe extern "system" fn keyboard_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code >= 0 && GUARDED.load(Ordering::Relaxed) {
+        if wp.0 as u32 == WM_KEYDOWN || wp.0 as u32 == WM_SYSKEYDOWN {
+            post(GUARDED_INPUT, WPARAM(0));
+        }
+        // Waiting accepts no keyboard actions. No key values are read or persisted.
+        return LRESULT(1);
+    }
+    // SAFETY: forwarding untouched Windows hook parameters, including negative codes.
+    unsafe { CallNextHookEx(None, code, wp, lp) }
+}
 const EXIT_BUTTON: usize = 100;
+const WARNING_ID: usize = 300;
+static ANIMATE: AtomicBool = AtomicBool::new(true);
+const LABEL_ID: usize = 200;
 const CLASS_NAME: PCWSTR = w!("WCCS.WaitingPrototype.v1");
 
 fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
@@ -93,7 +145,10 @@ struct NativeWindow {
     handle: HWND,
     labels: Vec<HWND>,
     exit: HWND,
-    font: Option<Font>,
+    warning: HWND,
+    warning_visible: bool,
+    fonts: Vec<Font>,
+    development: bool,
     session_registered: bool,
     dpi: u32,
 }
@@ -121,7 +176,8 @@ impl NativeWindow {
         identity: Option<&Command>,
         test_mode: bool,
     ) -> WinResult<Self> {
-        let rect = if test_mode {
+        let identification = identity.is_some_and(|c| c.action == "identify");
+        let rect = if test_mode && !identification {
             RECT {
                 left: rect.left + 40,
                 top: rect.top + 40,
@@ -131,15 +187,19 @@ impl NativeWindow {
         } else {
             rect
         };
-        let title = wide(format!("WCCS 等待界面 · 开发测试 · 屏幕 {}", index + 1).as_ref());
+        let title = wide(format!("WCCS 等待界面 · 屏幕 {}", index + 1).as_ref());
         // SAFETY: class is registered on this thread. Strings remain alive through
         // creation and Windows copies them. No user-data pointer is passed.
         let handle = unsafe {
             CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+                if identity.is_some() && !test_mode {
+                    WS_EX_TOPMOST
+                } else {
+                    WINDOW_EX_STYLE::default()
+                },
                 CLASS_NAME,
                 PCWSTR(title.as_ptr()),
-                WS_POPUP,
+                WS_POPUP | WS_CLIPCHILDREN,
                 rect.left,
                 rect.top,
                 rect.right - rect.left,
@@ -154,45 +214,72 @@ impl NativeWindow {
             handle,
             labels: Vec::new(),
             exit: HWND::default(),
-            font: None,
+            warning: HWND::default(),
+            warning_visible: false,
+            fonts: Vec::new(),
+            development: identity.is_none() || test_mode || identification,
             session_registered: false,
             dpi: 96,
         };
         let recovery = if recovered {
-            "上次运行异常结束，已重新建立等待界面"
+            "上次运行异常结束，等待界面已恢复"
         } else {
-            "开发测试 · 合成身份信息"
+            "开发预览 · 合成身份"
         };
-        for text in [
-            "WCCS 竞赛等待",
-            "姓名　林小禾",
-            "学校　示例实验学校",
-            "座位　A-023",
-            "等待比赛开始，请等候工作人员通知。",
-            "",
+        for (index, text) in [
+            "WCCS 程序设计竞赛",
+            "林小禾",
+            "示例实验学校",
+            "A-023",
+            "等待比赛开始",
+            "请等待工作人员统一开放",
             "",
             recovery,
-            "退出方式　点击按钮 / Esc / Alt+F4",
-        ] {
+            "00:00:00",
+            "当前时间",
+            "",
+            "WCCS",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             window
                 .labels
-                .push(window.control(w!("STATIC"), text, 0, instance)?);
+                .push(window.control(w!("STATIC"), text, LABEL_ID + index, instance)?);
         }
         if let Some(command) = identity {
-            window.set_label(0, &format!("{} · 等待", command.identity.contest_name))?;
-            window.set_label(1, &format!("姓名　{}", command.identity.name))?;
-            window.set_label(2, &format!("学校　{}", command.identity.school))?;
-            window.set_label(3, &format!("座位　{}", command.identity.seat_label))?;
-            window.set_label(
-                7,
-                if test_mode {
-                    "受控开发测试 · 可随时退出"
+            window.set_label(0, &command.identity.contest_name)?;
+            window.set_label(1, &command.identity.name)?;
+            window.set_label(2, &command.identity.school)?;
+            window.set_label(3, &command.identity.seat_label)?;
+            window.set_label(7, if test_mode { "受控开发预览" } else { "" })?;
+        }
+        if window.development {
+            window.exit = window.control(
+                w!("BUTTON"),
+                if identification {
+                    "关闭设备识别"
                 } else {
-                    "身份已由管理端确认"
+                    "退出开发测试"
                 },
+                EXIT_BUTTON,
+                instance,
             )?;
         }
-        window.exit = window.control(w!("BUTTON"), "退出开发测试", EXIT_BUTTON, instance)?;
+        if identification {
+            window.set_label(4, "设备与物理座位核对")?;
+            window.set_label(5, "Esc 关闭 · 到期自动关闭")?;
+            window.set_label(7, "工作人员主动识别")?;
+        }
+        window.warning =
+            window.control(w!("STATIC"), "请勿触碰鼠标和键盘", WARNING_ID, instance)?;
+        // SAFETY: child belongs to this window and starts hidden until input.
+        unsafe {
+            let _ = ShowWindow(window.warning, SW_HIDE);
+        }
+        unsafe {
+            let _ = ShowWindow(window.labels[10], SW_HIDE);
+        }
         window.layout()?;
         Ok(window)
     }
@@ -214,10 +301,22 @@ impl NativeWindow {
                 PCWSTR(text.as_ptr()),
                 WS_CHILD
                     | WS_VISIBLE
+                    | WS_CLIPSIBLINGS
                     | if id == EXIT_BUTTON {
                         WS_TABSTOP
                     } else {
-                        WINDOW_STYLE::default()
+                        let style = match id {
+                            WARNING_ID => SS_OWNERDRAW.0,
+                            id if id == LABEL_ID + 10 => SS_LEFT.0,
+                            id if id == LABEL_ID + 3 => {
+                                SS_CENTER.0 | SS_CENTERIMAGE.0 | SS_ENDELLIPSIS.0
+                            }
+                            id if [5, 8, 9].contains(&id.saturating_sub(LABEL_ID)) => {
+                                SS_RIGHT.0 | SS_ENDELLIPSIS.0
+                            }
+                            _ => SS_LEFTNOWORDWRAP.0 | SS_ENDELLIPSIS.0,
+                        };
+                        WINDOW_STYLE(SS_NOPREFIX.0 | style)
                     },
                 0,
                 0,
@@ -238,69 +337,91 @@ impl NativeWindow {
             GetClientRect(self.handle, &mut rect)?;
             self.dpi = GetDpiForWindow(self.handle);
         }
-        let scale = content_scale(rect.right, rect.bottom, self.dpi);
-        let pixels = |value: f64| (value * scale).round() as i32;
-        // SAFETY: face name is static and terminated. Returned HFONT is exclusively
-        // owned by Font and assigned to live controls before replacing the old font.
-        let font = unsafe {
-            CreateFontW(
-                -pixels(23.0),
-                0,
-                0,
-                0,
-                400,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                DEFAULT_QUALITY,
-                DEFAULT_PITCH.0 as u32,
-                w!("Microsoft YaHei UI"),
-            )
-        };
-        if font.is_invalid() {
-            return Err(windows::core::Error::from_win32());
-        }
-        let font = Font(font);
-        let left = (rect.right - pixels(680.0)) / 2;
-        let top = (rect.bottom - pixels(580.0)) / 2;
-        // SAFETY: all handles are live children. WM_SETFONT borrows the font until
-        // replacement/destruction. Synchronous SendMessage completes before return.
-        unsafe {
-            for (index, label) in self.labels.iter().enumerate() {
+        let layout = Layout::new(rect.right, rect.bottom, self.development);
+        let mut fonts = Vec::new();
+        for (index, (label, (area, size, weight))) in
+            self.labels.iter().zip(layout.labels).enumerate()
+        {
+            fonts.push(fitted_font(
+                *label,
+                area.right - area.left,
+                area.bottom - area.top,
+                size,
+                weight,
+                if index == 8 {
+                    w!("Consolas")
+                } else {
+                    w!("Microsoft YaHei UI")
+                },
+            )?);
+            // SAFETY: controls are owned by this live parent on the UI thread.
+            unsafe {
                 SetWindowPos(
                     *label,
                     None,
-                    left,
-                    top + pixels(index as f64 * 53.0),
-                    pixels(680.0),
-                    pixels(48.0),
+                    area.left,
+                    area.top,
+                    area.right - area.left,
+                    area.bottom - area.top,
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 )?;
             }
-            SetWindowPos(
+        }
+        if self.development {
+            let area = layout.exit;
+            fonts.push(fitted_font(
                 self.exit,
-                None,
-                left,
-                top + pixels(505.0),
-                pixels(260.0),
-                pixels(58.0),
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                area.right - area.left,
+                area.bottom - area.top,
+                (18. * layout.unit) as i32,
+                400,
+                w!("Microsoft YaHei UI"),
+            )?);
+            // SAFETY: development-only button exists and belongs to this window.
+            unsafe {
+                SetWindowPos(
+                    self.exit,
+                    None,
+                    area.left,
+                    area.top,
+                    area.right - area.left,
+                    area.bottom - area.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )?;
+            }
+        }
+        // SAFETY: warning is an owned child; positioning preserves visibility.
+        unsafe {
+            SetWindowPos(
+                self.warning,
+                Some(HWND_TOP),
+                0,
+                0,
+                rect.right,
+                rect.bottom,
+                SWP_NOACTIVATE,
             )?;
-            // Complete every fallible layout operation before any control borrows
-            // the replacement font, so a failure cannot leave a dangling HFONT.
-            for control in self.labels.iter().chain(std::iter::once(&self.exit)) {
+        }
+        // All fallible work completes before any control borrows a replacement
+        // font. The previous fonts remain owned until every control has switched.
+        // SAFETY: handles/fonts live through synchronous WM_SETFONT and beyond.
+        unsafe {
+            let controls = self
+                .labels
+                .iter()
+                .copied()
+                .chain(self.development.then_some(self.exit));
+            for (control, font) in controls.zip(&fonts) {
                 SendMessageW(
-                    *control,
+                    control,
                     WM_SETFONT,
                     Some(WPARAM(font.0.0 as usize)),
                     Some(LPARAM(1)),
                 );
             }
+            let _ = InvalidateRect(Some(self.handle), None, true);
         }
-        self.font = Some(font);
+        self.fonts = fonts;
         Ok(())
     }
 
@@ -308,6 +429,73 @@ impl NativeWindow {
         let text = wide(text.as_ref());
         // SAFETY: label is a live child; Windows copies the terminated text.
         unsafe { SetWindowTextW(self.labels[index], PCWSTR(text.as_ptr())) }
+    }
+}
+
+// Match native single-line ellipsis. Preserve readable text at a minimum size;
+// controls retain the full identity string for accessibility and inspection.
+fn fitted_font(
+    control: HWND,
+    width: i32,
+    height: i32,
+    size: i32,
+    weight: i32,
+    family: PCWSTR,
+) -> WinResult<Font> {
+    // SAFETY: the UI thread owns control. The DC is released after the closure on
+    // both success and failure. Every selected font is restored before dropping it.
+    unsafe {
+        let dc = GetDC(Some(control));
+        if dc.is_invalid() {
+            return Err(windows::core::Error::from_win32());
+        }
+        let result = (|| {
+            let mut text = vec![0; GetWindowTextLengthW(control) as usize + 1];
+            let length = GetWindowTextW(control, &mut text) as usize;
+            text.truncate(length);
+            let minimum = size.clamp(12, 16);
+            let mut size = size.max(minimum);
+            loop {
+                let font = CreateFontW(
+                    -size,
+                    0,
+                    0,
+                    0,
+                    weight,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    DEFAULT_PITCH.0 as u32,
+                    family,
+                );
+                if font.is_invalid() {
+                    return Err(windows::core::Error::from_win32());
+                }
+                let font = Font(font);
+                let previous = SelectObject(dc, font.0.into());
+                let mut bounds = RECT {
+                    right: width,
+                    ..Default::default()
+                };
+                DrawTextW(
+                    dc,
+                    &mut text,
+                    &mut bounds,
+                    DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                SelectObject(dc, previous);
+                if (bounds.bottom <= height && bounds.right <= width) || size <= minimum {
+                    return Ok(font);
+                }
+                size = (size * 9 / 10).max(minimum);
+            }
+        })();
+        ReleaseDC(Some(control), dc);
+        result
     }
 }
 
@@ -321,22 +509,60 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
         unsafe {
             match message {
                 WM_CLOSE => {
-                    PostQuitMessage(0);
+                    if !GUARDED.load(Ordering::Relaxed) {
+                        PostQuitMessage(0);
+                    }
                     LRESULT(0)
                 }
                 WM_COMMAND if wp.0 & 0xffff == EXIT_BUTTON && wp.0 >> 16 == BN_CLICKED as usize => {
-                    PostQuitMessage(0);
+                    if !GUARDED.load(Ordering::Relaxed) {
+                        PostQuitMessage(0);
+                    }
                     LRESULT(0)
                 }
                 WM_QUERYENDSESSION => LRESULT(1),
                 WM_CTLCOLORSTATIC => {
                     // The borrowed DC is supplied by Windows for this paint only.
                     let dc = HDC(wp.0 as *mut _);
-                    SetBkColor(dc, COLORREF(GetSysColor(COLOR_WINDOW)));
-                    SetTextColor(dc, COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
-                    LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
+                    let id = GetDlgCtrlID(HWND(lp.0 as *mut _)) as usize;
+                    let color = match id.saturating_sub(LABEL_ID) {
+                        0 | 1 | 3 | 8 | 11 => FOREGROUND,
+                        _ => MUTED,
+                    };
+                    let background = if (1..=3).contains(&id.saturating_sub(LABEL_ID)) {
+                        CARD
+                    } else {
+                        BACKGROUND
+                    };
+                    SetBkColor(dc, background);
+                    SetTextColor(dc, color);
+                    SetDCBrushColor(dc, background);
+                    LRESULT(GetStockObject(DC_BRUSH).0 as isize)
+                }
+                WM_ERASEBKGND => LRESULT(1),
+                WM_PAINT => {
+                    let mut paint = PAINTSTRUCT::default();
+                    let dc = BeginPaint(hwnd, &mut paint);
+                    let mut rect = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rect);
+                    let development = GetDlgItem(Some(hwnd), EXIT_BUTTON as i32).is_ok();
+                    presentation::paint(dc, rect, development, ANIMATE.load(Ordering::Relaxed));
+                    let _ = EndPaint(hwnd, &paint);
+                    LRESULT(0)
+                }
+                WM_DRAWITEM if wp.0 == WARNING_ID => {
+                    // DRAWITEMSTRUCT is borrowed for this synchronous notification.
+                    let item = &*(lp.0 as *const DRAWITEMSTRUCT);
+                    presentation::paint_warning(item.hDC, item.rcItem);
+                    LRESULT(1)
+                }
+                WM_SETTINGCHANGE => {
+                    update_animation_preference();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    LRESULT(0)
                 }
                 WM_ENDSESSION if wp.0 != 0 => {
+                    INTERNAL_EXIT.store(true, Ordering::Relaxed);
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
@@ -357,6 +583,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
                     )
                     .is_err()
                     {
+                        INTERNAL_EXIT.store(true, Ordering::Relaxed);
                         PostQuitMessage(1);
                     }
                     post(REBUILD, WPARAM(0));
@@ -377,6 +604,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
     result.unwrap_or_else(|_| {
         // SAFETY: terminates only this UI thread's message loop on callback panic.
         unsafe {
+            INTERNAL_EXIT.store(true, Ordering::Relaxed);
             PostQuitMessage(1);
         }
         LRESULT(0)
@@ -388,6 +616,7 @@ fn post(message: u32, parameter: WPARAM) {
     // Only scalar values are enqueued, with no borrowed callback pointers.
     unsafe {
         if PostThreadMessageW(GetCurrentThreadId(), message, parameter, LPARAM(0)).is_err() {
+            INTERNAL_EXIT.store(true, Ordering::Relaxed);
             PostQuitMessage(1);
         }
     }
@@ -446,6 +675,8 @@ impl Drop for Timer {
 }
 
 struct App {
+    display: Option<wccs_protocol::presentation::Display>,
+    show_diagnostics: bool,
     windows: Vec<NativeWindow>,
     state: WaitingState,
     started: Instant,
@@ -455,7 +686,9 @@ struct App {
     command: Option<Command>,
     test_mode: bool,
     last_save_ms: u64,
-    last_text: (String, String),
+    last_counts: String,
+    last_clock: String,
+    last_pointer: POINT,
 }
 
 impl App {
@@ -478,10 +711,11 @@ impl App {
         }
         windows[0].session_registered = true;
         self.windows = windows;
-        self.last_text = Default::default();
+        self.last_counts.clear();
+        self.last_clock.clear();
         self.render()?;
-        // SAFETY: all windows belong to this UI thread. Showing never makes them
-        // topmost. OS focus policy remains in effect. Hidden sessions stay hidden.
+        // SAFETY: all windows belong to this UI thread. Creation sets the formal
+        // mode's topmost style. Activation is handled by the foreground check.
         unsafe {
             for window in &self.windows {
                 let _ = ShowWindow(
@@ -502,25 +736,158 @@ impl App {
     }
 
     fn render(&mut self) -> WinResult<()> {
-        let remaining = self.state.remaining_ms(self.elapsed_ms());
-        let prompt = if remaining > 0 {
-            format!(
-                "已检测到触碰，请稍候。提示冷却 {} 秒",
-                remaining.div_ceil(1000)
-            )
-        } else {
-            "等待中 · 触碰键盘或鼠标可查看提示".into()
-        };
+        let identification = self
+            .command
+            .as_ref()
+            .is_some_and(|c| c.action == "identify");
+        let warning = !identification && self.state.remaining_ms(self.elapsed_ms()) > 0;
         let counts = format!(
             "键盘 {} 次　鼠标 {} 次　提示 {} 次",
             self.state.keyboard_events, self.state.mouse_events, self.state.prompts
         );
-        if self.last_text != (prompt.clone(), counts.clone()) {
-            for window in &self.windows {
-                window.set_label(5, &prompt)?;
+        // Wall time is display-only. Control leases and prompts use Instant.
+        let now = unsafe { GetLocalTime() };
+        let clock = format!("{:02}:{:02}:{:02}", now.wHour, now.wMinute, now.wSecond);
+        for window in &mut self.windows {
+            if self.last_clock != clock {
+                window.set_label(8, &clock)?;
+            }
+            if self.last_counts != counts && window.development && !identification {
                 window.set_label(6, &counts)?;
             }
-            self.last_text = (prompt, counts);
+            if window.warning_visible != warning {
+                // SAFETY: owned child, shown above identity labels without taking
+                // activation from the root window used by the control protocol.
+                unsafe {
+                    let _ = ShowWindow(
+                        window.warning,
+                        if warning { SW_SHOWNOACTIVATE } else { SW_HIDE },
+                    );
+                    let _ = RedrawWindow(
+                        Some(window.handle),
+                        None,
+                        None,
+                        RDW_INVALIDATE | RDW_ALLCHILDREN,
+                    );
+                }
+                window.warning_visible = warning;
+            }
+        }
+        if !identification {
+            self.render_presentation()?;
+        }
+        self.last_clock = clock;
+        self.last_counts = counts;
+        Ok(())
+    }
+
+    fn render_presentation(&mut self) -> WinResult<()> {
+        if self
+            .command
+            .as_ref()
+            .is_none_or(|command| command.action != "enter")
+        {
+            return Ok(());
+        }
+        // SAFETY: the boot tick query has no borrowed pointers or owned resources.
+        let tick = unsafe { GetTickCount64() };
+        let display = self
+            .display
+            .as_ref()
+            .filter(|p| self.command.as_ref().is_some_and(|c| p.data.matches(c)));
+        presentation::set_logo(display.and_then(|p| p.data.logo.as_ref()));
+        for window in &mut self.windows {
+            window.set_label(7, "工作人员诊断 F1")?;
+            let Some(display) = display else {
+                window.set_label(4, "WCCS 等待展示数据 · OJ 未知")?;
+                window.set_label(10,"展示数据尚未到达。工作人员可在本机配置入口执行分步骤诊断，并在管理端核对展示配置与设备回执。")?;
+                unsafe {
+                    let _ = ShowWindow(
+                        window.labels[10],
+                        if self.show_diagnostics {
+                            SW_SHOWNOACTIVATE
+                        } else {
+                            SW_HIDE
+                        },
+                    );
+                }
+                continue;
+            };
+            let stale = display.stale(tick);
+            let status = |state: &str| match state {
+                "online" => "已连接",
+                "offline" => "连接中断",
+                _ => "未知",
+            };
+            window.set_label(
+                4,
+                &format!(
+                    "WCCS {} · OJ {}",
+                    if stale {
+                        "数据过期"
+                    } else {
+                        status(&display.wccs.state)
+                    },
+                    if stale {
+                        "数据过期"
+                    } else {
+                        status(&display.oj.state)
+                    }
+                ),
+            )?;
+            let now = display.server_now(tick);
+            if let (Some(now), Some(start)) = (now, display.data.starts_at_ms) {
+                let seconds = start.saturating_sub(now).max(0).saturating_add(999) / 1000;
+                window.set_label(
+                    8,
+                    &format!(
+                        "{:02}:{:02}:{:02}",
+                        seconds / 3600,
+                        seconds / 60 % 60,
+                        seconds % 60
+                    ),
+                )?;
+                window.set_label(
+                    9,
+                    if now >= start {
+                        "已到开始时间，等待开放"
+                    } else {
+                        "距离比赛开始"
+                    },
+                )?;
+            } else {
+                window.set_label(8, "--:--:--")?;
+                window.set_label(9, "开赛时间待配置")?;
+            }
+            window.set_label(
+                5,
+                &format!(
+                    "显示校时 {:+} ms · RTT {} ms{}",
+                    display.clock_offset_ms,
+                    display.round_trip_ms,
+                    if stale { " · 样本过期" } else { "" }
+                ),
+            )?;
+            let logo = display
+                .data
+                .logo
+                .as_ref()
+                .map(|l| format!("{} / {}", l.source, l.sha256))
+                .unwrap_or_else(|| "校徽缺失，使用默认图标，下轮刷新重试".into());
+            window.set_label(10,&format!("工作人员诊断（F1 收起）\n设备 {} · 座位 {}\n比赛 {} · 身份版本 {} / {}\n展示配置 v{}\n摘要 {}\nWCCS {} · {} · 更新 {}\nOJ {} · {} · 更新 {}\n服务器时间样本 {} · RTT {} ms · 偏差 {:+} ms\n校徽 {}",
+                display.data.device_id,display.data.identity.seat_label,display.data.identity.contest_id,display.data.identity.contest_version,display.data.identity.room_version,
+                display.data.configuration_version,display.data.configuration_digest,display.wccs.source,display.wccs.detail,display.wccs.checked_at_ms,
+                display.oj.source,display.oj.detail,display.oj.checked_at_ms,display.data.server_time_ms,display.round_trip_ms,display.clock_offset_ms,logo))?;
+            unsafe {
+                let _ = ShowWindow(
+                    window.labels[10],
+                    if self.show_diagnostics {
+                        SW_SHOWNOACTIVATE
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
         }
         Ok(())
     }
@@ -593,6 +960,7 @@ pub fn run(directory: &Path) -> Result<u8, Box<dyn std::error::Error>> {
 }
 
 struct Control {
+    display: Option<wccs_protocol::presentation::Display>,
     pipe: ipc::Pipe,
     command: Command,
     deadline: Instant,
@@ -623,12 +991,23 @@ pub fn controlled() -> Result<u8, Box<dyn std::error::Error>> {
     let session = ipc::discover(true).map_err(|_| "session_unavailable")?;
     if request.protocol_version != CONTROL_VERSION
         || request.command.protocol_version != CONTROL_VERSION
-        || !["enter", "probe_desktop"].contains(&request.command.action.as_str())
+        || !["enter", "probe_desktop", "probe_ipc", "identify"]
+            .contains(&request.command.action.as_str())
         || request.command.session_key != session.key
         || request.lease_seconds == 0
         || request.lease_seconds > LEASE_SECONDS
     {
         return Err("ipc_command_rejected".into());
+    }
+    if request.command.action == "probe_ipc" {
+        pipe.send(&Actual {
+            command_id: Some(request.command.command_id),
+            session_key: Some(session.key),
+            detail: "ui_observed".into(),
+            ..Default::default()
+        })
+        .map_err(|_| "ipc_probe_reply_failed")?;
+        return Ok(0);
     }
     if request.command.action == "probe_desktop" {
         if request
@@ -653,6 +1032,9 @@ pub fn controlled() -> Result<u8, Box<dyn std::error::Error>> {
     }
     let control = Control {
         pipe,
+        display: request
+            .presentation
+            .filter(|p| p.data.matches(&request.command)),
         command: request.command,
         deadline: Instant::now() + std::time::Duration::from_secs(request.lease_seconds),
         test_mode,
@@ -691,10 +1073,14 @@ fn run_ui(
             .transpose()?
             .unwrap_or(false),
         command: control.as_ref().map(|c| c.command.clone()),
+        display: control.as_ref().and_then(|c| c.display.clone()),
+        show_diagnostics: false,
         test_mode: control.as_ref().is_some_and(|c| c.test_mode),
         directory,
         last_save_ms: 0,
-        last_text: Default::default(),
+        last_counts: String::new(),
+        last_clock: String::new(),
+        last_pointer: pointer_position(),
     };
     // SAFETY: module is borrowed for process lifetime. Cursor/brush are shared
     // system resources. The static callback remains valid until class unregistration.
@@ -704,7 +1090,7 @@ fn run_ui(
             hInstance: module,
             lpszClassName: CLASS_NAME,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
+            hbrBackground: HBRUSH::default(),
             ..Default::default()
         };
         if RegisterClassW(&class) == 0 {
@@ -712,6 +1098,14 @@ fn run_ui(
         }
     }
     let _class = WindowClass(module);
+    let guarded = control
+        .as_ref()
+        .is_some_and(|c| !c.test_mode && c.command.action != "identify");
+    let _keyboard = if guarded {
+        Some(KeyboardGuard::install(module)?)
+    } else {
+        None
+    };
     // Declare the app after the class guard so all exit paths destroy windows first.
     let mut app = app;
     app.save(false)?;
@@ -731,6 +1125,13 @@ fn run_ui(
         return Err(windows::core::Error::from_win32().into());
     }
     let _timer = Timer(timer_id);
+    update_animation_preference();
+    // Separate visual frames from the existing lease/report timer.
+    let animation_timer_id = unsafe { SetTimer(None, 0, 50, None) };
+    if animation_timer_id == 0 {
+        return Err(windows::core::Error::from_win32().into());
+    }
+    let _animation_timer = Timer(animation_timer_id);
     let mut message = MSG::default();
     loop {
         // SAFETY: message is writable, and all queued callbacks belong to this UI thread.
@@ -739,6 +1140,10 @@ fn run_ui(
             return Err(windows::core::Error::from_win32().into());
         }
         if result == 0 {
+            if guarded && !INTERNAL_EXIT.load(Ordering::Relaxed) {
+                // Local WM_QUIT is not authority to end a controlled wait.
+                continue;
+            }
             let code = u8::from(message.wParam.0 != 0);
             if code == 0 {
                 app.save(true)?;
@@ -746,6 +1151,13 @@ fn run_ui(
             return Ok(code);
         }
         match message.message {
+            GUARDED_INPUT => {
+                drain_notifications(GUARDED_INPUT);
+                app.state.touch(InputKind::Keyboard, app.elapsed_ms());
+                if app.windows.iter().any(|window| !window.warning_visible) {
+                    app.render()?;
+                }
+            }
             REBUILD => {
                 drain_notifications(REBUILD);
                 app.rebuild(module)?;
@@ -776,7 +1188,43 @@ fn run_ui(
                     app.save(false)?;
                 }
             }
+            WM_TIMER if message.hwnd.is_invalid() && message.wParam.0 == animation_timer_id => {
+                if ANIMATE.load(Ordering::Relaxed) && app.state.visible() {
+                    for window in &app.windows {
+                        if !window.warning_visible {
+                            // SAFETY: invalidate only our owned window, never activate it.
+                            unsafe {
+                                let _ = InvalidateRect(Some(window.handle), None, false);
+                            }
+                        }
+                    }
+                }
+            }
             WM_TIMER if message.hwnd.is_invalid() && message.wParam.0 == timer_id => {
+                if guarded {
+                    // SAFETY: UI thread owns every window. Reassert z-order without
+                    // activating each monitor, then request focus under Windows policy.
+                    unsafe {
+                        for window in &app.windows {
+                            SetWindowPos(
+                                window.handle,
+                                Some(HWND_TOPMOST),
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                            )?;
+                        }
+                        if !app
+                            .windows
+                            .iter()
+                            .any(|w| w.handle == GetForegroundWindow())
+                        {
+                            restore_foreground(app.windows[0].handle);
+                        }
+                    }
+                }
                 if let Some(control) = &mut control {
                     if Instant::now() >= control.deadline {
                         return Err("control_lease_expired".into());
@@ -800,6 +1248,10 @@ fn run_ui(
                                 .map_err(|_| "ipc_result_failed")?;
                             return Ok(0);
                         }
+                        control.display = request
+                            .presentation
+                            .filter(|p| p.data.matches(&control.command));
+                        app.display = control.display.clone();
                         if request.command != control.command {
                             return Err("ipc_command_changed".into());
                         }
@@ -814,6 +1266,16 @@ fn run_ui(
                 }
             }
             _ => {
+                // Showing/hiding the warning causes synthetic WM_MOUSEMOVE messages
+                // even while idle. Compare screen coordinates across child windows
+                // so those messages cannot reopen the warning indefinitely.
+                if message.message == WM_MOUSEMOVE {
+                    let pointer = pointer_position();
+                    if pointer == app.last_pointer {
+                        continue;
+                    }
+                    app.last_pointer = pointer;
+                }
                 let kind = match message.message {
                     WM_KEYDOWN | WM_SYSKEYDOWN => Some(InputKind::Keyboard),
                     WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
@@ -822,7 +1284,20 @@ fn run_ui(
                 };
                 if let Some(kind) = kind {
                     app.state.touch(kind, app.elapsed_ms());
-                    if message.message == WM_KEYDOWN && message.wParam.0 == VK_ESCAPE.0 as usize {
+                    if app.windows.iter().any(|window| !window.warning_visible) {
+                        app.render()?;
+                    }
+                    if message.message == WM_KEYDOWN
+                        && message.wParam.0 == VK_F1.0 as usize
+                        && !identification_mode(&app)
+                    {
+                        app.show_diagnostics = !app.show_diagnostics;
+                        app.render()?;
+                    }
+                    if !guarded
+                        && message.message == WM_KEYDOWN
+                        && message.wParam.0 == VK_ESCAPE.0 as usize
+                    {
                         app.save(true)?;
                         return Ok(0);
                     }
@@ -832,15 +1307,20 @@ fn run_ui(
                         unsafe {
                             if message.wParam.0 == VK_TAB.0 as usize {
                                 let root = GetAncestor(message.hwnd, GA_ROOT);
-                                if let Some(window) =
-                                    app.windows.iter().find(|window| window.handle == root)
+                                if let Some(window) = app
+                                    .windows
+                                    .iter()
+                                    .find(|window| window.handle == root && window.development)
                                 {
                                     let _ = SetFocus(Some(window.exit));
                                 }
                                 continue;
                             }
                             if message.wParam.0 == VK_RETURN.0 as usize
-                                && app.windows.iter().any(|window| window.exit == GetFocus())
+                                && app
+                                    .windows
+                                    .iter()
+                                    .any(|window| window.development && window.exit == GetFocus())
                             {
                                 app.save(true)?;
                                 return Ok(0);
@@ -865,9 +1345,41 @@ fn drain_notifications(kind: u32) {
     unsafe { while PeekMessageW(&mut message, None, kind, kind, PM_REMOVE).as_bool() {} }
 }
 
+fn pointer_position() -> POINT {
+    let mut point = POINT::default();
+    // SAFETY: writable POINT, used transiently for input deduplication only.
+    unsafe {
+        let _ = GetCursorPos(&mut point);
+    }
+    point
+}
+
+fn update_animation_preference() {
+    let mut enabled = BOOL(0);
+    // SAFETY: SystemParametersInfoW writes one BOOL for this action. On failure
+    // keep a static background. This only reads the user's animation preference.
+    let result = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&mut enabled as *mut BOOL).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    ANIMATE.store(result.is_ok() && enabled.as_bool(), Ordering::Relaxed);
+}
+
 fn report_control(control: &Control, app: &App) -> Result<(), Box<dyn std::error::Error>> {
+    // SAFETY: borrowed foreground HWND is compared only, never dereferenced.
+    let foreground = control.test_mode
+        || (input_desktop_active()
+            && unsafe {
+                app.windows
+                    .iter()
+                    .any(|w| w.handle == GetForegroundWindow())
+            });
     let actual = Actual {
-        state: if app.state.visible() && !app.windows.is_empty() {
+        state: if app.state.visible() && !app.windows.is_empty() && foreground {
             "waiting"
         } else {
             "unknown"
@@ -876,7 +1388,12 @@ fn report_control(control: &Control, app: &App) -> Result<(), Box<dyn std::error
         command_id: Some(control.command.command_id.clone()),
         session_key: Some(control.command.session_key.clone()),
         monitors: app.windows.len() as u32,
-        detail: "ui_observed".into(),
+        detail: if foreground {
+            "ui_observed"
+        } else {
+            "waiting_focus_lost"
+        }
+        .into(),
         account: None,
     };
     control
@@ -886,9 +1403,198 @@ fn report_control(control: &Control, app: &App) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+fn input_desktop_active() -> bool {
+    // SAFETY: the returned input desktop is owned until CloseDesktop. A secure
+    // desktop denies this ordinary token, which is reported as unobserved.
+    unsafe {
+        let Ok(desktop) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
+        else {
+            return false;
+        };
+        let mut name = [0u16; 128];
+        let result = GetUserObjectInformationW(
+            HANDLE(desktop.0),
+            UOI_NAME,
+            Some(name.as_mut_ptr().cast()),
+            std::mem::size_of_val(&name) as u32,
+            None,
+        );
+        let _ = CloseDesktop(desktop);
+        result.is_ok()
+            && String::from_utf16_lossy(
+                &name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())],
+            )
+            .eq_ignore_ascii_case("default")
+    }
+}
+
+fn restore_foreground(window: HWND) {
+    if !input_desktop_active() {
+        return;
+    }
+    // SAFETY: window belongs to this UI thread. The foreground HWND is borrowed
+    // only to obtain a thread ID. Input queues are joined for this synchronous
+    // activation attempt and always detached before returning to the message loop.
+    // Failure to attach or activate is represented by the next observed report.
+    unsafe {
+        if SetForegroundWindow(window).as_bool() {
+            return;
+        }
+        let current = GetCurrentThreadId();
+        let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+        if foreground != 0
+            && foreground != current
+            && AttachThreadInput(current, foreground, true).as_bool()
+        {
+            let _ = SetForegroundWindow(window);
+            let _ = SetFocus(Some(window));
+            let _ = AttachThreadInput(current, foreground, false);
+        }
+    }
+}
+
+fn identification_mode(app: &App) -> bool {
+    app.command.as_ref().is_some_and(|c| c.action == "identify")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_layout_preserves_identity_with_readable_ellipsis() {
+        let mut command: Command = serde_json::from_value(serde_json::json!({
+            "protocol_version": CONTROL_VERSION, "command_id": "visual-test",
+            "request_id": "visual-test", "sequence": 1, "device_id": "test",
+            "generation": 1, "device_version": 1, "instance_id": "test",
+            "session_key": "test", "action": "enter", "expires_at": 1,
+            "identity": {
+                "contest_id": "test", "contest_name": "程序设计竞赛 & 现场验证",
+                "contest_version": 1, "participant_id": "test", "name": "林".repeat(100),
+                "school": "校".repeat(200), "seat_id": "test", "seat_label": "A-023",
+                "room_id": "test", "room_version": 1
+            }
+        }))
+        .unwrap();
+        // SAFETY: this test thread registers its class and owns all hidden windows.
+        // Windows are destroyed before the class guard. No UI is shown or focused.
+        let instance = unsafe {
+            let instance = HINSTANCE(GetModuleHandleW(None).unwrap().0);
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: instance,
+                lpszClassName: CLASS_NAME,
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&class), 0);
+            instance
+        };
+        let _class = WindowClass(instance);
+        for (case, (width, height)) in [
+            (640, 480),
+            (800, 600),
+            (1080, 1920),
+            (1920, 1080),
+            (3840, 2160),
+            (640, 480),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if case == 5 {
+                command.identity.school = "W".repeat(200);
+                command.identity.name = "W".repeat(100);
+            }
+            let window = NativeWindow::create(
+                RECT {
+                    right: width,
+                    bottom: height,
+                    ..Default::default()
+                },
+                instance,
+                0,
+                false,
+                Some(&command),
+                false,
+            )
+            .unwrap();
+            assert!(!window.development);
+            assert!(window.exit.is_invalid());
+            for (index, expected) in [
+                (0, command.identity.contest_name.as_str()),
+                (1, command.identity.name.as_str()),
+                (2, command.identity.school.as_str()),
+                (3, command.identity.seat_label.as_str()),
+                (6, ""),
+                (7, ""),
+            ] {
+                // SAFETY: label/font belong to window. Restore the borrowed DC's
+                // font before releasing the DC and eventually destroying window.
+                unsafe {
+                    let label = window.labels[index];
+                    let mut text = vec![0; GetWindowTextLengthW(label) as usize + 1];
+                    let length = GetWindowTextW(label, &mut text) as usize;
+                    text.truncate(length);
+                    assert_eq!(String::from_utf16(&text).unwrap(), expected);
+                    let mut area = RECT::default();
+                    GetClientRect(label, &mut area).unwrap();
+                    let dc = GetDC(Some(label));
+                    assert!(!dc.is_invalid());
+                    let previous = SelectObject(dc, window.fonts[index].0.into());
+                    let mut measured = RECT {
+                        right: area.right,
+                        ..Default::default()
+                    };
+                    DrawTextW(
+                        dc,
+                        &mut text,
+                        &mut measured,
+                        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                    SelectObject(dc, previous);
+                    ReleaseDC(Some(label), dc);
+                    assert!(
+                        measured.bottom <= area.bottom,
+                        "height {width}×{height}, label {index}"
+                    );
+                    let mut font = LOGFONTW::default();
+                    assert_ne!(
+                        GetObjectW(
+                            window.fonts[index].0.into(),
+                            std::mem::size_of::<LOGFONTW>() as i32,
+                            Some((&mut font as *mut LOGFONTW).cast())
+                        ),
+                        0
+                    );
+                    assert!(font.lfHeight.unsigned_abs() >= 12);
+                    if measured.right > area.right {
+                        assert!(font.lfHeight.unsigned_abs() <= 16);
+                        assert_ne!(
+                            GetWindowLongW(label, GWL_STYLE) as u32 & SS_ENDELLIPSIS.0,
+                            0
+                        );
+                    }
+                }
+            }
+        }
+        let mut preview = NativeWindow::create(
+            RECT {
+                right: 1920,
+                bottom: 1080,
+                ..Default::default()
+            },
+            instance,
+            0,
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(preview.development);
+        assert!(!preview.exit.is_invalid());
+        preview.layout().unwrap();
+        assert_eq!(preview.fonts.len(), preview.labels.len() + 1);
+    }
 
     struct TestDirectory(PathBuf);
 

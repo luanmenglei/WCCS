@@ -1,7 +1,12 @@
 #![forbid(unsafe_code)]
 
 pub mod control;
+pub mod diagnostics;
+pub mod health;
 pub mod login;
+pub mod maintenance;
+pub mod preparation;
+pub mod presentation;
 
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
@@ -29,6 +34,10 @@ pub fn token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn bytes_digest(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
 }
 
 pub fn digest(value: &str) -> String {

@@ -117,8 +117,457 @@ fn observation() -> Value {
     json!({"protocol_version":1,"instance_id":"host-one","session_key":"session-one","capabilities":["waiting-v1"],"actual":{"state":"desktop","command_id":null,"session_key":null,"monitors":0,"detail":"standby"},"report":null})
 }
 
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn diagnostics_receipts_replay_identity_and_control_isolation() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{Message, client::IntoClientRequest},
+    };
+    let f = Fixture::new().await;
+    let mut control = socket_for(&f.admin, &f.credential, "device-1").await;
+    let first = poll(&mut control, &observation()).await.unwrap();
+    let mut request = input(1);
+    let preview = expect_ok(f.admin.post("waiting/preview", &request).await).await;
+    request["preview_token"] = preview["preview_token"].clone();
+    expect_ok(f.admin.post("waiting/commit", &request).await).await;
+    let command = poll(&mut control, &observation()).await.unwrap()["command"].clone();
+    let nonce = token();
+    let mut ws_request = format!(
+        "{}/api/device/diagnostics/probe?nonce={nonce}",
+        f.admin.url.replace("http://", "ws://")
+    )
+    .into_client_request()
+    .unwrap();
+    assert!(connect_async(ws_request.clone()).await.is_err());
+    ws_request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", f.credential).parse().unwrap(),
+    );
+    ws_request
+        .headers_mut()
+        .insert("x-wccs-device-id", "device-1".parse().unwrap());
+    let (mut ws, _) = connect_async(ws_request).await.unwrap();
+    let Some(Ok(Message::Text(text))) = ws.next().await else {
+        panic!("missing diagnostic receipt")
+    };
+    let receipt: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(receipt["device_id"], "device-1");
+    assert_eq!(receipt["nonce"], nonce);
+    let after = poll(&mut control, &observation()).await.unwrap();
+    assert_eq!(after["connection_id"], first["connection_id"]);
+    assert_eq!(after["command"], command);
+    let context: Value = f
+        .admin
+        .client
+        .get(format!("{}/api/device/diagnostics/context", f.admin.url))
+        .bearer_auth(&f.credential)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(context["device_id"], "device-1");
+    assert_eq!(context["seats"].as_array().unwrap().len(), 1);
+    let mut report = json!({"schema_version":1,"request_id":token(),"device_id":"device-1","agent_version":"test",
+        "evidence_context":"local_test","configuration_revision":1,"configuration_digest":"a".repeat(64),
+        "collected_at":1,"seat_claim":null,"checks":(["configuration","installation","server","authentication","http_heartbeat","websocket","service","session_ipc"].map(|step|
+        json!({"step":step,"outcome":"succeeded","checked_at":1,"last_success_at":1,"code":"receipt_verified"})))});
+    assert_eq!(
+        f.admin.device("diagnostics", "", &report).await.status(),
+        401
+    );
+    let acknowledged = expect_ok(f.admin.device("diagnostics", &f.credential, &report).await).await;
+    assert_eq!(acknowledged["request_id"], report["request_id"]);
+    assert_eq!(
+        expect_ok(f.admin.device("diagnostics", &f.credential, &report).await).await,
+        acknowledged
+    );
+    report["collected_at"] = json!(2);
+    assert_eq!(
+        f.admin
+            .device("diagnostics", &f.credential, &report)
+            .await
+            .status(),
+        409
+    );
+    report["request_id"] = json!(token());
+    report["device_id"] = json!("device-2");
+    assert_eq!(
+        f.admin
+            .device("diagnostics", &f.credential, &report)
+            .await
+            .status(),
+        403
+    );
+    let state = f.admin.state().await;
+    let device = state["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "device-1")
+        .unwrap();
+    assert_eq!(
+        device["diagnostics"]["request_id"],
+        acknowledged["request_id"]
+    );
+    assert!(!device.to_string().contains(&f.credential));
+    f.db.execute(
+        "UPDATE devices SET enrollment_generation=enrollment_generation+1 WHERE id='device-1'",
+        &[],
+    )
+    .await
+    .unwrap();
+    let state = f.admin.state().await;
+    assert!(
+        state["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "device-1")
+            .unwrap()["diagnostics"]
+            .is_null()
+    );
+    control.close(None).await.unwrap();
+    f.finish().await;
+}
+
 fn input(count: usize) -> Value {
     json!({"request_id":token(),"contest_id":"contest","seat_ids":(1..=count).map(|n|format!("seat-{n}")).collect::<Vec<_>>(),"action":"enter","duration_seconds":900})
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn preparation_profiles_bind_tools_permissions_and_task_recovery_receipts() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    expect_ok(f.admin.post("configuration", &json!({"request_id":token(),"base_version":0,"tools":[{"id":"powershell","name":"PowerShell","kind":"executable","path":"C:\\Tools\\pwsh.exe"}],"targets":["device-1"]})).await).await;
+    let profile = json!({"schema_version":1,"tool_version":1,"work_directory":"D:\\Contest","desktop_directory":"C:\\Users\\WccsContest\\Desktop","script_directory":"C:\\ProgramData\\WCCS\\Scripts","links":[{"kind":"tool","name":"PowerShell","tool_id":"powershell"}],"package":null});
+    let mut save = json!({"request_id":token(),"base_version":0,"profile":profile});
+    let receipt = expect_ok(f.admin.post("preparation", &save).await).await;
+    assert_eq!(
+        expect_ok(f.admin.post("preparation", &save).await).await,
+        receipt
+    );
+    save["profile"]["work_directory"] = json!("D:\\changed");
+    assert_eq!(f.admin.post("preparation", &save).await.status(), 409);
+    save["request_id"] = json!(token());
+    assert_eq!(f.admin.post("preparation", &save).await.status(), 409);
+    save["base_version"] = json!(1);
+    save["profile"]["links"][0]["tool_id"] = json!("missing");
+    assert_eq!(f.admin.post("preparation", &save).await.status(), 400);
+    let runtime = json!({"schema_version":1,"instance_id":"host-one","session_key":"session-one","adapter":"service","capabilities":["identify-v1","preparation-v1"]});
+    expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    let mut request = json!({"request_id":token(),"template_version":1,"targets":["device-1"],"template":{"operation":"prepare_desktop","profile_version":1}});
+    assert_eq!(
+        expect_ok(f.admin.post("maintenance/preview", &request).await).await["targets"][0]["reason"],
+        "ordinary_account_unavailable"
+    );
+    // This is a protocol fixture, not evidence of a real Windows account.
+    f.db.execute("UPDATE control_devices SET actual=jsonb_set(actual,'{account}',$1) WHERE device_id='device-1'",&[&json!({"adapter":"windows_test","target_sid":"S-1-5-21-123","observed_sid":"S-1-5-21-123","phase":"controlled","account":"owned","desktop_confirmed":true})]).await.unwrap();
+    let preview = expect_ok(f.admin.post("maintenance/preview", &request).await).await;
+    assert!(preview["targets"][0]["reason"].is_null());
+    assert_eq!(
+        preview["preparation"]["tools"][0]["path"],
+        "C:\\Tools\\pwsh.exe"
+    );
+    request["preview_token"] = preview["preview_token"].clone();
+    expect_ok(f.admin.post("maintenance/commit", &request).await).await;
+    let command = expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await["command"]
+        .clone();
+    assert_eq!(command["preparation"]["version"], 1);
+    let outcome = json!({"schema_version":1,"job_id":command["job_id"],"command_digest":wccs_protocol::digest(&command.to_string()),"stage":"interrupted","detail":"rollback_complete","steps":[{"phase":"rollback","path":"D:\\Contest","outcome":"succeeded","detail":"recovered"}]});
+    let ack = expect_ok(
+        f.admin
+            .device("maintenance/result", &f.credential, &outcome)
+            .await,
+    )
+    .await;
+    assert_eq!(
+        expect_ok(
+            f.admin
+                .device("maintenance/result", &f.credential, &outcome)
+                .await
+        )
+        .await,
+        ack
+    );
+    let mut changed = outcome.clone();
+    changed["stage"] = json!("succeeded");
+    assert_eq!(
+        f.admin
+            .device("maintenance/result", &f.credential, &changed)
+            .await
+            .status(),
+        409
+    );
+    request["request_id"] = json!(token());
+    let preview = expect_ok(f.admin.post("maintenance/preview", &request).await).await;
+    request["preview_token"] = preview["preview_token"].clone();
+    expect_ok(
+        f.admin
+            .post(
+                "preparation",
+                &json!({"request_id":token(),"base_version":1,"profile":profile}),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(
+        f.admin.post("maintenance/commit", &request).await.status(),
+        409
+    );
+    f.db.execute(
+        "UPDATE operators SET role='viewer' WHERE username='test-admin'",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.admin.post("preparation", &save).await.status(), 403);
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn maintenance_preview_cancel_replay_and_identity_fences() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let runtime = json!({"schema_version":1,"instance_id":"host-one","session_key":"session-one","adapter":"local_test","capabilities":["identify-v1"]});
+    expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    let mut request = json!({"request_id":token(),"template_version":1,"targets":["device-1"],"template":{"operation":"identify","duration_seconds":30}});
+    let preview = expect_ok(f.admin.post("maintenance/preview", &request).await).await;
+    assert!(preview["targets"][0]["reason"].is_null());
+    request["preview_token"] = preview["preview_token"].clone();
+    let receipt = expect_ok(f.admin.post("maintenance/commit", &request).await).await;
+    assert_eq!(
+        expect_ok(f.admin.post("maintenance/commit", &request).await).await,
+        receipt
+    );
+    let job = &receipt["jobs"][0]["job_id"];
+    request["template"]["duration_seconds"] = json!(31);
+    assert_eq!(
+        f.admin.post("maintenance/commit", &request).await.status(),
+        409
+    );
+    let waiting = expect_ok(f.admin.post("waiting/preview", &input(1)).await).await;
+    assert_eq!(waiting["targets"][0]["status"], "maintenance_active");
+    let command = expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await["command"]
+        .clone();
+    assert_eq!(command["job_id"], *job);
+    let mut result = json!({"schema_version":1,"job_id":job,"command_digest":wccs_protocol::digest(&command.to_string()),"stage":"accepted","detail":"persisted"});
+    let ack = expect_ok(
+        f.admin
+            .device("maintenance/result", &f.credential, &result)
+            .await,
+    )
+    .await;
+    assert_eq!(
+        expect_ok(
+            f.admin
+                .device("maintenance/result", &f.credential, &result)
+                .await
+        )
+        .await,
+        ack
+    );
+    result["detail"] = json!("display_observed");
+    assert_eq!(
+        f.admin
+            .device("maintenance/result", &f.credential, &result)
+            .await
+            .status(),
+        409
+    );
+    result["stage"] = json!("executing");
+    expect_ok(
+        f.admin
+            .device("maintenance/result", &f.credential, &result)
+            .await,
+    )
+    .await;
+    let cancel = json!({"request_id":token(),"job_id":job});
+    let cancelled = expect_ok(f.admin.post("maintenance/cancel", &cancel).await).await;
+    assert_eq!(
+        expect_ok(f.admin.post("maintenance/cancel", &cancel).await).await,
+        cancelled
+    );
+    assert!(
+        expect_ok(
+            f.admin
+                .device("maintenance/poll", &f.credential, &runtime)
+                .await
+        )
+        .await["command"]
+            .is_null()
+    );
+    result["stage"] = json!("cancelled");
+    result["detail"] = json!("connection_lost");
+    expect_ok(
+        f.admin
+            .device("maintenance/result", &f.credential, &result)
+            .await,
+    )
+    .await;
+    let listed = expect_ok(f.admin.get("maintenance").await).await;
+    assert_eq!(listed["jobs"][0]["stage"], "cancelled");
+    f.db.execute(
+        "UPDATE devices SET enrollment_generation=enrollment_generation+1 WHERE id='device-1'",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.admin
+            .device("maintenance/result", &f.credential, &result)
+            .await
+            .status(),
+        403
+    );
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn health_samples_reject_old_hosts_replays_and_invalid_values() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let unknown = json!({"sampled_at":1,"observation":{"status":"unavailable","reason":"unsupported","code":null}});
+    let mut report = json!({"schema_version":1,"device_id":"device-1","instance_id":"host-one","sequence":1,"collection_ms":20,
+        "agent_version":{"sampled_at":1,"observation":{"status":"available","value":"0.3.0"}},"deployment_version":unknown,
+        "health":{"uptime_seconds":unknown,"cpu_percent":unknown,"memory":unknown,"displays":unknown,"keyboards":unknown,"mice":unknown}});
+    let ack = expect_ok(f.admin.device("health", &f.credential, &report).await).await;
+    assert_eq!(
+        expect_ok(f.admin.device("health", &f.credential, &report).await).await,
+        ack
+    );
+    report["collection_ms"] = json!(30);
+    assert_eq!(
+        f.admin
+            .device("health", &f.credential, &report)
+            .await
+            .status(),
+        409
+    );
+    report["sequence"] = json!(2);
+    report["health"]["cpu_percent"]["observation"] = json!({"status":"available","value":101});
+    assert_eq!(
+        f.admin
+            .device("health", &f.credential, &report)
+            .await
+            .status(),
+        400
+    );
+    report["health"]["cpu_percent"] = unknown;
+    report["instance_id"] = json!("old-host");
+    assert_eq!(
+        f.admin
+            .device("health", &f.credential, &report)
+            .await
+            .status(),
+        409
+    );
+    report["instance_id"] = json!("host-one");
+    expect_ok(f.admin.device("health", &f.credential, &report).await).await;
+    // Failed or late health uploads leave the independent control connection valid.
+    let response = poll(&mut ws, &observation()).await.unwrap();
+    assert!(response["command"].is_null());
+    let state = f.admin.state().await;
+    let device = state["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "device-1")
+        .unwrap();
+    assert_eq!(device["health"]["sequence"], 2);
+    assert_eq!(
+        device["health"]["health"]["cpu_percent"]["observation"]["status"],
+        "unavailable"
+    );
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn presentation_versions_identity_and_reads_cannot_cancel_control() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let mut request = input(1);
+    let preview = expect_ok(f.admin.post("waiting/preview", &request).await).await;
+    request["preview_token"] = preview["preview_token"].clone();
+    expect_ok(f.admin.post("waiting/commit", &request).await).await;
+    let command = poll(&mut ws, &observation()).await.unwrap()["command"].clone();
+    let mut save = json!({"request_id":token(),"contest_id":"contest","base_version":0,"settings":{"starts_at_ms":1234567,"domjudge_api":null,"domjudge_contest":null,"logos":[]}});
+    let receipt = expect_ok(f.admin.post("presentation", &save).await).await;
+    assert_eq!(
+        expect_ok(f.admin.post("presentation", &save).await).await,
+        receipt
+    );
+    save["request_id"] = json!(token());
+    assert_eq!(f.admin.post("presentation", &save).await.status(), 409);
+    let query = json!({"instance_id":"host-one","session_key":"session-one"});
+    let data = expect_ok(f.admin.device("presentation", &f.credential, &query).await).await["data"]
+        .clone();
+    assert_eq!(data["configuration_version"], 1);
+    assert_eq!(data["command_id"], command["command_id"]);
+    let wrong = json!({"instance_id":"wrong-host","session_key":"wrong-session"});
+    assert!(
+        expect_ok(f.admin.device("presentation", &f.credential, &wrong).await).await["data"]
+            .is_null()
+    );
+    assert_eq!(
+        poll(&mut ws, &observation()).await.unwrap()["command"],
+        command
+    );
+    let mut report = json!({"data":data,"received_tick_ms":100,"round_trip_ms":5,"clock_offset_ms":-1000,
+        "wccs":{"state":"online","source":"authenticated-http","checked_at_ms":1,"detail":"receipt_verified"},
+        "oj":{"state":"unknown","source":"client-domjudge-api","checked_at_ms":1,"detail":"not_configured"}});
+    expect_ok(
+        f.admin
+            .device("presentation/report", &f.credential, &report)
+            .await,
+    )
+    .await;
+    report["data"]["identity"]["school"] = json!("changed");
+    assert_eq!(
+        f.admin
+            .device("presentation/report", &f.credential, &report)
+            .await
+            .status(),
+        409
+    );
+    let list = expect_ok(f.admin.get("presentation?contest_id=contest").await).await;
+    assert_eq!(list["receipts"].as_array().unwrap().len(), 1);
+    ws.close(None).await.unwrap();
+    f.finish().await;
 }
 
 async fn backend(db: &tokio_postgres::Client) -> i32 {

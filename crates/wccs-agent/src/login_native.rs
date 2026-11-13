@@ -89,6 +89,52 @@ fn config(path: &Path) -> Result<Config> {
     }
     Ok(config)
 }
+
+/// Reuse the provisioned account identity and DPAPI secret without changing login state.
+pub fn maintenance_account(
+    identity_path: &Path,
+    device: &str,
+) -> Result<(PathBuf, platform::Handle)> {
+    let path = identity_path.with_extension("login-native.json");
+    let config = config(&path)?;
+    let state = path.with_extension("state");
+    let journal: Journal = serde_json::from_slice(&fs::read(state.join("journal.json"))?)?;
+    if journal.device != device
+        || journal.machine_guid != config.machine_guid
+        || journal.creating_account
+        || journal.phase != "controlled"
+    {
+        return Err("maintenance_identity_changed".into());
+    }
+    let user = platform::user(&config.account_name)?.ok_or("contest_account_missing")?;
+    if user.comment != journal.owner
+        || journal.account_sid.as_deref() != Some(&user.sid)
+        || user.flags & DISABLED != 0
+    {
+        return Err("contest_account_ownership".into());
+    }
+    let secret = platform::unprotect(&state.join("contest.dpapi"))?;
+    let token = platform::authenticate(&config.account_name, &secret)?;
+    if platform::token_sid(token.0)? != user.sid || platform::administrator(token.0)? {
+        return Err("ordinary_account_required".into());
+    }
+    Ok((config.work_directory, token))
+}
+pub fn maintenance_active(identity: &Path, device: &str, session: &str, sid: &str) -> bool {
+    let state = identity
+        .with_extension("login-native.json")
+        .with_extension("state");
+    fs::read(state.join("journal.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).ok())
+        .is_some_and(|journal| {
+            journal.device == device
+                && journal.phase == "controlled"
+                && !journal.creating_account
+                && journal.account_sid.as_deref() == Some(sid)
+                && journal.session_key.as_deref() == Some(session)
+        })
+}
 /// Provisioning consumes a local UTF-16 recovery password file. Passwords never enter argv or JSON responses.
 pub fn provision(path: &Path, secret_path: &Path) -> Result<()> {
     let config = config(path)?;
@@ -485,6 +531,7 @@ impl Native {
                 probe_command.login.as_mut().unwrap().snapshot.target_sid =
                     self.journal.account_sid.clone();
                 probe.pipe.send(&IpcRequest {
+                    presentation: None,
                     protocol_version: CONTROL_VERSION,
                     command: probe_command,
                     lease_seconds: 5,

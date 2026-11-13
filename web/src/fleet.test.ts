@@ -1,3 +1,4 @@
+import { healthAbnormal, healthStale, versionMismatch } from "./health-model";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
@@ -140,4 +141,24 @@ test("设备清单展示期望与实际状态，空匹配保留未分配", () =>
   assert.match(html, /等待回传/);
   assert.match(html, /查看详情/);
   assert.match(html, /button[^>]*disabled[^>]*>新增设备/);
+});
+
+test("健康未知、离线和版本差异独立呈现", () => {
+  const device = snapshot.devices[0];
+  assert.equal(healthAbnormal(device), true);
+  assert.equal(healthStale(device, 100), true);
+  assert.equal(versionMismatch(device, "0.3.0", ""), true);
+  assert.equal(versionMismatch(device, "", ""), false);
+  const html = renderToStaticMarkup(
+    createElement(Seats, {
+      snapshot,
+      selected: [],
+      onSelect: () => {},
+      csrf: "test",
+      disabled: false,
+      onMutate: async () => {},
+    }),
+  );
+  assert.ok(html.includes("健康异常 / 未知"));
+  assert.ok(html.includes("版本不一致 / 未知"));
 });

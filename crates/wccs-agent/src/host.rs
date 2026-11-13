@@ -59,10 +59,55 @@ pub fn run(
     };
     log(&path, "host_started")?;
     let runtime = tokio::runtime::Runtime::new()?;
+    let instance = token();
     let worker_path = path.clone();
     let worker_stop = stop.clone();
     let worker = std::thread::spawn(move || {
         crate::windows_agent::run_worker(&worker_path, worker_stop);
+    });
+    let diagnostic_path = path.clone();
+    let diagnostic_executable = executable.clone();
+    let diagnostic_stop = stop.clone();
+    let diagnostic_worker = std::thread::spawn(move || {
+        crate::diagnostics::service_worker(
+            &diagnostic_path,
+            &diagnostic_executable,
+            test_mode,
+            diagnostic_stop,
+        );
+    });
+    let presentation: crate::presentation::Shared = Default::default();
+    let presentation_state = presentation.clone();
+    let presentation_path = path.clone();
+    let presentation_instance = instance.clone();
+    let presentation_stop = stop.clone();
+    let presentation_worker = std::thread::spawn(move || {
+        crate::presentation::worker(
+            &presentation_path,
+            &presentation_instance,
+            test_mode,
+            presentation_state,
+            presentation_stop,
+        )
+    });
+    let health_path = path.clone();
+    let health_instance = instance.clone();
+    let health_stop = stop.clone();
+    let health_worker = std::thread::spawn(move || {
+        crate::health::worker(&health_path, &health_instance, health_stop)
+    });
+    let maintenance_path = path.clone();
+    let maintenance_executable = executable.clone();
+    let maintenance_stop = stop.clone();
+    let maintenance_instance = instance.clone();
+    let maintenance_worker = std::thread::spawn(move || {
+        crate::maintenance::worker(
+            &maintenance_path,
+            &maintenance_executable,
+            &maintenance_instance,
+            test_mode,
+            maintenance_stop,
+        );
     });
     runtime.block_on(async {
         if test_mode {
@@ -73,11 +118,12 @@ pub fn run(
             });
         }
         let mut host = Controller {
+            presentation,
             path,
             executable,
             accounts,
             test_mode,
-            instance: token(),
+            instance,
             child: None,
             command: None,
             report: None,
@@ -87,6 +133,8 @@ pub fn run(
             command_deadline: Instant::now(),
         };
         let mut backoff = 1;
+        // Startup never replays waiting authority. Recovery failures remain observable.
+        let _ = host.recover_accounts();
         while !stop.load(Ordering::Relaxed) {
             let start = Instant::now();
             if host.connection(&stop).await.is_err() {
@@ -115,10 +163,21 @@ pub fn run(
     });
     stop.store(true, Ordering::Relaxed);
     worker.join().map_err(|_| "http_worker_panicked")?;
+    presentation_worker
+        .join()
+        .map_err(|_| "presentation_worker_panicked")?;
+    health_worker.join().map_err(|_| "health_worker_panicked")?;
+    diagnostic_worker
+        .join()
+        .map_err(|_| "diagnostic_worker_panicked")?;
+    maintenance_worker
+        .join()
+        .map_err(|_| "maintenance_worker_panicked")?;
     Ok(())
 }
 
 struct Controller {
+    presentation: crate::presentation::Shared,
     path: PathBuf,
     accounts: Option<Box<dyn crate::login::Runtime>>,
     executable: PathBuf,
@@ -143,8 +202,23 @@ impl Controller {
         );
     }
     fn recover_accounts(&mut self) -> Result<()> {
+        let policy = self.recover_waiting_policy();
         let result = self.accounts.as_mut().map_or(Ok(()), |s| s.recover());
         self.observe_accounts();
+        policy.and(result)
+    }
+    fn recover_waiting_policy(&mut self) -> Result<()> {
+        if self.test_mode {
+            return Ok(());
+        }
+        let result =
+            crate::waiting_policy::recover(&self.path.with_extension("waiting-policy.json"));
+        if let Err(error) = &result {
+            self.actual.state = "failed".into();
+            self.actual.detail = "waiting_policy_recovery_failed".into();
+            log_error(&self.path, "waiting_policy_recovery_failed", error.as_ref());
+            self.persist()?;
+        }
         result
     }
     fn stop_child(&mut self) -> Result<()> {
@@ -165,9 +239,11 @@ impl Controller {
     }
     async fn connection(&mut self, stop: &AtomicBool) -> Result<()> {
         let identity: serde_json::Value = serde_json::from_slice(&fs::read(&self.path)?)?;
-        let server = identity["server"].as_str().ok_or("server_missing")?;
+        let typed_identity = serde_json::from_value(identity.clone())?;
+        let server = crate::connection::server(&self.path, &typed_identity)
+            .map_err(|_| "server_not_configured")?;
         let mut url =
-            crate::windows_agent::validate_server(server).map_err(|_| "invalid_server_origin")?;
+            crate::windows_agent::validate_server(&server).map_err(|_| "invalid_server_origin")?;
         let device = identity["device_id"].as_str().ok_or("device_missing")?;
         let credential = fs::read_to_string(self.path.with_extension("credential"))?;
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -204,18 +280,32 @@ impl Controller {
         }
         let mut last_sync = crate::service::monotonic_ms();
         while !stop.load(Ordering::Relaxed) {
+            if crate::connection::server(&self.path, &typed_identity)
+                .ok()
+                .as_deref()
+                != Some(&server)
+            {
+                return Err("server_configuration_changed".into());
+            }
             if crate::service::monotonic_ms().saturating_sub(last_sync) > 5_000 {
                 return Err("control_heartbeat_expired".into());
             }
             self.observe_accounts();
+            if self.actual.detail == "waiting_policy_recovery_failed"
+                && self.recover_accounts().is_ok()
+            {
+                self.actual = Actual::default();
+                self.observe_accounts();
+                self.persist()?;
+            }
             if self
                 .actual
                 .account
                 .as_ref()
                 .is_some_and(|s| s.phase == "controlled" && !s.login_complete())
             {
-                self.recover_accounts()?;
                 self.stop_child()?;
+                let _ = self.recover_accounts();
             }
             let session = ipc::discover(self.test_mode).ok();
             let session_key = session.as_ref().map(|s| s.key.clone());
@@ -276,9 +366,10 @@ impl Controller {
                 {
                     return Err("control_command_rejected".into());
                 }
-                if command.action == "enter" && session_key.as_deref() != Some(&command.session_key)
+                let result = if command.action == "enter"
+                    && session_key.as_deref() != Some(&command.session_key)
                 {
-                    self.fail("session_changed")?;
+                    self.fail("session_changed")
                 } else {
                     self.apply(
                         command.clone(),
@@ -287,21 +378,27 @@ impl Controller {
                             .lease_seconds
                             .min((command.expires_at - reply.server_time) as u64),
                         (command.expires_at - reply.server_time) as u64,
-                    )?;
+                    )
+                };
+                if let Err(error) = result
+                    && self.actual.detail != "waiting_policy_recovery_failed"
+                {
+                    return Err(error);
                 }
             } else {
-                self.recover_accounts()?;
                 self.stop_child()?;
-                self.actual = if session.is_some() {
-                    Actual::default()
-                } else {
-                    Actual {
-                        state: "no_session".into(),
-                        detail: "no_available_session".into(),
-                        ..Default::default()
-                    }
-                };
-                self.report = None;
+                if self.recover_accounts().is_ok() {
+                    self.actual = if session.is_some() {
+                        Actual::default()
+                    } else {
+                        Actual {
+                            state: "no_session".into(),
+                            detail: "no_available_session".into(),
+                            ..Default::default()
+                        }
+                    };
+                    self.report = None;
+                }
                 self.observe_accounts();
                 self.persist()?;
             }
@@ -328,14 +425,18 @@ impl Controller {
         self.persist()
     }
     fn fail(&mut self, detail: &str) -> Result<()> {
-        let recovery = self.recover_accounts();
         let stopped = self.stop_child();
+        let recovery = self.recover_accounts();
         self.observe_accounts();
-        recovery?;
-        stopped?;
         self.actual = Actual {
             state: "failed".into(),
-            detail: detail.into(),
+            detail:
+                if recovery.is_err() && self.actual.detail == "waiting_policy_recovery_failed" {
+                    "waiting_policy_recovery_failed"
+                } else {
+                    detail
+                }
+                .into(),
             account: self.actual.account.clone(),
             ..Default::default()
         };
@@ -344,10 +445,11 @@ impl Controller {
             .as_ref()
             .is_some_and(|r| r.stage == "succeeded" || r.stage == "failed")
         {
-            self.persist()
+            self.persist()?;
         } else {
-            self.stage("failed")
+            self.stage("failed")?;
         }
+        stopped.and(recovery)
     }
     fn apply(
         &mut self,
@@ -370,6 +472,7 @@ impl Controller {
             }
             if ["prepare_login", "restore_teaching"].contains(&command.action.as_str()) {
                 self.stop_child()?;
+                self.recover_waiting_policy()?;
                 self.accounts
                     .as_mut()
                     .ok_or("native_login_unavailable")?
@@ -403,6 +506,24 @@ impl Controller {
                 let Some(session) = session else {
                     return self.fail("no_session");
                 };
+                if !self.test_mode {
+                    self.recover_waiting_policy()?;
+                    self.observe_accounts();
+                    if !self.actual.account.as_ref().is_some_and(|a| {
+                        a.phase == "controlled"
+                            && a.login_complete()
+                            && a.target_sid.as_deref() == Some(session.sid())
+                    }) {
+                        return self.fail("waiting_account_required");
+                    }
+                    if let Err(error) = crate::waiting_policy::apply(
+                        &self.path.with_extension("waiting-policy.json"),
+                        session.sid(),
+                    ) {
+                        log_error(&self.path, "waiting_policy_apply_failed", error.as_ref());
+                        return self.fail("waiting_policy_apply_failed");
+                    }
+                }
                 match Child::start(&self.executable, session, self.test_mode) {
                     Ok(child) => self.child = Some(child),
                     Err(_) => return self.fail("session_launch_failed"),
@@ -451,6 +572,7 @@ impl Controller {
             return self.fail("no_session");
         }
         if command.action == "leave" && self.child.is_none() {
+            self.recover_waiting_policy()?;
             self.actual = Actual::default();
             if self.report.as_ref().is_none_or(|r| r.stage != "succeeded") {
                 self.stage("succeeded")?;
@@ -460,6 +582,13 @@ impl Controller {
         let Some(child) = &mut self.child else {
             return self.fail("session_process_unavailable");
         };
+        if command.action == "enter"
+            && !self.test_mode
+            && crate::waiting_policy::verify(&self.path.with_extension("waiting-policy.json"))
+                .is_err()
+        {
+            return self.fail("waiting_policy_changed");
+        }
         let exchange = (|| -> Result<Option<Actual>> {
             if !child.ready()? {
                 return Ok(None);
@@ -473,13 +602,22 @@ impl Controller {
                     protocol_version: CONTROL_VERSION,
                     command: command.clone(),
                     lease_seconds: lease,
+                    presentation: self
+                        .presentation
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.as_ref().filter(|p| p.data.matches(&command)).cloned()),
                 })?;
             }
             Ok(actual)
         })();
         match exchange {
             Ok(Some(actual)) if actual.valid() => {
+                let observation_changed = self.actual.state != actual.state
+                    || self.actual.detail != actual.detail
+                    || self.actual.monitors != actual.monitors;
                 self.actual = actual;
+                self.observe_accounts();
                 self.last_ui = Instant::now();
                 let complete = if command.action == "enter" {
                     self.actual.state == "waiting"
@@ -488,11 +626,14 @@ impl Controller {
                 } else {
                     self.actual.state == "desktop"
                 };
-                if complete && self.report.as_ref().is_none_or(|r| r.stage != "succeeded") {
-                    self.stage("succeeded")?;
-                }
                 if command.action == "leave" && complete {
                     self.stop_child()?;
+                    self.recover_waiting_policy()?;
+                }
+                if complete && self.report.as_ref().is_none_or(|r| r.stage != "succeeded") {
+                    self.stage("succeeded")?;
+                } else if observation_changed {
+                    self.persist()?;
                 }
             }
             Ok(None)
@@ -501,6 +642,21 @@ impl Controller {
             _ => return self.fail("ipc_or_session_failed"),
         }
         Ok(())
+    }
+}
+
+fn log_error(path: &std::path::Path, operation: &str, error: &(dyn std::error::Error + 'static)) {
+    let detail = error.to_string();
+    if let Some(error) = error.downcast_ref::<windows::core::Error>() {
+        let _ = log(path, &format!("{operation} hresult={:08x}", error.code().0));
+    } else if detail.len() <= 80
+        && detail
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        let _ = log(path, &format!("{operation} {detail}"));
+    } else {
+        let _ = log(path, operation);
     }
 }
 
@@ -552,6 +708,7 @@ mod tests {
         };
         (
             Controller {
+                presentation: Default::default(),
                 path: directory.join("device.json"),
                 accounts: None,
                 executable: directory.join("unused.exe"),
@@ -616,6 +773,22 @@ mod tests {
         let mut changed = command;
         changed.identity.name = "Changed".into();
         assert!(host.apply(changed, None, 15, 900).is_err());
+        cleanup(host);
+    }
+    #[test]
+    fn corrupt_policy_journal_reports_recovery_failure_and_preserves_evidence() {
+        let (mut host, command) = fixture();
+        host.apply(command, None, 15, 900).unwrap();
+        let journal = host.path.with_extension("waiting-policy.json");
+        fs::write(&journal, b"interrupted journal").unwrap();
+        host.test_mode = false;
+        assert!(host.fail("control_disconnected").is_err());
+        assert_eq!(host.actual.detail, "waiting_policy_recovery_failed");
+        assert_eq!(host.report.as_ref().unwrap().stage, "failed");
+        assert!(host.actual.valid());
+        assert_eq!(fs::read(&journal).unwrap(), b"interrupted journal");
+        fs::remove_file(journal).unwrap();
+        fs::remove_file(host.path.with_extension("host.log")).unwrap();
         cleanup(host);
     }
 }

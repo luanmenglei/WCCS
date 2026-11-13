@@ -11,7 +11,7 @@
 - 本轮完整工作区执行 `pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json`，80 项 Rust、14 项 PostgreSQL、36 项前端及发布构建、格式、Clippy 检查通过。首次数据库测试因独立测试集群未启动而连接拒绝，启动 `local/m2/postgres` 后重跑通过，日志为 `artifacts/git-cleanup-m2-retry.txt`。提交后同一命令再次通过，日志为 `artifacts/git-cleanup-final-m2.txt`。Python 16 项测试、197 文件仓库检查、暂存快照及 diff 检查通过。
 - 原任务分支的实现已收拢到可验证开发基线。等待视觉已有开发机实屏证据，加固已有早前 Windows 10 虚拟机证据。本轮新增运维功能的完整原生验收继续按 [剩余步骤](tasks/machine-tools-alignment.md#剩余原生验收步骤) 推进。M1、M2 仍保留阶段验收状态。
 
-本轮以 `main` 为整合目标，采用快进合并保留全部提交历史，已合入任务分支通过祖先关系核对后使用 `git branch -d` 清理。整理前的分支指针和文件快照保存在忽略目录 `artifacts/git-cleanup-original/`。仓库当前未配置远端。
+本轮以 `main` 为整合目标，采用快进合并保留全部提交历史，已合入任务分支通过祖先关系核对后使用 `git branch -d` 清理。整理前的分支指针和文件快照保存在忽略目录 `artifacts/git-cleanup-original/`。同日按用户指定配置 `origin` 为 [luanmenglei/WCCS](https://github.com/luanmenglei/WCCS)，同步分支为 `main`。
 
 后续任务从更新后的 `main` 创建对应 `feat/`、`fix/` 或 `docs/` 短分支。下一项可执行工作为恢复独立 Windows 10 验证环境并补齐本轮运维矩阵，以及建立 Linux 原生部署、HTTPS/WSS、安装和回退验证。DOMjudge 实例联调、机房镜像及容量验证继续保留待验状态。
 

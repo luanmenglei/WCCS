@@ -23,7 +23,7 @@ pub async fn register(
     {
         return Err(ApiError::bad("设备注册格式或协议版本错误"));
     }
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     crate::seating::lock(&tx).await?;
     crate::lifecycle::expire(&tx).await?;
@@ -107,7 +107,7 @@ pub async fn heartbeat(
         return Err(ApiError::bad("心跳协议版本或字段错误"));
     }
     let (observed, source) = source_address(peer.ip(), &headers, &app.config.trusted_proxies);
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     crate::seating::lock(&tx).await?;
     let id = auth::device(&tx, &headers).await?;
@@ -157,7 +157,7 @@ pub async fn result(
     headers: HeaderMap,
     Json(input): Json<CheckResult>,
 ) -> ApiResult<Json<Value>> {
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     crate::seating::lock(&tx).await?;
     let id = auth::device(&tx, &headers).await?;

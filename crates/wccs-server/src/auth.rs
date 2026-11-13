@@ -51,6 +51,16 @@ pub async fn authorize(
     permission: Permission,
 ) -> ApiResult<Identity> {
     crate::seating::lock(tx).await?;
+    authorize_snapshot(tx, session, permission).await
+}
+
+// Read-only previews authorize against their consistent snapshot. Commit rechecks
+// the current operator version and room scope under the configuration fence.
+pub async fn authorize_snapshot(
+    tx: &Transaction<'_>,
+    session: &Session,
+    permission: Permission,
+) -> ApiResult<Identity> {
     let row = tx.query_opt("SELECT id,username,display_name,role,all_rooms,room_ids,version FROM operators WHERE id=$1 AND enabled AND version=$2", &[&session.operator_id,&session.version]).await?
         .filter(|_| session.expires > now())
         .ok_or_else(|| ApiError::unauthorized("账号或权限已变化，请重新登录并核对当前授权"))?;
@@ -253,7 +263,7 @@ pub async fn login(
     let row = app
         .db
         .lock()
-        .await
+        .await?
         .query_opt(
             "SELECT id,password_hash,version FROM operators WHERE login_key=$1",
             &[&login_key(&input.username)],
@@ -267,7 +277,7 @@ pub async fn login(
         return Err(ApiError::unauthorized("用户名或密码错误"));
     }
     let row = row.unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let session = Session {
         csrf: token(),
@@ -301,7 +311,7 @@ pub async fn session(
     headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
     let session = admin(&app, &headers, false).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = authorize(&tx, &session, Permission::Read).await?;
     Ok(Json(session_value(&session, &identity)))

@@ -10,7 +10,7 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 async fn socket(h: &Harness, credential: &str) -> Socket {
     socket_for(h, credential, "a").await
 }
-async fn socket_for(h: &Harness, credential: &str, device: &str) -> Socket {
+pub(super) async fn socket_for(h: &Harness, credential: &str, device: &str) -> Socket {
     let mut request = format!(
         "{}/api/device/control",
         h.url.replacen("http://", "ws://", 1)
@@ -29,7 +29,7 @@ async fn socket_for(h: &Harness, credential: &str, device: &str) -> Socket {
         .insert("sec-websocket-protocol", CONTROL_PROTOCOL.parse().unwrap());
     connect_async(request).await.unwrap().0
 }
-async fn poll(socket: &mut Socket, poll: &Value) -> Option<Value> {
+pub(super) async fn poll(socket: &mut Socket, poll: &Value) -> Option<Value> {
     socket
         .send(Message::Text(poll.to_string().into()))
         .await

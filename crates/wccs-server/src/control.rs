@@ -34,7 +34,7 @@ pub async fn upgrade(
         return Err(ApiError::bad("控制子协议不兼容"));
     }
     let id = {
-        let mut db = app.db.lock().await;
+        let mut db = app.db.lock().await?;
         let tx = db.transaction().await?;
         seating::lock(&tx).await?;
         let id = auth::device(&tx, &headers).await?;
@@ -154,7 +154,9 @@ async fn run(app: App, headers: HeaderMap, id: String, mut socket: WebSocket) {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
-    let mut db = app.db.lock().await;
+    let Ok(mut db) = app.db.lock().await else {
+        return;
+    };
     if let Ok(tx) = db.transaction().await {
         let _ = seating::lock(&tx).await;
         if let Ok(count) = tx.execute("UPDATE control_devices SET connected=false WHERE device_id=$1 AND connection_id=$2", &[&id,&connection]).await
@@ -183,7 +185,7 @@ async fn exchange(
     first: bool,
     poll: &ControlPoll,
 ) -> ApiResult<ControlReply> {
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     seating::lock(&tx).await?;
     if auth::device(&tx, headers).await? != id {

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use wccs_protocol::token;
 use wccs_server::{Config, connect, router};
 
+#[derive(Clone)]
 struct Harness {
     url: String,
     client: Client,
@@ -574,15 +575,23 @@ impl Harness {
 }
 
 async fn start(config: Config) -> (Harness, tokio::task::JoinHandle<()>) {
+    let (harness, handle, _) = start_with_app(config).await;
+    (harness, handle)
+}
+
+async fn start_with_app(
+    config: Config,
+) -> (Harness, tokio::task::JoinHandle<()>, wccs_server::App) {
     let listener = tokio::net::TcpListener::bind(&config.bind).await.unwrap();
     let mut config = config;
     config.origin = format!("http://{}", listener.local_addr().unwrap());
     config.bind = listener.local_addr().unwrap().to_string();
     let app = connect(config.clone()).await.unwrap();
+    let server_app = app.clone();
     let handle = tokio::spawn(async move {
         axum::serve(
             listener,
-            router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            router(server_app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .await
         .unwrap();
@@ -595,6 +604,7 @@ async fn start(config: Config) -> (Harness, tokio::task::JoinHandle<()>) {
             csrf: String::new(),
         },
         handle,
+        app,
     )
 }
 
@@ -2264,3 +2274,6 @@ async fn operators_scopes_events_and_recovery() {
 
 #[path = "cases/waiting.rs"]
 mod waiting_tests;
+
+#[path = "cases/database.rs"]
+mod database_tests;

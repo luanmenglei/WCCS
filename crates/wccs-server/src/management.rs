@@ -10,7 +10,7 @@ use wccs_protocol::{
 
 pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, false).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = auth::authorize(&tx, &session, auth::Permission::Read).await?;
     crate::lifecycle::expire(&tx).await?;
@@ -109,7 +109,7 @@ pub async fn create_device(
     {
         return Err(ApiError::bad("设备 ID、名称或注册令牌格式错误"));
     }
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     tx.query_one(
@@ -323,7 +323,7 @@ pub async fn publish(
     let session = auth::admin(&app, &headers, true).await?;
     validate_tools(&input.tools).map_err(|message| ApiError::bad(&message))?;
     let payload = serde_json::to_value(&input).unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     auth::context(&tx, &input.request_id, None, &input.targets).await?;
@@ -380,7 +380,7 @@ pub async fn recheck(
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
     identity

@@ -52,7 +52,7 @@ async fn query(
         return Err(ApiError::bad("事件筛选或每页数量无效"));
     }
     let fingerprint = digest(&serde_json::to_string(&filter).unwrap());
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = auth::authorize(&tx, &session, auth::Permission::Read).await?;
     let maximum: i64 = tx

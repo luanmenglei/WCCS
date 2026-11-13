@@ -6,7 +6,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio_postgres::Transaction;
+use std::collections::HashMap;
+use tokio_postgres::{IsolationLevel, Transaction};
 use wccs_protocol::{control::*, digest, now, token, valid_id};
 
 #[derive(Deserialize, Serialize)]
@@ -71,23 +72,77 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
         .map(|t| t["path"].as_str().map(String::from))
         .collect();
     let seating = seating::snapshot(tx).await?;
-    let mut targets = Vec::new();
+    let seats: HashMap<_, _> = seating["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|room| {
+            room["seats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(move |seat| (seat["id"].as_str().unwrap(), (room, seat)))
+        })
+        .collect();
+    let participants: HashMap<_, _> = tx
+        .query(
+            "SELECT p.id,p.name,p.school,a.seat_id FROM assignments a
+             JOIN participants p ON p.id=a.participant_id AND p.contest_id=a.contest_id
+             WHERE a.contest_id=$1 AND a.seat_id=ANY($2)",
+            &[&input.contest_id, &input.seat_ids],
+        )
+        .await?
+        .into_iter()
+        .map(|row| (row.get::<_, String>(3), row))
+        .collect();
+    let mut device_ids = Vec::new();
     for seat_id in &input.seat_ids {
-        let (room, seat) = seating["rooms"]
+        let (_, seat) = seats
+            .get(seat_id.as_str())
+            .ok_or_else(|| ApiError::conflict("座位已变化，请重新选择"))?;
+        if let Some(id) = seat["devices"]
             .as_array()
             .unwrap()
-            .iter()
-            .find_map(|room| {
-                room["seats"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|seat| seat["id"] == *seat_id)
-                    .map(|seat| (room, seat))
-            })
-            .ok_or_else(|| ApiError::conflict("座位已变化，请重新选择"))?;
+            .first()
+            .and_then(Value::as_str)
+        {
+            device_ids.push(id);
+        }
+    }
+    let devices: HashMap<_, _> = tx
+        .query(
+            "SELECT lifecycle,enrollment_generation,lifecycle_version,address_version,id
+             FROM devices WHERE id=ANY($1)",
+            &[&device_ids],
+        )
+        .await?
+        .into_iter()
+        .map(|row| (row.get::<_, String>(4), row))
+        .collect();
+    let previous_commands: HashMap<_, _> = tx
+        .query(
+            "SELECT DISTINCT ON(device_id) command,stage,sequence,device_id
+             FROM waiting_commands WHERE device_id=ANY($1) ORDER BY device_id,sequence DESC",
+            &[&device_ids],
+        )
+        .await?
+        .into_iter()
+        .map(|row| (row.get::<_, String>(3), row))
+        .collect();
+    let controls: HashMap<_, _> = tx
+        .query(
+            "SELECT * FROM control_devices WHERE device_id=ANY($1)",
+            &[&device_ids],
+        )
+        .await?
+        .into_iter()
+        .map(|row| (row.get::<_, String>("device_id"), row))
+        .collect();
+    let mut targets = Vec::new();
+    for seat_id in &input.seat_ids {
+        let (room, seat) = seats[seat_id.as_str()];
         let device = seat["devices"].as_array().unwrap();
-        let participant = tx.query_opt("SELECT p.id,p.name,p.school FROM assignments a JOIN participants p ON p.id=a.participant_id AND p.contest_id=a.contest_id WHERE a.contest_id=$1 AND a.seat_id=$2", &[&input.contest_id,seat_id]).await?;
+        let participant = participants.get(seat_id);
         let mut target = json!({"seat_id":seat_id,"room_id":room["id"],"room_name":room["name"],"number":seat["number"],"status":"unbound","device_id":null,"identity":null,"generation":null,"instance_id":null,"session_key":null});
         if let Some(p) = participant {
             target["identity"] = json!(WaitingIdentity {
@@ -107,11 +162,13 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
             target["status"] = json!("conflict");
         } else if let Some(id) = device.first().and_then(Value::as_str) {
             target["device_id"] = json!(id);
-            let d = tx.query_one("SELECT lifecycle,enrollment_generation,lifecycle_version,address_version FROM devices WHERE id=$1", &[&id]).await?;
+            let d = devices
+                .get(id)
+                .ok_or_else(|| ApiError::conflict("设备已变化，请重新预览"))?;
             target["generation"] = json!(d.get::<_, i64>(1));
             target["lifecycle_version"] = json!(d.get::<_, i64>(2));
             target["address_version"] = json!(d.get::<_, i64>(3));
-            let previous = tx.query_opt("SELECT command,stage,sequence FROM waiting_commands WHERE device_id=$1 ORDER BY sequence DESC LIMIT 1", &[&id]).await?;
+            let previous = previous_commands.get(id);
             target["head"] = json!(previous.as_ref().map(|r| r.get::<_, i64>(2)));
             if ["leave", "restore_teaching"].contains(&input.action.as_str())
                 && let Some(old) = &previous
@@ -122,10 +179,7 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
                 }
             }
             target["status"] = json!("offline");
-            if let Some(c) = tx
-                .query_opt("SELECT * FROM control_devices WHERE device_id=$1", &[&id])
-                .await?
-            {
+            if let Some(c) = controls.get(id) {
                 target["instance_id"] = json!(c.get::<_, String>("instance_id"));
                 target["session_key"] = json!(c.get::<_, Option<String>>("session_key"));
                 target["connection_id"] = json!(c.get::<_, String>("connection_id"));
@@ -206,11 +260,18 @@ pub async fn preview(
     Json(input): Json<Write>,
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
-    let mut db = app.db.lock().await;
-    let tx = db.transaction().await?;
-    let actor = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
+    let mut db = app.preview_db.lock().await?;
+    let tx = db
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await?;
+    let actor = auth::authorize_snapshot(&tx, &session, auth::Permission::Operate).await?;
     actor.seats(&tx, &input.seat_ids, &input.request_id).await?;
-    Ok(Json(plan(&tx, &app, &input).await?))
+    let result = plan(&tx, &app, &input).await?;
+    tx.commit().await?;
+    Ok(Json(result))
 }
 
 pub async fn commit(
@@ -219,7 +280,7 @@ pub async fn commit(
     Json(input): Json<Write>,
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let actor = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
     actor.seats(&tx, &input.seat_ids, &input.request_id).await?;
@@ -327,7 +388,7 @@ pub async fn list(
         return Err(ApiError::bad("比赛 ID 无效"));
     }
     let session = auth::admin(&app, &headers, false).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let actor = auth::authorize(&tx, &session, auth::Permission::Read).await?;
     expire(&tx).await?;

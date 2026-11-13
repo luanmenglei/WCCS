@@ -318,7 +318,7 @@ pub async fn preview(
     Json(input): Json<RoomWrite>,
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     lock(&tx).await?;
@@ -332,7 +332,7 @@ pub async fn save(
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     auth::context(
@@ -464,7 +464,7 @@ pub async fn check_preview(
     Json(input): Json<Selection>,
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
     identity
@@ -483,7 +483,7 @@ pub async fn check(
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
     identity
@@ -529,7 +529,7 @@ pub async fn review(
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     lock(&tx).await?;

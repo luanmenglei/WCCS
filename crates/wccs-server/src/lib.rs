@@ -2,6 +2,7 @@
 
 mod auth;
 mod control;
+mod database;
 mod device;
 mod events;
 mod lifecycle;
@@ -27,7 +28,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, Semaphore};
-use tokio_postgres::{Client, NoTls};
 use tower_http::services::ServeDir;
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -49,12 +49,14 @@ pub struct Config {
 pub struct AppState {
     pub config: Config,
     pub server_epoch: String,
-    pub db: Mutex<Client>,
+    pub db: database::Database,
+    pub preview_db: database::Database,
     pub sessions: Mutex<auth::Sessions>,
     pub password_slots: Arc<Semaphore>,
     pub auth_limits: Mutex<HashMap<&'static str, (Instant, u32)>>,
 }
 
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     message: String,
@@ -81,10 +83,21 @@ impl ApiError {
     pub fn internal() -> Self {
         Self::new(500, "服务器存储或内部操作失败，请重试并查看服务日志")
     }
+    pub fn unavailable() -> Self {
+        Self::new(503, "数据库连接暂时不可用，可使用相同请求编号重试")
+    }
 }
 impl From<tokio_postgres::Error> for ApiError {
     fn from(error: tokio_postgres::Error) -> Self {
         eprintln!("database_error code={:?}", error.code());
+        if error.is_closed()
+            || std::error::Error::source(&error).is_some_and(|source| source.is::<std::io::Error>())
+            || error.code().is_some_and(|code| {
+                code.code().starts_with("08") || matches!(code.code(), "57P01" | "57P02" | "57P03")
+            })
+        {
+            return Self::unavailable();
+        }
         Self::internal()
     }
 }
@@ -102,12 +115,9 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         return Err("HTTP 仅允许本地回环验证，部署请配置 HTTPS 反向代理与 origin".into());
     }
     argon2::PasswordHash::new(&config.admin_password_hash).map_err(|_| "管理员密码摘要无效")?;
-    let (mut db, connection) = tokio_postgres::connect(&config.database_url, NoTls).await?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            eprintln!("database_connection_closed code={:?}", error.code());
-        }
-    });
+    let database = database::Database::new(&config.database_url)?;
+    let preview_db = database::Database::new(&config.database_url)?;
+    let mut db = database.lock().await.map_err(|_| "数据库连接不可用")?;
     let tx = db.transaction().await?;
     tx.batch_execute("SELECT pg_advisory_xact_lock(87127413)")
         .await?;
@@ -162,10 +172,12 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     tx.execute("UPDATE control_devices SET connected=false", &[])
         .await?;
     tx.commit().await?;
+    drop(db);
     Ok(Arc::new(AppState {
         config,
         server_epoch: wccs_protocol::token(),
-        db: Mutex::new(db),
+        db: database,
+        preview_db,
         sessions: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(2)),
         auth_limits: Mutex::new(HashMap::new()),

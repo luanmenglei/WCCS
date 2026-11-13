@@ -15,7 +15,7 @@ fn summary(row: &tokio_postgres::Row) -> Value {
 
 pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, false).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     let rows = tx
@@ -99,7 +99,7 @@ pub async fn save(
 
     // Hash outside the database fence. The final transaction rechecks the session.
     let previous_payload = {
-        let mut db = app.db.lock().await;
+        let mut db = app.db.lock().await?;
         let tx = db.transaction().await?;
         auth::authorize(&tx, &session, auth::Permission::Admin).await?;
         tx.query_opt(
@@ -144,7 +144,7 @@ pub async fn save(
         None
     };
     payload["password_hash"] = json!(password_hash);
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     // Concurrent identical submissions may have independently generated salts.

@@ -18,7 +18,7 @@ pub async fn history(
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, false).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = auth::authorize(&tx, &session, auth::Permission::Read).await?;
     identity.devices(&tx, std::slice::from_ref(&id), "").await?;
@@ -126,7 +126,7 @@ pub async fn window(
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     seating::lock(&tx).await?;
@@ -184,7 +184,7 @@ pub async fn action(
     let mut payload = serde_json::to_value(&input).unwrap();
     // Request receipts retain only the digest of replacement material.
     payload["enrollment_token"] = json!(input.enrollment_token.as_ref().map(|value| digest(value)));
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
     if identity.role != "admin" && !["enable", "disable"].contains(&input.action.as_str()) {
@@ -319,7 +319,7 @@ pub async fn rotate(
     }
     let old_hash = auth::credential_hash(&headers)?;
     let new_hash = digest(&input.new_token);
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     seating::lock(&tx).await?;
     let row = tx.query_opt("SELECT credential_hash,lifecycle,rotation_id,rotation_expires,enrollment_generation FROM devices WHERE id=$1", &[&input.device_id]).await?.ok_or_else(||ApiError::unauthorized("设备认证失败"))?;

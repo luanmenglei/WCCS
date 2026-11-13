@@ -383,7 +383,7 @@ pub async fn preview(
     Json(input): Json<Write>,
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     seating::lock(&tx).await?;
@@ -396,7 +396,7 @@ pub async fn commit(
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, true).await?;
     let payload = serde_json::to_value(&input).unwrap();
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Admin).await?;
     seating::lock(&tx).await?;
@@ -476,7 +476,7 @@ pub async fn history(
     Query(cursor): Query<Cursor>,
 ) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, false).await?;
-    let mut db = app.db.lock().await;
+    let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize(&tx, &session, auth::Permission::Read)
         .await?

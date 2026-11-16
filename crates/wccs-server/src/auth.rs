@@ -128,11 +128,14 @@ impl Identity {
     ) -> ApiResult<()> {
         let mut rooms = Vec::new();
         let mut known = true;
-        for id in ids {
-            let scope: Option<Vec<String>> = tx
-                .query_one("SELECT device_room_scope($1)", &[id])
-                .await?
-                .get(0);
+        let scopes = tx
+            .query(
+                "SELECT device_room_scope(id) FROM unnest($1::text[]) AS id",
+                &[&ids],
+            )
+            .await?;
+        for row in scopes {
+            let scope: Option<Vec<String>> = row.get(0);
             self.rooms(scope.as_deref())?;
             if let Some(scope) = scope {
                 rooms.extend(scope);

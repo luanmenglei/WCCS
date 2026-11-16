@@ -325,13 +325,20 @@ fn cycle(
                 completed
             }
             Err(error) => {
+                let message = error.to_string();
                 let detail = match error.to_string().as_str() {
                     "rollback_complete" => "rollback_complete",
                     "rollback_failed" => "rollback_failed",
+                    "maintenance_identity_changed" => "identity_changed",
+                    "preparation_authorization_ended" => "connection_lost",
                     _ => "execution_failed",
                 };
-                let mut failed = result(&command, "failed", detail);
-                let message = error.to_string();
+                let stage = if ["identity_changed", "connection_lost"].contains(&detail) {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                let mut failed = result(&command, stage, detail);
                 let safe = [
                     "maintenance_requires_system",
                     "preparation_requires_system_service",
@@ -347,6 +354,8 @@ fn cycle(
                     "ordinary_account_required",
                     "contest_account_missing",
                     "contest_account_ownership",
+                    "maintenance_identity_changed",
+                    "preparation_authorization_ended",
                     "rollback_complete",
                     "rollback_failed",
                 ];

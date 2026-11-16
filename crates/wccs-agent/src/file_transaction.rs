@@ -187,6 +187,14 @@ pub fn rollback(path: &Path, journal: &mut Journal) -> Result<()> {
     save(path, journal)?;
     for update in journal.files.iter().rev() {
         let _guards = guard_directory(update.path.parent().ok_or("target_parent_missing")?, false)?;
+        // A failed rename or an interrupted write can leave this job's temporary
+        // file even when the destination still contains its original bytes.
+        let temporary = update
+            .path
+            .with_extension(format!("wccs-{}.tmp", journal.job_id));
+        if read_file(&temporary)?.is_some() {
+            fs::remove_file(&temporary)?;
+        }
         let current = read_file(&update.path)?;
         if current == update.previous {
             continue;
@@ -282,6 +290,42 @@ pub fn owned_root(root: &Path, owner: &str) -> Result<(PathBuf, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn locked_destination_rolls_back_prior_file_and_removes_temporary() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!("wccs-lock-{}", wccs_protocol::token()));
+        fs::create_dir(&root).unwrap();
+        let first = root.join("first.txt");
+        let locked = root.join("locked.txt");
+        fs::write(&first, b"first-old").unwrap();
+        fs::write(&locked, b"locked-old").unwrap();
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&locked)
+            .unwrap();
+        let state = root.join("journal.json");
+        let error = apply(
+            &state,
+            "locked-job",
+            "desktop_updated",
+            vec![
+                (first.clone(), b"first-new".to_vec()),
+                (locked.clone(), b"locked-new".to_vec()),
+            ],
+            || true,
+            |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "rollback_complete");
+        assert_eq!(fs::read(&first).unwrap(), b"first-old");
+        assert_eq!(fs::read(&locked).unwrap(), b"locked-old");
+        assert!(!locked.with_extension("wccs-locked-job.tmp").exists());
+        assert_eq!(recover(&state).unwrap().unwrap().phase, "rolled_back");
+        drop(handle);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn committed_restart_verifies_content_and_failed_verifier_restores_old_bytes() {
         let root =

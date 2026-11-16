@@ -86,6 +86,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if args.len() != 4 {
                 return Err("用法 --recover-login-native IDENTITY SESSION_EXE".into());
             }
+            if !wccs_session::ipc::is_system().map_err(|_| "native_token_query_failed")? {
+                return Err("native_login_requires_system".into());
+            }
             use std::os::windows::fs::OpenOptionsExt;
             let _lock = std::fs::OpenOptions::new()
                 .read(true)
@@ -97,9 +100,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let policy_recovery = waiting_policy::recover(
                 &std::path::Path::new(&args[2]).with_extension("waiting-policy.json"),
             );
+            let native_config = std::path::Path::new(&args[2]).with_extension("login-native.json");
+            if !native_config.try_exists()? {
+                if native_config.with_extension("state").try_exists()? {
+                    return Err("native_configuration_missing_with_state".into());
+                }
+                policy_recovery.map_err(|_| "waiting_policy_recovery_failed")?;
+                println!("native_login_not_configured_policy_recovered");
+                return Ok(());
+            }
             let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(&args[2])?)?;
             let mut native = login_native::Native::open(
-                &std::path::Path::new(&args[2]).with_extension("login-native.json"),
+                &native_config,
                 identity["device_id"].as_str().ok_or("device_missing")?,
                 args[3].clone().into(),
             )

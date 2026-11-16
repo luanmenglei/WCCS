@@ -137,9 +137,9 @@ pub fn run(
         let _ = host.recover_accounts();
         while !stop.load(Ordering::Relaxed) {
             let start = Instant::now();
-            if host.connection(&stop).await.is_err() {
+            if let Err(error) = host.connection(&stop).await {
                 eprintln!("control_connection_unavailable");
-                let _ = log(&host.path, "control_connection_unavailable");
+                log_error(&host.path, "control_connection_unavailable", error.as_ref());
             }
             let _ = host.fail("control_disconnected");
             // A disconnected completed command cannot silently create another window.
@@ -333,9 +333,12 @@ impl Controller {
                 Duration::from_secs(3),
                 socket.send(Message::Text(serde_json::to_string(&poll)?.into())),
             )
-            .await??;
+            .await
+            .map_err(|_| "control_send_timeout")??;
             let Some(Ok(Message::Text(text))) =
-                tokio::time::timeout(Duration::from_secs(5), socket.next()).await?
+                tokio::time::timeout(Duration::from_secs(5), socket.next())
+                    .await
+                    .map_err(|_| "control_receive_timeout")?
             else {
                 return Err("control_transport_closed".into());
             };

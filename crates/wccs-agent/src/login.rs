@@ -8,6 +8,29 @@ use std::{
 };
 use wccs_protocol::{control::Command, login::AccountState, token};
 
+/// The controller validates the current authenticated connection and host instance
+/// before calling an account adapter. A replacement server/database can restart
+/// its sequence, so a durable account journal must not compare different scopes.
+pub(crate) fn sequence_is_new(
+    previous: Option<&Command>,
+    sequence: i64,
+    command: &Command,
+) -> bool {
+    command.sequence > 0
+        && (command.sequence > sequence
+            || previous.is_some_and(|previous| {
+                previous.device_id == command.device_id
+                    && previous
+                        .login
+                        .as_ref()
+                        .zip(command.login.as_ref())
+                        .is_some_and(|(old, new)| {
+                            previous.instance_id != command.instance_id
+                                || old.connection_id != new.connection_id
+                        })
+            }))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Machine {
@@ -177,7 +200,11 @@ impl Simulator {
         if self.journal.command.as_ref() == Some(command) {
             return Ok(());
         }
-        if command.sequence <= self.journal.sequence {
+        if !sequence_is_new(
+            self.journal.command.as_ref(),
+            self.journal.sequence,
+            command,
+        ) {
             return Err("login_replay_rejected".into());
         }
         let plan = command.login.as_ref().ok_or("login_plan_missing")?;
@@ -434,6 +461,26 @@ mod tests {
             s.advance(c, 100).unwrap();
         }
         assert!(s.state().login_complete());
+    }
+    #[test]
+    fn new_authenticated_connection_can_restart_server_sequence() {
+        let fixture = Fixture::new();
+        let mut simulator = fixture.open();
+        let previous = command(&simulator, 94);
+        finish(&mut simulator, &previous);
+        simulator.recover().unwrap();
+        let mut next = command(&simulator, 1);
+        assert!(simulator.accept(&next).is_err());
+        next.instance_id = "new-host".into();
+        next.login.as_mut().unwrap().connection_id = "new-connection".into();
+        finish(&mut simulator, &next);
+        simulator.recover().unwrap();
+        let mut replay = next.clone();
+        replay.command_id = "different-command-same-sequence".into();
+        replay.login.as_mut().unwrap().snapshot = simulator.state();
+        assert!(simulator.accept(&replay).is_err());
+        assert!(simulator.advance(&previous, 102).is_err());
+        assert!(simulator.state().teaching_enabled);
     }
     #[test]
     fn copied_owner_marker_cannot_replace_the_recorded_sid() {

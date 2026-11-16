@@ -6,6 +6,25 @@ use std::{fs, process::Command};
 use wccs_protocol::token;
 
 #[test]
+fn native_recovery_requires_system_before_opening_any_state() {
+    if wccs_session::ipc::is_system().unwrap() {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("wccs-recovery-denied-{}", token()));
+    fs::create_dir(&root).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_wccs-agent"))
+        .arg("--recover-login-native")
+        .arg(root.join("device.json"))
+        .arg(root.join("session.exe"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("native_login_requires_system"));
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    fs::remove_dir(root).unwrap();
+}
+
+#[test]
 fn offline_setup_export_is_bounded_redacted_and_keeps_identity() {
     let root = std::env::temp_dir().join(format!("wccs-diagnostic-{}", token()));
     fs::create_dir(&root).unwrap();
@@ -63,5 +82,48 @@ fn offline_setup_export_is_bounded_redacted_and_keeps_identity() {
         .unwrap();
     assert!(status.status.success());
     assert!(!String::from_utf8_lossy(&status.stdout).contains(&secret));
+    let outbox = identity.with_extension("diagnostics-outbox");
+    fs::create_dir(&outbox).unwrap();
+    for index in 0..32 {
+        fs::write(outbox.join(format!("{index}.json")), b"{}").unwrap();
+    }
+    // A closed local port models an unreachable configured server without external traffic.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let configuration = root.join("connection-input.json");
+    fs::write(
+        &configuration,
+        serde_json::to_vec(&json!({"schema_version":1,
+        "server":format!("http://{address}"),"seat_claim":null}))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_wccs-agent"))
+            .arg("--configure")
+            .arg(&identity)
+            .arg(&configuration)
+            .arg("0")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let full_report = root.join("full-queue.json");
+    let full = Command::new(env!("CARGO_BIN_EXE_wccs-agent"))
+        .arg("--diagnose-test")
+        .arg(&identity)
+        .arg(root.join("missing-session.exe"))
+        .arg(&full_report)
+        .output()
+        .unwrap();
+    assert!(
+        full.status.success(),
+        "{}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+    assert!(!fs::read_to_string(full_report).unwrap().contains(&secret));
+    assert_eq!(fs::read_dir(outbox).unwrap().count(), 32);
     fs::remove_dir_all(root).unwrap();
 }

@@ -327,8 +327,11 @@ impl Native {
             return Ok(());
         }
         let plan = command.login.as_ref().ok_or("native_login_plan_missing")?;
-        if command.sequence <= self.journal.sequence
-            || self.state() != plan.snapshot
+        if !crate::login::sequence_is_new(
+            self.journal.command.as_ref(),
+            self.journal.sequence,
+            command,
+        ) || self.state() != plan.snapshot
             || self
                 .state()
                 .skip_reason(&command.action, plan.confirm_session_end)

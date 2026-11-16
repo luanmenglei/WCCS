@@ -3,6 +3,7 @@ name = "wccs-inventory"
 version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
+build = "../../scripts/windows-build.rs"
 
 [dependencies]
 serde.workspace = true

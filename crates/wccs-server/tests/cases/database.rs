@@ -2,6 +2,9 @@ use super::*;
 use std::time::{Duration, Instant};
 use waiting_tests::{poll, socket_for};
 
+#[path = "capacity.rs"]
+mod capacity;
+
 struct Fixture {
     admin: Harness,
     app: wccs_server::App,

@@ -11,7 +11,8 @@ Push-Location $repositoryRoot
 try {
     $env:WCCS_TEST_DATABASE_URL = $configuration.database_url
     & (Join-Path $PSScriptRoot 'check-rust.ps1')
-    & cargo test --locked -p wccs-server --target x86_64-pc-windows-msvc --test http -- --ignored
+    # Run the capacity case separately, without competing test workloads.
+    & cargo test --locked -p wccs-server --target x86_64-pc-windows-msvc --test http -- --ignored --skip concurrent_control_preview_commit_and_reconnect
     if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL integration check failed.' }
     & npm --prefix web ci
     if ($LASTEXITCODE -ne 0) { throw 'Frontend installation failed.' }

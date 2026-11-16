@@ -203,6 +203,46 @@ fn invalid_or_missing_configuration_fails_before_export() {
 }
 
 #[test]
+fn system_file_version_matches_manifested_windows_tool() {
+    let directory = TestDirectory::new();
+    let executable = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let expected = Command::new(&executable)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$v=(Get-Item -LiteralPath $env:WCCS_VERSION_TEST_FILE).VersionInfo; '{0}.{1}.{2}.{3}' -f $v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart,$v.FilePrivatePart",
+        ])
+        .env("WCCS_VERSION_TEST_FILE", &executable)
+        .output()
+        .unwrap();
+    assert!(expected.status.success());
+    let config = serde_json::json!({
+        "schema_version": 1, "config_version": "native-version", "tools": [
+            {"id": "powershell", "name": "PowerShell", "kind": "executable", "path": executable}
+        ]
+    });
+    let path = directory.0.join("tools.json");
+    fs::write(&path, config.to_string()).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_wccs-inventory"))
+        .current_dir(&directory.0)
+        .arg("--tools-config")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let (report, _) = read_report(&directory.0);
+    let ToolReport::Configured(tool) = &report.tools[0] else {
+        panic!("configured tool required");
+    };
+    assert_eq!(
+        tool.check.value().unwrap().file_version.value().unwrap(),
+        String::from_utf8(expected.stdout).unwrap().trim()
+    );
+}
+
+#[test]
 fn export_failure_returns_nonzero_without_overwriting_existing_file() {
     let directory = TestDirectory::new();
     let destination = directory.0.join("existing.txt");

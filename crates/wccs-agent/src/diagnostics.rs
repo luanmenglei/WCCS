@@ -339,22 +339,22 @@ fn diagnose(path: &Path, service: &str, output: &Path, test_mode: bool) -> Resul
     if let Some(server) = &saved.configuration.server {
         let directory = path.with_extension("diagnostics-outbox");
         fs::create_dir_all(&directory)?;
-        if fs::read_dir(&directory)?.count() >= 32 {
-            return Err("待补报诊断已达 32 份，请联网补报后重试".into());
-        }
         let envelope = Envelope {
             device_binding: connection::binding(&identity),
             server: server.clone(),
             report: report.clone(),
         };
-        persist(
-            &directory.join(format!("{}.json", report.request_id)),
-            &serde_json::to_vec(&envelope)?,
-        )?;
-        uploaded = flush(&client, path, &identity, &credential, server).is_ok()
-            && !directory
-                .join(format!("{}.json", report.request_id))
-                .exists();
+        // A full offline queue must not prevent staff from exporting local evidence.
+        if fs::read_dir(&directory)?.count() < 32 {
+            persist(
+                &directory.join(format!("{}.json", report.request_id)),
+                &serde_json::to_vec(&envelope)?,
+            )?;
+            uploaded = flush(&client, path, &identity, &credential, server).is_ok()
+                && !directory
+                    .join(format!("{}.json", report.request_id))
+                    .exists();
+        }
     }
     // Only typed evidence is exported. Arbitrary logs, credentials, account names and paths are excluded.
     let package = json!({"schema_version":1,"mode":if test_mode {"local_test"} else {"service"},

@@ -4,12 +4,18 @@ param(
     [Parameter(Mandatory)][ValidateSet('Install','Start','Stop','Status','Uninstall')][string]$Action,
     [Parameter(Mandatory)][ValidatePattern('^WCCS-[A-Za-z0-9-]{1,60}$')][string]$Name,
     [Parameter(Mandatory)][string]$InstallDirectory,
+    [Parameter(Mandatory)][ValidatePattern('^[^\x00-\x20\\/:"*?<>|]{1,63}$')][string]$ExpectedMachineName,
+    [Parameter(Mandatory)][guid]$ExpectedMachineGuid,
     [string]$Identity,
     [string]$BinaryDirectory = 'target/x86_64-pc-windows-msvc/release'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($env:COMPUTERNAME -ne $ExpectedMachineName -or
+    [guid](Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Cryptography').MachineGuid -ne $ExpectedMachineGuid) {
+    throw 'Explicit target machine identity does not match.'
+}
 $installRoot = [IO.Path]::GetFullPath($InstallDirectory)
 if ($installRoot -eq [IO.Path]::GetPathRoot($installRoot) -or $installRoot.Contains('"')) {
     throw 'Specify a dedicated installation directory.'
@@ -86,10 +92,17 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { throw 'Identity ACL failed.' }
         Copy-Item -LiteralPath (Join-Path $BinaryDirectory 'wccs-agent.exe') -Destination $agent
         Copy-Item -LiteralPath (Join-Path $BinaryDirectory 'wccs-session.exe') -Destination $session
-        Copy-Item -LiteralPath $source -Destination $identityFile
+        if (Test-Path -LiteralPath $identityFile) {
+            $existingIdentity = Get-Content -LiteralPath $identityFile -Raw | ConvertFrom-Json
+            $incomingIdentity = Get-Content -LiteralPath $source -Raw | ConvertFrom-Json
+            if ($existingIdentity.device_id -ne $incomingIdentity.device_id -or
+                $existingIdentity.enrollment_token -ne $incomingIdentity.enrollment_token) {
+                throw 'Existing device identity differs. Use explicit re-enrollment after administrator review.'
+            }
+        } else { Copy-Item -LiteralPath $source -Destination $identityFile }
         foreach ($extension in @('credential','pending.json','completed','rotation.json','connection.json','deployment.json')) {
             $companion = [IO.Path]::ChangeExtension($source, $extension)
-            if (Test-Path -LiteralPath $companion) {
+            if ((Test-Path -LiteralPath $companion) -and -not (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($identityFile, $extension)))) {
                 Copy-Item -LiteralPath $companion -Destination ([IO.Path]::ChangeExtension($identityFile, $extension))
             }
         }

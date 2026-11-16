@@ -3,11 +3,12 @@
 param(
     [Parameter(Mandatory)][ValidateSet('Install', 'Recover', 'RemoveProvider')][string]$Action,
     [Parameter(Mandatory)][string]$ExpectedMachineGuid,
-    [Parameter(Mandatory)][ValidateSet('WCCS-Login-Test')][string]$ExpectedMachineName,
+    [Parameter(Mandatory)][ValidatePattern('^[^\x00-\x20\\/:"*?<>|]{1,63}$')][string]$ExpectedMachineName,
     [Parameter(Mandatory)][string]$InstallDirectory,
     [string]$ProviderDll,
     [string]$Configuration,
-    [string]$RecoverySecretFile
+    [string]$RecoverySecretFile,
+    [string]$RecoveryBinaryDirectory
 )
 
 Set-StrictMode -Version Latest
@@ -17,7 +18,7 @@ if ($env:COMPUTERNAME -ne $ExpectedMachineName -or $machineGuid -ne $ExpectedMac
     throw 'The explicitly authorized Windows test machine does not match.'
 }
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
-    throw 'Run through the authorized test machine SYSTEM runner or a one-shot SYSTEM recovery task.'
+    throw 'Run through the target machine one-shot SYSTEM task provided by client-field.ps1.'
 }
 $root = [IO.Path]::GetFullPath($InstallDirectory)
 $manifest = Get-Content -LiteralPath (Join-Path $root 'installation.json') -Raw | ConvertFrom-Json
@@ -41,6 +42,10 @@ $classId = '{954886e2-4dc2-4e85-a962-2687f7658e0c}'
 $classPath = "HKLM:/SOFTWARE/Classes/CLSID/$classId/InprocServer32"
 $registrationPath = "HKLM:/SOFTWARE/Microsoft/Windows/CurrentVersion/Authentication/Credential Providers/$classId"
 $recordPath = Join-Path $root 'data/login-provider-installation.json'
+if ($RecoveryBinaryDirectory -and $Action -in @('Recover', 'RemoveProvider')) {
+    $agent = Join-Path ([IO.Path]::GetFullPath($RecoveryBinaryDirectory)) 'wccs-agent.exe'
+    $session = Join-Path ([IO.Path]::GetFullPath($RecoveryBinaryDirectory)) 'wccs-session.exe'
+}
 
 function Invoke-Agent {
     param([string[]]$Arguments)
@@ -53,7 +58,9 @@ if ($Action -eq 'Recover') {
     return
 }
 if ($Action -eq 'RemoveProvider') {
-    Invoke-Agent -Arguments @('--recover-login-native', $identity, $session)
+    $recoveryFailed = $false
+    try { Invoke-Agent -Arguments @('--recover-login-native', $identity, $session) }
+    catch { $recoveryFailed = $true }
     $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
     if ($record.machine_guid -ne $machineGuid -or $record.provider -ne $providerPath) {
         throw 'Provider ownership record does not match.'
@@ -63,6 +70,7 @@ if ($Action -eq 'RemoveProvider') {
     }
     if (Test-Path $registrationPath) { Remove-Item -LiteralPath $registrationPath }
     if (Test-Path $classPath) { Remove-Item -LiteralPath $classPath }
+    if ($recoveryFailed) { throw 'Provider removed. Account or policy recovery still requires repair and Recover.' }
     return
 }
 if (-not $ProviderDll -or -not $Configuration -or -not $RecoverySecretFile) {
@@ -90,14 +98,22 @@ foreach ($directory in @($root, (Join-Path $root 'bin'), (Join-Path $root 'data'
         }
     }
 }
-Copy-Item -LiteralPath $Configuration -Destination $configPath
+if ([IO.Path]::GetFullPath($Configuration) -ne $configPath) {
+    if (Test-Path -LiteralPath $configPath) {
+        if ((Get-FileHash -LiteralPath $Configuration).Hash -ne (Get-FileHash -LiteralPath $configPath).Hash) {
+            throw 'Existing native configuration differs. Recover and review account ownership before changing it.'
+        }
+    } else { Copy-Item -LiteralPath $Configuration -Destination $configPath }
+}
 Invoke-Agent -Arguments @('--provision-login-native', $configPath, $RecoverySecretFile)
-Copy-Item -LiteralPath $ProviderDll -Destination $providerPath
+if ([IO.Path]::GetFullPath($ProviderDll) -ne $providerPath) {
+    Copy-Item -LiteralPath $ProviderDll -Destination $providerPath
+}
 @{ machine_guid = $machineGuid; provider = $providerPath; operation = [guid]::NewGuid().ToString() } |
     ConvertTo-Json | Set-Content -LiteralPath $recordPath
 New-Item -Path $classPath -Force | Out-Null
 Set-Item -Path $classPath -Value $providerPath
 New-ItemProperty -Path $classPath -Name ThreadingModel -Value Apartment -PropertyType String -Force | Out-Null
 New-Item -Path $registrationPath -Force | Out-Null
-Set-Item -Path $registrationPath -Value 'WCCS contest login test'
-Write-Output 'Test provider registered. Start the matching service explicitly.'
+Set-Item -Path $registrationPath -Value 'WCCS contest login'
+Write-Output 'Provider registered. Start the matching service explicitly.'

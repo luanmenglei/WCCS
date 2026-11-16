@@ -45,6 +45,14 @@ pwsh -NoProfile -File scripts/check-rust.ps1
 
 `--list-tools` 输出[候选工具清单](config/tool-catalog.json)。服务端负责统一维护选中工具的实际路径，M1 本地验证使用 `--tools-config local/tools.json` 读取相同字段的版本化配置。默认运行将工具状态标为未配置。职责边界见 [ADR 0004](docs/decisions/0004-server-managed-tool-paths.md)。
 
+## 首次实机离线客户端
+
+`scripts/build-client.ps1` 使用固定工具链、静态 CRT 和显式 PowerShell 7.6.9 x64 运行时目录生成离线包。`scripts/package-client.py` 使用 Python 3.11+ 标准库记录版本、源码/锁文件摘要、PE 导入与逐文件 SHA-256，固定 ZIP 条目顺序和时间。运行时许可随包交付。构建命令、实际结果见 [离线客户端交付记录](docs/tasks/offline-client.md)。
+
+解包后通过 `client.cmd` 执行 Verify、Collect、Preflight、Install、Diagnose、InitializeLogin、Recover、Upgrade、Rollback 和 RollbackInstall。每台机器先采集目标记录，再通过机器名与 MachineGuid 核验系统操作。现场使用管理员提升终端，成套 agent/session/provider/inventory 和 PowerShell 运行时随包交付。逐机注册材料、CA 和恢复账户由现场初始化。[现场操作说明](docs/tasks/offline-client-field-guide.md)
+
+已采集目标的单机测试可交付专用合并包，由 `scripts/field-test.ps1` 使用包内 PowerShell 7 调用上述入口。包内 `01-install.cmd` 完成采集、安装、启动和证据导出，`02-diagnose.cmd` 再次诊断，后续账户准备、登录初始化与恢复入口随包提供。完整客户端放在 `client/`，目标和注册材料放在 `inputs/`，真实专用包保存在忽略目录。此交付方式的版本、验证与现场待验项见 [单机合并包记录](docs/tasks/offline-client.md#单机一次传输材料2026-11-16)。
+
 ## 等待界面原型
 
 ```powershell

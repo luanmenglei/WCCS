@@ -1,5 +1,15 @@
 # M2 比赛账户、即时登录与断线撤回
 
+2026-11-16 首台物理机普通比赛账户登录通过。首轮缺少工作目录导致检查失败并恢复 teaching，现场补齐目录/权限后重新预览确认，普通账户权限、SID、工具访问和默认桌面回执通过，用户确认进入比赛账户。包装层漏建目录已修复。用户要求 Windows 首次登录欢迎和配置初始化提前在工作人员赛前准备阶段自动完成，批量准备与复原后的保持列入后续实现和验收。详见 [实机修复证据](offline-client.md#普通账户登录通过与工作目录修复2026-11-16)。
+
+2026-11-16 后续实机 InitializeLogin/Start 与八项诊断通过，教学账户启用且无待恢复项，管理端原生账户快照确认 recovery_ready=true。已创建独立合成比赛及目标座位并完成包内 PowerShell 文件检查。当前 prepare_login 预览为 session_confirmation_required，普通比赛账户尚未创建，等待工作人员保存工作并确认允许结束教学会话后接续。证据见 [登录初始化记录](offline-client.md#首台登录初始化通过2026-11-16)。
+
+2026-11-16 首台物理机完成离线合并包安装和八项联网/服务/IPC 诊断，设备注册在线。回传明确 `login_configured=false`，下一步使用包内 `03-prepare-login.cmd` 准备恢复管理员并验证其原生登录，再执行 `04-enable-login.cmd`。本轮实机的普通账户登录与教学恢复尚待结果，证据和注册窗口收尾见 [单机安装记录](offline-client.md#首台安装与联网通过2026-11-16)。
+
+2026-11-13 离线客户端补充现场 InitializeLogin、Recover、RemoveProvider 和 RollbackInstall，旧测试机名称白名单已替换为实机双身份核验。原生恢复在文件和策略访问前要求 SYSTEM，恢复任务由提升管理员在本机启动，无旧 VM 运行器依赖。命令和剩余实机验证见 [现场说明](offline-client-field-guide.md)。
+
+2026-11-13 后续独立 Win10 使用新 Linux 部署重新审核注册，机器级 CA、LocalSystem、Credential Provider 即时登录、SID/默认桌面确认及鉴权 IPC 已实测。保留旧账户所有权日志，修复旧服务器大序号阻止新鉴权连接登录的问题；断网和 Linux 整机重启后教学账户恢复、原会话及源文件保留，旧授权未重放。Windows 重启与显示环境的细分结果见 [原生联调记录](native-windows-linux.md)，不覆盖解锁、RDP 和机房镜像缺口。
+
 2026-11-12 后续等待加固将 DisableTaskMgr 的持久原值与恢复加入同一离线和本机 Recover 入口。恢复工具先取得身份排他锁，策略失败时继续尝试恢复教学账户，最终明确返回失败。普通比赛账户与提升恢复管理员的实测权限边界、连续崩溃及重启结果见 [等待加固记录](m2-waiting-hardening.md)。
 
 同轮已补验恢复管理员的真实图形登录、两个账户会话共存时跳过准备、教学 Administrator 的完整退出与比赛账户接续登录。未确认注销返回 session_confirmation_required，确认后旧管理员交互进程退出，普通比赛账户桌面回执确认。下文 2026-11-11 的待验证项按该补充更新，Credential Provider 解锁、RDP 和现场复原条件仍待验证。
@@ -25,7 +35,7 @@
 
 先在工具配置页面配置完整路径，在比赛账户页选择比赛与座位，预览当前会话、账户及恢复条件。保存教学工作后按实际需要勾选会话退出确认，再提交准备登录。完成状态必须显示目标 SID 与桌面确认。进入等待使用等待页面，显式恢复教学使用比赛账户页。失败或重连后先重新预览。
 
-原生安装使用 scripts/waiting-service.ps1 建立独立 SYSTEM 服务及受保护目录，再使用 scripts/login-test.ps1 安装测试 provider。该脚本要求 SYSTEM、WCCS-Login-Test 名称、实际 MachineGuid、停止的匹配服务和受保护安装目录。原生配置放在 data/device.login-native.json，包含机器名/GUID、比赛账户名、教学账户名、恢复账户名/SID 和明确工作目录。恢复密码通过受保护的本地 UTF-16 文件交付，调用 --provision-login-native 后保存为 DPAPI，工作人员保留离线恢复材料。
+原生安装使用 scripts/waiting-service.ps1 建立独立 SYSTEM 服务及受保护目录，再使用 scripts/login-test.ps1 安装测试 provider。当前脚本要求 SYSTEM、显式目标机器名、实际 MachineGuid、停止的匹配服务和受保护安装目录。原生配置放在 data/device.login-native.json，包含机器名/GUID、比赛账户名、教学账户名、恢复账户名/SID 和明确工作目录。恢复密码通过受保护的本地 UTF-16 文件交付，调用 --provision-login-native 后保存为 DPAPI，工作人员保留离线恢复材料。
 
 脚本的 Recover 动作可在服务器关闭及服务停止时撤回本轮 flags。RemoveProvider 动作先恢复，再校验安装记录与注册表归属后撤销 WCCS provider 注册。比赛账户及文件继续留存。固定构建入口为 scripts/build-login-provider.ps1，已纳入 check-rust.ps1。
 

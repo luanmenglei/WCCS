@@ -24,7 +24,7 @@
 
 ## Git 约定
 
-- `main` 保存可验证基线，功能使用短生命周期分支。已有任务分支继续使用。
+- `main` 保存可验证基线，功能使用短生命周期分支。同一切片沿用已有任务分支，验收并提交后合入 `main`，下一切片从该基线建立新分支。首次实机后的统一镜像部署使用 `feat/image-deployment`。
 - 提交格式为 `type(scope): summary`，例如 `feat(agent): report machine inventory`。
 - 单次提交聚焦一个可解释变更，重构与无关格式化分开处理。
 - 暂存指定文件，检查暂存区 diff，保留用户已有改动。
@@ -34,6 +34,8 @@
 - 仓库基础检查限制单文件大小为 10 MiB。大型安装包、运行数据和真实名单放在忽略目录或交付存储。应用引入时提交对应依赖锁文件。
 
 ## 代码规则
+
+Windows MSVC 的 agent、inventory、session 使用 `scripts/windows-build.rs` 嵌入 Windows 10 兼容性 manifest，避免系统文件版本资源被兼容层改写。无需额外资源编译依赖。`crates/wccs-agent/tests/wss_native.rs` 是显式忽略的外部环境测试：只在独立 Windows 测试机停止 agent 后，设置忽略目录身份文件 `WCCS_WSS_TEST_IDENTITY` 再运行，禁止与同一身份的服务同时连接；默认常规检查不会连接测试服务器。原生环境命令和失败矩阵见 [联调记录](tasks/native-windows-linux.md)。
 
 通用要求如下。
 
@@ -107,7 +109,9 @@ Linux 使用 `python3 scripts/check-linux.py` 原生构建与检查。设置 `WC
 
 Credential Provider V2 的窄 COM 边界位于 native/credential-provider，采用固定 MSVC 与 Windows SDK，build-login-provider.ps1 已纳入 check-rust.ps1。其余客户端、协议与后端继续使用既有 Rust workspace。账户 FFI 集中在 login_windows，IPC 在 login_broker，回调窗口和 COM 引用在 provider.cpp 管理。新增平台依赖仅启用现有 windows 0.61.3 的 API feature。
 
-原生系统验证仅面向明确授权的独立 Windows 测试机，安装脚本复核机器名及 MachineGuid，操作前保留关机磁盘回滚点。文件模拟适配器显式使用 --simulate-login，模拟证据与原生证据分别记录。
+原生系统验证仅面向明确指定的独立 Windows 实机，安装脚本复核机器名及 MachineGuid，操作前采集基线并准备本机教学恢复材料。用户已结束虚拟化验证，现场前使用软件回归、Linux 联调与模拟客户端。文件模拟适配器显式使用 --simulate-login，模拟证据与原生证据分别记录。
+
+离线打包入口为 `scripts/build-client.ps1`，固定 PowerShell 7.6.9 x64，自包含运行时从显式目录打包。客户端发布单独设置静态 CRT 与 `/Brepro`，现有开发检查构建继续沿用原入口。现场统一入口为包内 `client.cmd`，SCM 底层 `waiting-service.ps1` 也要求 `ExpectedMachineName` 和 `ExpectedMachineGuid`。首次安装、升级目录事务、SYSTEM 一次性恢复和脱敏导出的检查见 [离线客户端记录](tasks/offline-client.md)。
 
 ### 固定维护与脚本包开发
 

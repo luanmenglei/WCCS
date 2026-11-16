@@ -38,12 +38,14 @@ pwsh -NoProfile -File scripts/check-m2.ps1 -ServerConfig local/m2/server.json
 
 当前令牌实测为未提升管理员，`WCCS-M2-Waiting-Test` 实测未安装。本轮采用真实前台宿主完成端到端。以下 SCM 命令需提升 PowerShell，并使用指定独立目标。安装前脚本检查权限、服务配置、重解析点和父目录 ACL。
 
+以下底层命令先将 `$TargetMachineName`、`$TargetMachineGuid` 设为已采集并明确指定的实机身份。完整离线流程见 [现场操作说明](offline-client-field-guide.md)。
+
 ```powershell
-pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Install -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test' -Identity E:/project/WCCS/local/waiting-control/device/device.json
-pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Status -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test'
-pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Start -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test'
-pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Stop -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test'
-pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Uninstall -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test'
+pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Install -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test' -Identity E:/project/WCCS/local/waiting-control/device/device.json -ExpectedMachineName $TargetMachineName -ExpectedMachineGuid $TargetMachineGuid
+pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Status -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test' -ExpectedMachineName $TargetMachineName -ExpectedMachineGuid $TargetMachineGuid
+pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Start -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test' -ExpectedMachineName $TargetMachineName -ExpectedMachineGuid $TargetMachineGuid
+pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Stop -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test' -ExpectedMachineName $TargetMachineName -ExpectedMachineGuid $TargetMachineGuid
+pwsh -NoProfile -File scripts/waiting-service.ps1 -Action Uninstall -Name WCCS-M2-Waiting-Test -InstallDirectory 'C:/Program Files/WCCS-M2-Waiting-Test' -ExpectedMachineName $TargetMachineName -ExpectedMachineGuid $TargetMachineGuid
 ```
 
 安装前停止使用同一设备身份的前台宿主，避免复制身份后竞争连接。安装复制既有 credential、pending、completed、rotation 文件并建立受保护数据目录。服务为自动启动但安装结束需显式启动，运行账号 LocalSystem。卸载只移除 SCM 注册，安装目录和身份保留供运维处理。

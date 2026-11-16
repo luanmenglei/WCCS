@@ -13,7 +13,7 @@ $output = Join-Path $repositoryRoot 'artifacts/login-provider'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 Push-Location $output
 try {
-    & cl.exe /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /LD /DUNICODE /D_UNICODE (Join-Path $repositoryRoot 'native/credential-provider/provider.cpp') /Fewccs-login-provider.dll /link ("/DEF:" + (Join-Path $repositoryRoot 'native/credential-provider/provider.def')) advapi32.lib ole32.lib secur32.lib user32.lib uuid.lib
+    & cl.exe /nologo /std:c++17 /EHsc /W4 /WX /O2 /MT /LD /DUNICODE /D_UNICODE (Join-Path $repositoryRoot 'native/credential-provider/provider.cpp') /Fewccs-login-provider.dll /link /Brepro ("/DEF:" + (Join-Path $repositoryRoot 'native/credential-provider/provider.def')) advapi32.lib ole32.lib secur32.lib user32.lib uuid.lib
     if ($LASTEXITCODE -ne 0) { throw 'Credential Provider build failed.' }
 } finally {
     Pop-Location

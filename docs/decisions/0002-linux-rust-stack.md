@@ -35,6 +35,8 @@ M2 交付登录、机房座位图、选手与 IP 绑定、机器详情、批量�
 
 ## 构建与平台边界
 
+2026-11-13 已取得 Ubuntu 24.04 x86_64 内网测试服务器，沿用 Rust 1.99.1 和现有锁文件完成原生构建、Clippy、常规及 PostgreSQL 综合测试。实际部署采用 Nginx TLS/WSS、专用非 root systemd 服务、PostgreSQL 本地 socket 和随包静态资源，复现命令与生产验证缺口见 [Linux 部署记录](../tasks/linux-deployment.md)。
+
 - Rust 工程使用 Cargo workspace，协议类型和纯状态逻辑形成可在 Linux、Windows 测试的共享模块。
 - Windows API 依赖限定在 Windows 专用模块及目标依赖内，Linux 服务端仅依赖跨平台模块。
 - Windows 客户端使用 MSVC 工具链和 Windows SDK，在 Windows 构建和实测。最低系统版本、架构和运行库交付方式在 M1 固定。

@@ -32,10 +32,10 @@ pub fn bytes_digest(bytes: &[u8]) -> String {
 }
 pub fn guard_directory(path: &Path, create: bool) -> Result<Vec<fs::File>> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    if !path
-        .to_str()
-        .is_some_and(wccs_protocol::preparation::directory)
-    {
+    if !path.to_str().is_some_and(|value| {
+        wccs_protocol::preparation::directory(value)
+            || (!create && wccs_protocol::recovery::volume_root(value))
+    }) {
         return Err("target_path_invalid".into());
     }
     let mut current = PathBuf::new();

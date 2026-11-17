@@ -216,6 +216,7 @@ pub struct Native {
     journal: Journal,
     _lock: fs::File,
     broker: Broker,
+    power: crate::power::Broker,
     probe: Option<Child>,
     probe_requested: bool,
     executable: PathBuf,
@@ -408,6 +409,7 @@ impl Native {
             journal,
             _lock: lock,
             broker,
+            power: crate::power::Broker::start()?,
             probe: None,
             probe_requested: false,
             executable,
@@ -540,6 +542,7 @@ impl Native {
         {
             return Err("native_login_preview_changed".into());
         }
+        self.power.set_account(None)?;
         self.journal.sequence = command.sequence;
         self.journal.command = Some(command.clone());
         self.journal.phase = if command.action == "restore_teaching" {
@@ -645,6 +648,7 @@ impl Native {
                 }
             }
             2 => {
+                self.power.set_account(None)?;
                 if let Some(restrictions) =
                     command.login.as_ref().and_then(|p| p.restrictions.as_ref())
                 {
@@ -781,12 +785,14 @@ impl Native {
         Ok(false)
     }
     pub fn recover(&mut self) -> Result<()> {
+        self.power.set_account(None)?;
         let policy_recovery =
             crate::contest_policy::recover(&self.directory.join("contest-policy.json"));
         self.broker.revoke();
         self.probe = None;
         if self.journal.phase == "teaching" && self.journal.original_flags.is_none() {
-            return policy_recovery;
+            policy_recovery?;
+            return self.power.set_account(self.journal.account_sid.as_deref());
         }
         self.journal.phase = "recovering".into();
         self.persist()?;
@@ -822,7 +828,8 @@ impl Native {
         self.journal.phase = "teaching".into();
         self.journal.detail = "restored".into();
         self.journal.session_key = None;
-        self.persist()
+        self.persist()?;
+        self.power.set_account(self.journal.account_sid.as_deref())
     }
 }
 

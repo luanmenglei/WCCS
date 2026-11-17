@@ -34,9 +34,10 @@ fn save(path: &Path, record: &Record) -> Result<()> {
     persist(path, &serde_json::to_vec(record)?)
 }
 pub fn diagnostic_summary(path: &Path, identity: &Identity) -> Vec<serde_json::Value> {
-    let Ok(entries) = fs::read_dir(path.with_extension("maintenance")) else {
-        return vec![];
-    };
+    let entries = ["maintenance", "maintenance-v2"]
+        .into_iter()
+        .filter_map(|extension| fs::read_dir(path.with_extension(extension)).ok())
+        .flatten();
     let binding = connection::binding(identity);
     let mut records: Vec<Record> = entries
         .filter_map(|entry| {
@@ -108,7 +109,7 @@ fn poll(
     } else {
         ipc::discover(test_mode).ok()
     };
-    let input = Poll {
+    let mut input = Poll {
         schema_version: 1,
         instance_id: instance.into(),
         session_key: if simulation {
@@ -118,7 +119,7 @@ fn poll(
         },
         adapter: if test_mode { "local_test" } else { "service" }.into(),
         capabilities: if simulation {
-            vec!["recovery-v1".into()]
+            vec!["recovery-v1".into(), "recovery-v2".into()]
         } else if test_mode {
             vec!["identify-v1".into()]
         } else {
@@ -127,17 +128,27 @@ fn poll(
                 "preparation-v1".into(),
                 "competition-v1".into(),
                 "recovery-v1".into(),
+                "recovery-v2".into(),
             ]
         },
     };
-    let reply: Reply = client
-        .post(format!("{server}/api/device/maintenance/poll"))
-        .bearer_auth(credential)
-        .header("X-WCCS-Device-ID", &identity.device_id)
-        .json(&input)
-        .send()?
-        .error_for_status()?
-        .json()?;
+    let send = |input: &Poll| {
+        client
+            .post(format!("{server}/api/device/maintenance/poll"))
+            .bearer_auth(credential)
+            .header("X-WCCS-Device-ID", &identity.device_id)
+            .json(input)
+            .send()
+    };
+    let mut response = send(&input)?;
+    // Servers predating v2 reject additional capabilities. Keep their v1 operations usable.
+    if response.status() == reqwest::StatusCode::BAD_REQUEST {
+        input
+            .capabilities
+            .retain(|capability| capability != "recovery-v2");
+        response = send(&input)?;
+    }
+    let reply: Reply = response.error_for_status()?.json()?;
     if reply.schema_version != 1 {
         return Err("maintenance_protocol_mismatch".into());
     }
@@ -195,6 +206,7 @@ pub fn simulate_recovery_once(path: &Path, instance: &str) -> Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     recover(&path.with_extension("maintenance"), path)?;
+    recover(&path.with_extension("maintenance-v2"), path)?;
     cycle(
         &client,
         path,
@@ -214,7 +226,10 @@ pub fn worker(
     stop: Arc<AtomicBool>,
 ) {
     let directory = path.with_extension("maintenance");
-    if recover(&directory, path).is_err() {
+    if recover(&directory, path)
+        .and_then(|()| recover(&path.with_extension("maintenance-v2"), path))
+        .is_err()
+    {
         eprintln!("maintenance_recovery_failed");
         return;
     }
@@ -254,7 +269,14 @@ fn cycle(
     let binding = connection::binding(&identity);
     let directory = path.with_extension("maintenance");
     let mut count = 0;
-    for entry in fs::read_dir(&directory)? {
+    let directories = [directory.clone(), path.with_extension("maintenance-v2")];
+    for entry in directories
+        .iter()
+        .map(fs::read_dir)
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+    {
         let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -295,6 +317,12 @@ fn cycle(
     {
         return Err("maintenance_command_rejected".into());
     }
+    // Historical binaries only read .maintenance. Extended records survive downgrade untouched.
+    let directory = if command.template.capability() == "recovery-v2" {
+        path.with_extension("maintenance-v2")
+    } else {
+        directory
+    };
     let record_path = directory.join(format!("{}.json", command.job_id));
     if record_path.exists() {
         let record: Record = serde_json::from_slice(&fs::read(record_path)?)?;
@@ -318,11 +346,17 @@ fn cycle(
     save(&record_path, &record)?;
     post_result(client, &identity, &credential, &record)?;
     let command = record.command.clone();
-    if matches!(command.template, Template::Recovery { .. }) {
+    if let Template::Recovery { options } = &command.template {
         record.result = result(&command, "executing", "recovery_started");
         save(&record_path, &record)?;
         post_result(client, &identity, &credential, &record)?;
         let started = Instant::now();
+        let deadline = options
+            .limits
+            .as_ref()
+            .map_or(900, |limits| limits.timeout_seconds);
+        let command_digest = record.result.command_digest.clone();
+        let mut lease = None;
         let execution = crate::recovery::execute(
             path,
             &command,
@@ -333,10 +367,40 @@ fn cycle(
             },
             simulation,
             || {
-                !stop.load(Ordering::Relaxed)
-                    && started.elapsed() < Duration::from_secs(900)
-                    && connection::server(path, &identity).ok().as_deref() == Some(&server)
-                    && poll(
+                if stop.load(Ordering::Relaxed)
+                    || started.elapsed() >= Duration::from_secs(deadline)
+                {
+                    return false;
+                }
+                if lease.is_some_and(|last: Instant| last.elapsed() < Duration::from_secs(1)) {
+                    return true;
+                }
+                if connection::server(path, &identity).ok().as_deref() != Some(&server) {
+                    return false;
+                }
+                let valid = if options.limits.is_some() {
+                    let input = Poll {
+                        schema_version: 1,
+                        instance_id: instance.into(),
+                        session_key: Some(command.session_key.clone()),
+                        adapter: if test_mode { "local_test" } else { "service" }.into(),
+                        capabilities: vec!["recovery-v1".into(), "recovery-v2".into()],
+                    };
+                    client
+                        .post(format!("{server}/api/device/maintenance/authorize"))
+                        .bearer_auth(&credential)
+                        .header("X-WCCS-Device-ID", &identity.device_id)
+                        .json(&input)
+                        .send()
+                        .ok()
+                        .and_then(|response| response.error_for_status().ok())
+                        .and_then(|response| response.json::<serde_json::Value>().ok())
+                        .is_some_and(|reply| {
+                            reply["schema_version"] == 1
+                                && reply["command_digest"] == command_digest
+                        })
+                } else {
+                    poll(
                         client,
                         &server,
                         &identity,
@@ -346,9 +410,14 @@ fn cycle(
                         simulation,
                     )
                     .ok()
-                    .and_then(|r| r.command)
+                    .and_then(|reply| reply.command)
                     .as_ref()
                         == Some(&command)
+                };
+                if valid {
+                    lease = Some(Instant::now());
+                }
+                valid
             },
         );
         record.result = match execution {
@@ -696,6 +765,77 @@ pub fn identify_local(path: &Path, executable: &Path, seconds: u64) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_server_capability_rejection_falls_back_to_legacy_poll() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                    assert!(header.len() < 8192);
+                }
+                let header = String::from_utf8(header).unwrap();
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                let mut bytes = vec![0; length];
+                stream.read_exact(&mut bytes).unwrap();
+                let input: Poll = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    input.capabilities.iter().any(|cap| cap == "recovery-v2"),
+                    attempt == 0
+                );
+                assert!(input.capabilities.iter().any(|cap| cap == "recovery-v1"));
+                let (status, body) = if attempt == 0 {
+                    ("400 Bad Request", "{}")
+                } else {
+                    (
+                        "200 OK",
+                        "{\"schema_version\":1,\"server_time\":1,\"command\":null}",
+                    )
+                };
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let identity: Identity = serde_json::from_value(
+            json!({"server":server,"device_id":"synthetic","enrollment_token":"synthetic"}),
+        )
+        .unwrap();
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert!(
+            poll(
+                &client,
+                &server,
+                &identity,
+                "synthetic",
+                "instance",
+                true,
+                true
+            )
+            .unwrap()
+            .command
+            .is_none()
+        );
+        worker.join().unwrap();
+    }
     #[test]
     fn restart_converts_running_journal_without_replaying_side_effects() {
         let directory = std::env::temp_dir().join(format!("wccs-maintenance-{}", token()));

@@ -5,7 +5,17 @@ import type { Snapshot } from "./contracts";
 import type { Mutation } from "./SeatChecks";
 import { maintenanceReasons, maintenanceStages } from "./maintenance-model";
 
+const limitsSchema = z.object({
+  max_entries: z.number().int().min(1).max(100000),
+  archive_bytes: z
+    .number()
+    .int()
+    .min(0)
+    .max(512 * 1024 * 1024),
+  timeout_seconds: z.number().int().min(60).max(86400),
+});
 const optionsSchema = z.object({
+  limits: limitsSchema.optional(),
   action: z.string(),
   contest_id: z.string(),
   target: z.string(),
@@ -72,7 +82,8 @@ const details: Record<string, string> = {
   recovery_target_changed: "文件或卷发生变化，请重新检查",
   recovery_authorization_ended: "连接或授权结束，请重新检查",
   target_reparse_point: "范围内存在链接或挂载点，请现场核对",
-  recovery_capacity_exceeded: "超出本轮上限，单台 4096 项、512 MiB，请调整范围",
+  recovery_capacity_exceeded:
+    "超出本次文件数量或归档容量上限，请调整配置后重新检查",
   restore_teaching_required: "请先恢复教学并核对策略已撤回",
   recovery_io_or_transfer_failed:
     "文件占用、权限或传输失败，请保存并关闭程序后重新检查",
@@ -124,6 +135,11 @@ export function Recovery({
 }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [options, setOptions] = useState<z.infer<typeof optionsSchema>>({
+    limits: {
+      max_entries: 100000,
+      archive_bytes: 512 * 1024 * 1024,
+      timeout_seconds: 3600,
+    },
     action: "inspect",
     contest_id: contestId,
     target: "C:\\WCCS-Work",
@@ -231,8 +247,8 @@ export function Recovery({
           再次检查。文件变化或任务中断后，从检查步骤重新核对。
         </p>
         <p>
-          单台本轮上限为 4096 个文件及目录、512 MiB。整卷清理保留 Windows
-          的回收站与 System Volume Information 系统目录。
+          清理总字节数不限。归档容量仅统计选定扩展名的文件。 整卷清理保留
+          Windows 的回收站与 System Volume Information 系统目录。
         </p>
         <label>
           当前步骤
@@ -249,6 +265,65 @@ export function Recovery({
             <option value="volume">非系统卷整卷</option>
           </select>
         </label>
+        {options.limits && (
+          <fieldset disabled={options.action !== "inspect"}>
+            <legend>本次容量与执行时间</legend>
+            <label>
+              文件及目录数量上限
+              <input
+                type="number"
+                min={1}
+                max={100000}
+                value={options.limits.max_entries}
+                onChange={(e) =>
+                  setOptions({
+                    ...options,
+                    limits: {
+                      ...options.limits!,
+                      max_entries: Number(e.target.value),
+                    },
+                  })
+                }
+              />
+            </label>
+            <label>
+              归档上限（MiB，最大 512）
+              <input
+                type="number"
+                min={0}
+                max={512}
+                value={options.limits.archive_bytes / 1048576}
+                onChange={(e) =>
+                  setOptions({
+                    ...options,
+                    limits: {
+                      ...options.limits!,
+                      archive_bytes: Number(e.target.value) * 1048576,
+                    },
+                  })
+                }
+              />
+            </label>
+            <label>
+              执行时限（分钟，1～1440）
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                value={options.limits.timeout_seconds / 60}
+                onChange={(e) =>
+                  setOptions({
+                    ...options,
+                    limits: {
+                      ...options.limits!,
+                      timeout_seconds: Number(e.target.value) * 60,
+                    },
+                  })
+                }
+              />
+            </label>
+          </fieldset>
+        )}
         <label>
           实际路径
           <input

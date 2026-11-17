@@ -12,7 +12,7 @@ DOMjudge 扩展使用 RemovedInterval 保存暂停区间，冻结时间并顺延
 
 赛后恢复复用 maintenance 的权限、预览、会话确认、持久命令及回执，顺序为检查、归档或明确跳过、教学恢复、清理、重启、重新检查。前一步成功记录冻结目录、卷身份、文件及散列，原生客户端再次核验。重解析点、系统卷整卷清理、客户端自身目录和范围变化均拒绝。只清理确认清单，清理中断保留部分完成事实，后续需要新检查。
 
-一次检查限制 4096 个文件与目录、总内容 512 MiB，限制同时覆盖待归档与待清理文件，避免扫描和服务端内存无界增长。整卷模式排除回收站和 System Volume Information。更大规模需容量测试后另行调整。
+旧版恢复任务限制 4096 项、总内容 512 MiB。2026-11-17 增加 recovery-v2，数量可配置到 100000 项，清理总字节数不限，选定源文件的归档容量可配置到 512 MiB，执行时限可配置到 24 小时。旧任务和旧客户端按原能力处理，扩展任务使用独立日志目录。整卷模式排除回收站和 System Volume Information，详细边界见 [稳定性记录](../tasks/client-deployment-stability.md)。
 
 比赛策略采用系统级可移动存储 Deny_All 与 LSA 软件关机权限。先保存恢复记录再应用，记录绑定当前机器。关机策略保留 SYSTEM 和 Administrators，恢复原普通用户权限持有者。离线恢复、教学恢复和镜像封装共同调用既有恢复链。默认不启用这两项，管理员在受控登录预览中选择。
 
@@ -24,4 +24,4 @@ Windows/Linux 构建、数据库、前端、临时目录端到端和实际 DOMju
 
 ## 软件关机权限恢复边界
 
-Windows 用户权限分配在下一次登录生效。恢复 LSA 授权后，旧比赛会话令牌仍需重新登录才能获得关机权限。当前离线恢复保留程序与文件，教学管理员账户可正常使用。旧比赛会话原地恢复全部电源能力尚未完成，M5 该项继续待补，现场先保持软件关机选项关闭。实施完整恢复需补充受控本机电源入口或经确认的重新登录流程，当前包不把它计入已通过实机项。[Microsoft 用户权限说明](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/shut-down-the-system)
+Windows 用户权限分配在下一次登录生效，已有令牌无法补回缺失权限。本轮选择本机受控电源入口，教学和策略恢复成功后由服务核验比赛账户 SID 及活动控制台会话，允许显式关机或重启。桌面准备发布对应快捷方式，保留原会话即可使用，Windows 原生电源菜单在下次登录恢复。代码、鉴权与现场验证边界见 [稳定性记录](../tasks/client-deployment-stability.md)。[Microsoft 令牌说明](https://learn.microsoft.com/en-us/windows/win32/secbp/changing-privileges-in-a-token)

@@ -191,3 +191,42 @@ function Test-ImageLoginTemplate {
         $template.journal.detail -ne 'image_prepared' -or @($template.tool_paths).Count -eq 0 -or
         (ConvertTo-Json -InputObject $template.tool_paths -Compress) -ne (ConvertTo-Json -InputObject $template.journal.prepared_tool_paths -Compress)) { throw 'image_template_not_sanitized' }
 }
+
+# Decide from durable receipts, never from lexicographic version ordering.
+function Get-ImageBootPlan {
+    param([string]$Root, [string]$ImagePackage, $Identity, [string]$MachineName, [string]$MachineGuid, $Configuration)
+    $baseline = Test-ClientPackage $ImagePackage
+    $receiptPath = Join-Path $Root 'field-installation.json'
+    if (-not (Test-Path -LiteralPath $receiptPath)) {
+        if (Test-Path -LiteralPath $Root) { throw 'image_installation_receipt_missing' }
+        return @{action='Install'; package=$ImagePackage}
+    }
+    Assert-ClientTree $Root
+    Assert-ClientProtected $Root
+    $receipt = Read-ClientJson $receiptPath
+    Assert-ClientTarget $receipt.machine_name $receipt.machine_guid $MachineName $MachineGuid
+    if ($receipt.device_id -ne $Identity.device_id -or $receipt.service_name -ne $Configuration.service_name -or
+        $receipt.server -ne $Configuration.server) { throw 'image_installed_identity_conflict' }
+    if (-not $receipt.complete) { return @{action='Install'; package=$ImagePackage} }
+    $update = Join-Path $Root 'data/update.json'
+    if (Test-Path -LiteralPath $update) {
+        $journal = Read-ClientJson $update
+        if ($journal.status -notin @('committed','rolled_back')) {
+            return @{action='Rollback'; package=$ImagePackage}
+        }
+    }
+    $installed = Read-ClientJson (Join-Path $Root 'installed-package.json')
+    if ($installed.version -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$') { throw 'image_installed_version_invalid' }
+    if ($installed.state_schema -ne $baseline.state_schema) { throw 'image_state_version_mismatch' }
+    Test-ClientBinaries (Join-Path $Root 'bin') $installed
+    $support = Join-Path $Root ('packages/' + $installed.version)
+    if (Test-Path -LiteralPath $support) {
+        $manifest = Test-ClientPackage $support
+        if (($manifest | ConvertTo-Json -Depth 32 -Compress) -ne ($installed | ConvertTo-Json -Depth 32 -Compress)) {
+            throw 'image_installed_package_conflict'
+        }
+        return @{action='Start'; package=$support}
+    }
+    # Older upgrades retained binaries only. The schema-compatible baseline can start them.
+    return @{action='Start'; package=$ImagePackage}
+}

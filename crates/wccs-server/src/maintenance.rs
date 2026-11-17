@@ -232,8 +232,11 @@ pub async fn commit(
             identity: serde_json::from_value(target["identity"].clone())
                 .map_err(|_| ApiError::internal())?,
             expires_at: now()
-                + if matches!(input.template, Template::Recovery { .. }) {
-                    900
+                + if let Template::Recovery { options } = &input.template {
+                    options
+                        .limits
+                        .as_ref()
+                        .map_or(900, |limits| limits.timeout_seconds as i64)
                 } else {
                     180
                 },
@@ -283,19 +286,35 @@ pub async fn poll(
     State(app): State<App>,
     headers: HeaderMap,
     Json(input): Json<Poll>,
-) -> ApiResult<Json<Reply>> {
+) -> ApiResult<Json<Value>> {
+    poll_response(app, headers, input, false).await
+}
+pub async fn authorize(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<Poll>,
+) -> ApiResult<Json<Value>> {
+    poll_response(app, headers, input, true).await
+}
+async fn poll_response(
+    app: App,
+    headers: HeaderMap,
+    input: Poll,
+    compact: bool,
+) -> ApiResult<Json<Value>> {
     if input.schema_version != 1
         || !valid_id(&input.instance_id)
         || input.session_key.as_ref().is_some_and(|s| !valid_id(s))
         || !["service", "local_test"].contains(&input.adapter.as_str())
         || input.capabilities.is_empty()
-        || input.capabilities.len() > 4
+        || input.capabilities.len() > 16
         || input.capabilities.iter().any(|c| {
             ![
                 "identify-v1",
                 "preparation-v1",
                 "competition-v1",
                 "recovery-v1",
+                "recovery-v2",
             ]
             .contains(&c.as_str())
         })
@@ -310,7 +329,7 @@ pub async fn poll(
         instance_id=$2,session_key=$3,adapter=$4,capabilities=$5,last_seen=$6",
         &[&device,&input.instance_id,&input.session_key,&input.adapter,&json!(input.capabilities),&now()]).await?;
     // Recheck credentials, actor authority, connection and identity on every active lease.
-    let row=tx.query_opt("SELECT j.command FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id
+    let row=tx.query_opt("SELECT CASE WHEN $5 THEN to_jsonb(j.command_digest) ELSE j.command END FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id
         JOIN operators o ON o.id=j.actor_id JOIN control_devices c ON c.device_id=d.id
         WHERE d.id=$1 AND d.lifecycle='enabled' AND j.stage IN ('queued','accepted','executing') AND j.expires_at>$2 AND NOT j.cancel_requested
         AND o.enabled AND o.version=j.actor_version AND o.role<>'viewer'
@@ -323,17 +342,23 @@ pub async fn poll(
         AND (j.command->'preparation' IS NULL OR (c.actual->'account'->>'adapter'='windows_test' AND c.actual->'account'->>'phase'='controlled' AND c.actual->'account'->>'account'='owned' AND c.actual->'account'->>'desktop_confirmed'='true' AND c.actual->'account'->>'target_sid'=c.actual->'account'->>'observed_sid'))
         AND (j.command->'preparation' IS NULL OR ((j.command->'preparation'->>'version')::bigint=(SELECT max(version) FROM preparation_profiles) AND (j.command->'preparation'->'profile'->>'tool_version')::bigint=(SELECT version FROM configuration_head WHERE id=1)))
         AND (j.command->'identity'->>'room_id'='' OR EXISTS(SELECT 1 FROM rooms r JOIN seats s ON s.room_id=r.id WHERE r.id=j.command->'identity'->>'room_id' AND r.version=(j.command->'identity'->>'room_version')::bigint AND s.id=j.command->'identity'->>'seat_id' AND s.expected_ip=d.observed_ip))
-        ORDER BY j.created_at,j.id LIMIT 1",&[&device,&now(),&input.instance_id,&input.session_key]).await?;
-    let command = row
-        .map(|r| serde_json::from_value(r.get(0)))
+        ORDER BY j.created_at,j.id LIMIT 1",&[&device,&now(),&input.instance_id,&input.session_key,&compact]).await?;
+    let value: Option<Value> = row.map(|row| row.get(0));
+    tx.commit().await?;
+    if compact {
+        return Ok(Json(
+            json!({"schema_version":1,"server_time":now(),"command_digest":value}),
+        ));
+    }
+    let command: Option<Command> = value
+        .map(serde_json::from_value)
         .transpose()
         .map_err(|_| ApiError::internal())?;
-    tx.commit().await?;
-    Ok(Json(Reply {
+    Ok(Json(json!(Reply {
         schema_version: 1,
         server_time: now(),
-        command,
-    }))
+        command
+    })))
 }
 
 pub async fn result(
@@ -360,7 +385,8 @@ pub async fn result(
                 .recovery
                 .as_ref()
                 .ok_or_else(|| ApiError::bad("恢复结果缺少范围清单"))?;
-            if manifest.target != options.target
+            if !manifest.valid_for(options)
+                || manifest.target != options.target
                 || (options.scope == "volume" && manifest.volume.system)
                 || command
                     .recovery

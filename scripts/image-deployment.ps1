@@ -133,8 +133,18 @@ try {
         server=$configuration.server; ca_sha256=$configuration.ca_sha256
     }
     $step = 'install'
-    & $runtime -NoProfile -NonInteractive -File (Join-Path $package 'scripts/client-field.ps1') -Action Install -Target $target -Identity $identity -CaCertificate (Join-Path $imageRoot 'ca.crt') *> $null
-    if ($LASTEXITCODE -ne 0) { throw 'installation_failed' }
+    $plan = Get-ImageBootPlan $configuration.install_directory $package (Read-ClientJson $identity) $machineName $machineGuid $configuration
+    if ($plan.action -eq 'Rollback') {
+        & $runtime -NoProfile -NonInteractive -File (Join-Path $package 'scripts/client-field.ps1') -Action Rollback -Target $target *> $null
+        if ($LASTEXITCODE -ne 0) { throw 'bootstrap_update_rollback_failed' }
+        $plan = Get-ImageBootPlan $configuration.install_directory $package (Read-ClientJson $identity) $machineName $machineGuid $configuration
+    }
+    $package = $plan.package
+    $runtime = Join-Path $package 'runtime/pwsh.exe'
+    if ($plan.action -eq 'Install') {
+        & $runtime -NoProfile -NonInteractive -File (Join-Path $package 'scripts/client-field.ps1') -Action Install -Target $target -Identity $identity -CaCertificate (Join-Path $imageRoot 'ca.crt') *> $null
+        if ($LASTEXITCODE -ne 0) { throw 'installation_failed' }
+    }
     $step = 'support_packages'
     if (Test-Path -LiteralPath (Join-Path $imageRoot 'support-packages')) {
         Copy-ImageSupportPackages (Join-Path $imageRoot 'support-packages') (Join-Path $configuration.install_directory 'packages') (Join-Path $stateRoot 'support-staging')

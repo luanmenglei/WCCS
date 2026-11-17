@@ -25,6 +25,8 @@ mod login_windows;
 #[cfg(windows)]
 mod maintenance;
 #[cfg(windows)]
+mod power;
+#[cfg(windows)]
 mod preparation;
 #[cfg(windows)]
 mod presentation;
@@ -42,6 +44,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();
+        if args.get(1).is_some_and(|arg| arg == "--power") {
+            if args.len() != 3 {
+                return Err("用法 --power shutdown|restart".into());
+            }
+            power::request(&args[2]).map_err(|_| "power_request_failed")?;
+            return Ok(());
+        }
         if args.get(1).is_some_and(|arg| arg == "--recovery-test") {
             if args.len() != 4 {
                 return Err("用法 --recovery-test TEMPORARY_IDENTITY SIMULATION_INSTANCE".into());

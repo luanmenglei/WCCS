@@ -157,3 +157,7 @@ M3～M5 本轮软件与材料已交付，软件关机会话恢复边界及最终
 ## 软件关机权限恢复边界
 
 Windows 用户权限分配在下一次登录生效。恢复 LSA 授权后，旧比赛会话令牌仍需重新登录才能获得关机权限。当前离线恢复保留程序与文件，教学管理员账户可正常使用。旧比赛会话原地恢复全部电源能力尚未完成，M5 该项继续待补，现场先保持软件关机选项关闭。实施完整恢复需补充受控本机电源入口或经确认的重新登录流程，当前包不把它计入已通过实机项。[Microsoft 用户权限说明](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/shut-down-the-system)
+
+## 客户端后续收尾（2026-11-17）
+
+上节关机恢复已补充本机受控电源入口，同时扩展清理容量及镜像开机版本恢复。新软件状态与验证见 [稳定性记录](client-deployment-stability.md)，历史材料 v6 保留原实现说明。

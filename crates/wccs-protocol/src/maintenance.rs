@@ -12,7 +12,9 @@ pub enum Template {
 }
 impl Template {
     pub fn capability(&self) -> &str {
-        if matches!(self, Self::Recovery { .. }) {
+        if matches!(self, Self::Recovery { options } if options.limits.is_some()) {
+            "recovery-v2"
+        } else if matches!(self, Self::Recovery { .. }) {
             "recovery-v1"
         } else if matches!(self, Self::Identify { .. }) {
             "identify-v1"

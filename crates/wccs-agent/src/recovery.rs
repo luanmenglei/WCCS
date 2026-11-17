@@ -129,16 +129,20 @@ fn scan(
     };
     let mut pending = vec![root.to_path_buf()];
     let mut total = 0u64;
+    let max_entries = options
+        .limits
+        .as_ref()
+        .map_or(MAX_FILES, |limits| limits.max_entries);
+    let archive_limit = options
+        .limits
+        .as_ref()
+        .map_or(MAX_BYTES, |limits| limits.archive_bytes);
     while let Some(directory) = pending.pop() {
         if !authorized() {
             return Err("recovery_authorization_ended".into());
         }
-        tree.guards
-            .extend(file_transaction::guard_directory(&directory, false)?);
-        let mut entries = fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let path = entry.path();
+        for entry in fs::read_dir(&directory)? {
+            let path = entry?.path();
             let relative = path
                 .strip_prefix(root)?
                 .to_str()
@@ -154,12 +158,16 @@ fn scan(
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
                 return Err("target_reparse_point".into());
             }
-            if tree.manifest.files.len() + tree.manifest.directories.len() >= MAX_FILES {
+            if tree.manifest.files.len() + tree.manifest.directories.len() >= max_entries {
                 return Err("recovery_capacity_exceeded".into());
             }
             if metadata.is_dir() {
-                tree.guards
-                    .extend(file_transaction::guard_directory(&path, false)?);
+                // Ancestors are already retained. Keep one additional guard for this directory.
+                tree.guards.push(
+                    file_transaction::guard_directory(&path, false)?
+                        .pop()
+                        .ok_or("recovery_path_invalid")?,
+                );
                 tree.manifest.directories.push(relative);
                 pending.push(path);
                 continue;
@@ -170,15 +178,18 @@ fn scan(
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
                 .open(&path)?;
             let metadata = file.metadata()?;
-            total = total
-                .checked_add(metadata.len())
-                .ok_or("recovery_capacity_exceeded")?;
+            let collect = options.limits.is_none() || options.collects(&relative);
+            if collect {
+                total = total
+                    .checked_add(metadata.len())
+                    .ok_or("recovery_capacity_exceeded")?;
+            }
             if !metadata.is_file()
                 || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
             {
                 return Err("target_reparse_point".into());
             }
-            if total > MAX_BYTES {
+            if total > archive_limit {
                 return Err("recovery_capacity_exceeded".into());
             }
             use sha2::{Digest, Sha256};
@@ -193,7 +204,9 @@ fn scan(
                 file.read_exact(&mut bytes)?;
                 remaining -= bytes.len() as u64;
                 digest.update(&bytes);
-                hashes.push(bytes_digest(&bytes));
+                if collect {
+                    hashes.push(bytes_digest(&bytes));
+                }
             }
             tree.manifest.files.push(File {
                 path: relative,
@@ -204,7 +217,16 @@ fn scan(
             tree.files.push(file);
         }
     }
-    if !tree.manifest.valid() {
+    let mut files: Vec<_> = tree
+        .manifest
+        .files
+        .drain(..)
+        .zip(tree.files.drain(..))
+        .collect();
+    files.sort_by(|left, right| left.0.path.cmp(&right.0.path));
+    (tree.manifest.files, tree.files) = files.into_iter().unzip();
+    tree.manifest.directories.sort();
+    if !tree.manifest.valid_for(options) {
         return Err("recovery_manifest_invalid".into());
     }
     Ok(tree)
@@ -219,6 +241,9 @@ pub fn execute(
     let Template::Recovery { options } = &command.template else {
         return Err("recovery_template_required".into());
     };
+    if !options.valid() {
+        return Err("recovery_options_invalid".into());
+    }
     let root = target(identity, command, options, simulation)?;
     let mut tree = scan(
         &root,
@@ -396,6 +421,49 @@ fn request_reboot(identity: &Path, job: &str, simulation: bool) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn extended_scan_accepts_large_cleanup_and_more_than_legacy_entries() {
+        let root =
+            std::env::temp_dir().join(format!("wccs-large-recovery-{}", wccs_protocol::token()));
+        fs::create_dir(&root).unwrap();
+        let file = fs::File::create(root.join("large.bin")).unwrap();
+        file.set_len(MAX_BYTES + 1).unwrap();
+        drop(file);
+        for index in 0..4100 {
+            fs::create_dir(root.join(format!("directory-{index:04}"))).unwrap();
+        }
+        let mut options = Options {
+            limits: Some(wccs_protocol::recovery::Limits {
+                max_entries: 5000,
+                archive_bytes: MAX_BYTES,
+                timeout_seconds: 3600,
+            }),
+            action: "inspect".into(),
+            contest_id: "test".into(),
+            target: root.to_string_lossy().into(),
+            scope: "workspace".into(),
+            extensions: vec!["cpp".into()],
+            skip_reason: String::new(),
+            previous_request: None,
+            confirm_session_end: false,
+        };
+        let tree = scan(&root, &options, true, false, &mut || true).unwrap();
+        assert_eq!(tree.manifest.directories.len(), 4100);
+        assert_eq!(tree.manifest.files[0].size, MAX_BYTES + 1);
+        assert!(tree.manifest.files[0].hashes.is_empty());
+        assert!(fs::write(root.join("large.bin"), b"changed").is_err());
+        drop(tree);
+        options.limits = None;
+        assert!(scan(&root, &options, true, false, &mut || true).is_err());
+        options.limits = Some(wccs_protocol::recovery::Limits {
+            max_entries: 5000,
+            archive_bytes: MAX_BYTES,
+            timeout_seconds: 3600,
+        });
+        options.extensions = vec!["bin".into()];
+        assert!(scan(&root, &options, true, false, &mut || true).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn cleanup_stops_after_authority_loss_and_preserves_remaining_files() {
         let directory =
             std::env::temp_dir().join(format!("wccs-cleanup-{}", wccs_protocol::token()));
@@ -406,6 +474,7 @@ mod tests {
         fs::write(root.join("a.cpp"), b"a").unwrap();
         fs::write(root.join("b.cpp"), b"b").unwrap();
         let options = Options {
+            limits: None,
             action: "clean".into(),
             contest_id: "test".into(),
             target: root.to_string_lossy().into(),
@@ -448,6 +517,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(root.join("main.cpp"), b"int main(){}").unwrap();
         let options = Options {
+            limits: None,
             action: "inspect".into(),
             contest_id: "test".into(),
             target: root.to_string_lossy().into(),

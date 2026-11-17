@@ -89,7 +89,11 @@ impl Drop for Com {
     }
 }
 fn shortcut(target: &str, temporary: &Path) -> Result<Vec<u8>> {
+    shortcut_with_arguments(target, "", temporary)
+}
+fn shortcut_with_arguments(target: &str, arguments: &str, temporary: &Path) -> Result<Vec<u8>> {
     let target = wccs_session::ipc::wide(target);
+    let arguments = wccs_session::ipc::wide(arguments);
     let file = wccs_session::ipc::wide(temporary);
     // SAFETY: COM objects stay on this initialized thread. ShellLink copies the strings.
     unsafe {
@@ -97,6 +101,7 @@ fn shortcut(target: &str, temporary: &Path) -> Result<Vec<u8>> {
         let _com = Com;
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
         link.SetPath(PCWSTR(target.as_ptr()))?;
+        link.SetArguments(PCWSTR(arguments.as_ptr()))?;
         let persist: IPersistFile = link.cast()?;
         persist.Save(PCWSTR(file.as_ptr()), true)?;
     }
@@ -206,6 +211,19 @@ pub fn execute(
                     }
                 };
                 updates.push((root.join(format!("{}.{}", link.name(), extension)), bytes));
+            }
+            for (name, action) in [("恢复后关机", "shutdown"), ("恢复后重启", "restart")]
+            {
+                updates.push((
+                    root.join(format!("{name}.lnk")),
+                    shortcut_with_arguments(
+                        std::env::current_exe()?
+                            .to_str()
+                            .ok_or("power_path_invalid")?,
+                        &format!("--power {action}"),
+                        &directory.join(format!("{}-{action}.lnk", command.job_id)),
+                    )?,
+                ));
             }
             "desktop_updated"
         }

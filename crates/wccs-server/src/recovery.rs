@@ -61,7 +61,7 @@ pub(crate) async fn plan(
     let manifest = result
         .recovery
         .ok_or_else(|| ApiError::conflict("前一步缺少文件清单"))?;
-    if !manifest.valid()
+    if !manifest.valid_for(options)
         || manifest.target != options.target
         || (options.scope == "volume" && manifest.volume.system)
     {

@@ -176,3 +176,36 @@ $null = Test-ClientPackage (Join-Path $supportDestination 'old-runtime')
 [IO.File]::WriteAllText((Join-Path $supportDestination 'old-runtime/runtime/pwsh.exe'), 'external change')
 Assert-Rejected { Copy-ImageSupportPackages $supportSource $supportDestination $supportStaging }
 Write-Output 'client_common_checks_passed'
+
+# Package/receipt selection uses synthetic files under the caller's temporary root.
+function Assert-ClientProtected { param([string]$Path) }
+$bootImage = Join-Path $Root 'boot-image'
+$baseline = New-PackageFixture $bootImage 'baseline'
+$bootRoot = Join-Path $Root 'boot-install'
+$bootIdentity = @{device_id='image-synthetic'}
+$bootConfiguration = @{service_name='WCCS-Test'; server='https://example.test'}
+$plan = Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-41' $guid $bootConfiguration
+Assert-True ($plan.action -eq 'Install') 'fresh_image_did_not_install'
+New-Item -ItemType Directory -Path (Join-Path $bootRoot 'data') -Force | Out-Null
+Assert-Rejected { Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-41' $guid $bootConfiguration }
+$bootReceipt = @{machine_name='503-41'; machine_guid=$guid; device_id='image-synthetic'; service_name='WCCS-Test'; server='https://example.test'; complete=$false}
+Write-ClientJson (Join-Path $bootRoot 'field-installation.json') $bootReceipt
+Assert-True ((Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-41' $guid $bootConfiguration).action -eq 'Install') 'partial_install_did_not_retry'
+$newPackage = Join-Path $bootRoot 'packages/new-version'
+$newManifest = New-PackageFixture $newPackage 'new-version'
+Copy-Item -LiteralPath (Join-Path $newPackage 'bin') -Destination (Join-Path $bootRoot 'bin') -Recurse
+Write-ClientJson (Join-Path $bootRoot 'installed-package.json') $newManifest
+$bootReceipt.complete = $true
+Write-ClientJson (Join-Path $bootRoot 'field-installation.json') $bootReceipt
+$plan = Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-41' $guid $bootConfiguration
+Assert-True ($plan.action -eq 'Start' -and $plan.package -eq $newPackage) 'boot_reverted_upgraded_package'
+Assert-Rejected { Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-42' $guid $bootConfiguration }
+Assert-Rejected { Get-ImageBootPlan $bootRoot $bootImage @{device_id='other'} '503-41' $guid $bootConfiguration }
+Write-ClientJson (Join-Path $bootRoot 'data/update.json') @{schema_version=1;status='prepared'}
+Assert-True ((Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-41' $guid $bootConfiguration).action -eq 'Rollback') 'partial_upgrade_did_not_recover'
+Write-ClientJson (Join-Path $bootRoot 'data/update.json') @{schema_version=1;status='rolled_back'}
+Assert-True ((Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-41' $guid $bootConfiguration).action -eq 'Start') 'rollback_did_not_start'
+$newManifest.state_schema = 2
+Write-ClientJson (Join-Path $bootRoot 'installed-package.json') $newManifest
+Assert-Rejected { Get-ImageBootPlan $bootRoot $bootImage $bootIdentity '503-41' $guid $bootConfiguration }
+Write-Output 'image_boot_version_checks_passed'

@@ -381,6 +381,7 @@ try {
             }
             Stop-ClientService
             Invoke-SystemOperation 'Recover'
+            $null = Save-SupportPackage
             Update-ClientBinaries $root $package $manifest
             Write-Output 'upgrade_complete_service_stopped_run_start_then_diagnose'
         }

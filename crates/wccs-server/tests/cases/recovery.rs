@@ -2,6 +2,76 @@ use super::*;
 
 #[tokio::test]
 #[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn recovery_v2_negotiates_capacity_and_compact_authorization() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let mut runtime = json!({"schema_version":1,"instance_id":"host-one","session_key":"session-one","adapter":"service","capabilities":["recovery-v1"]});
+    expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    let mut input = json!({"request_id":token(),"template_version":1,"targets":["device-1"],"template":{"operation":"recovery","options":{"action":"inspect","contest_id":"contest","target":"C:\\Contest","scope":"workspace","extensions":["cpp"],"skip_reason":"","previous_request":null,"confirm_session_end":false,"limits":{"max_entries":10000,"archive_bytes":536870912,"timeout_seconds":3600}}}});
+    let preview = expect_ok(f.admin.post("maintenance/preview", &input).await).await;
+    assert_eq!(preview["targets"][0]["reason"], "unsupported_client");
+    runtime["capabilities"] = json!(["recovery-v1", "recovery-v2"]);
+    expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    let preview = expect_ok(f.admin.post("maintenance/preview", &input).await).await;
+    assert!(preview["targets"][0]["reason"].is_null());
+    input["preview_token"] = preview["preview_token"].clone();
+    expect_ok(f.admin.post("maintenance/commit", &input).await).await;
+    let command = expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await["command"]
+        .clone();
+    let digest = wccs_protocol::digest(&command.to_string());
+    let lease = expect_ok(
+        f.admin
+            .device("maintenance/authorize", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    assert_eq!(lease["command_digest"], digest);
+    assert!(lease.get("command").is_none());
+    let report = json!({"schema_version":1,"job_id":command["job_id"],"command_digest":digest,"stage":"accepted","detail":"persisted"});
+    expect_ok(
+        f.admin
+            .device("maintenance/result", &f.credential, &report)
+            .await,
+    )
+    .await;
+    expect_ok(
+        f.admin
+            .post(
+                "maintenance/cancel",
+                &json!({"request_id":token(),"job_id":command["job_id"]}),
+            )
+            .await,
+    )
+    .await;
+    let lease = expect_ok(
+        f.admin
+            .device("maintenance/authorize", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    assert!(lease["command_digest"].is_null());
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
 async fn recovery_requires_verified_archive_confirmation_and_frozen_target() {
     let f = Fixture::new().await;
     let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;

@@ -260,3 +260,7 @@ M2 开始验收管理界面，后续阶段逐项增加页面对应场景。每�
 ## 软件关机权限恢复边界
 
 Windows 用户权限分配在下一次登录生效。恢复 LSA 授权后，旧比赛会话令牌仍需重新登录才能获得关机权限。当前离线恢复保留程序与文件，教学管理员账户可正常使用。旧比赛会话原地恢复全部电源能力尚未完成，M5 该项继续待补，现场先保持软件关机选项关闭。实施完整恢复需补充受控本机电源入口或经确认的重新登录流程，当前包不把它计入已通过实机项。[Microsoft 用户权限说明](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/shut-down-the-system)
+
+## 客户端稳定性补充（2026-11-17）
+
+部署前收尾覆盖本机电源 IPC、可配置清理容量、旧协议与任务日志兼容、镜像开机版本选择及升级中断恢复。设计、自动化检查和待实机项统一见 [任务记录](tasks/client-deployment-stability.md)。

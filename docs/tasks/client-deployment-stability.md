@@ -41,3 +41,20 @@ C 盘完整复原仍按镜像中的版本重新安装，随机生成本轮注册
 启用 recovery-v2 需要同时部署本轮后端、Web 和 Nginx 配置。回执上传的专用入口放宽到 128 MiB，其他接口沿用既有限制。本轮使用隔离测试服务，实际部署服务仍需安排更新。
 
 原生电源、实际复原及全场容量保持待验状态。下一步按用户安排，在指定代表机验证新增快捷方式、升级后普通重启和 C 盘真实复原，再决定客户端冻结。
+
+
+## 本地交付
+
+源码提交为 `0e1ff85`，分支为 `fix/client-deployment-stability`。客户端版本为 `0.3.0-stable.20261117.1`，固定静态 CRT、MSVC/SDK 和 PowerShell 7.6.9，通过以下命令生成。
+
+```powershell
+pwsh -NoProfile -File scripts/build-client.ps1 -Version 0.3.0-stable.20261117.1 -PowerShellRuntime 'E:\project\WCCS\local\offline-client-tests\actual package 4\runtime' -Output artifacts/client-stability/wccs-client-0.3.0-stable.20261117.1.zip
+python scripts/package-image.py --client artifacts/client-stability/wccs-client-0.3.0-stable.20261117.1.zip --ca local/linux-deployment/ca.crt --mother-target local/m3-m5/mother-target.json --output artifacts/client-stability/WCCS-503-41-stability-v1.zip
+python local/m3-m5/verify-stability-package.py
+```
+
+- 通用客户端包 `artifacts/client-stability/wccs-client-0.3.0-stable.20261117.1.zip`，109888157 字节，SHA-256 为 `09201587362e8a9881e29f3092d065f1e2a283a4211401aedab042d568a207c9`。
+- 503-41 配套包 `artifacts/client-stability/WCCS-503-41-stability-v1.zip`，109975684 字节，SHA-256 为 `3f3562bb14b4f61da6af615dc2ecf1455c0be80bf98100d21396a7d576d5840b`。沿用既有明确母机目标和公开 CA，包含 956 个清单文件。
+- 实际解包验证通过所有文件大小与摘要、构建源码摘要、嵌入脚本逐字一致、密封载荷 Check 和错误机器身份拒绝，设备私密材料检查通过。结果见 `artifacts/client-stability/package-verification.json`。
+
+本轮交付留在本地，现场机器按用户安排另行更新和验收。

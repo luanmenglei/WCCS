@@ -64,6 +64,7 @@ export const deviceSchema = z.object({
   lifecycle_version: z.number().int(),
   agent_version: z.string().nullable().default(null),
   application_id: z.string().nullable(),
+  image_managed: z.boolean().optional(),
   application_at: z.number().nullable(),
   enrollment_expires: z.number(),
   enrollment_generation: z.number().int(),
@@ -82,6 +83,31 @@ export const deviceSchema = z.object({
   received_at: z.number().nullable(),
 });
 export const stateSchema = z.object({
+  image_applications: z
+    .array(
+      z.object({
+        id: z.string(),
+        device_id: z.string(),
+        machine_name: z.string(),
+        observed_ip: z.string().nullable(),
+        previous_ip: z.string().nullable(),
+        created_at: z.number(),
+        expires_at: z.number(),
+        base_version: z.number().int(),
+        generation: z.number().int(),
+        competing: z.number().int(),
+        online: z.boolean(),
+        bootstrap_status: z.enum([
+          "",
+          "ready",
+          "bootstrap_failed",
+          "support_packages_failed",
+          "login_template_failed",
+          "service_start_failed",
+        ]),
+      }),
+    )
+    .optional(),
   roster: rosterSchema.default({ version: 0, contests: [] }),
   registration_window: z.object({
     version: z.number().int(),

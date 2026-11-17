@@ -17,6 +17,165 @@ use wccs_protocol::{
 use wccs_session::ipc::{self, Child};
 const DISABLED: u32 = 2;
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ImageTemplate {
+    schema_version: u32,
+    config: Config,
+    journal: Journal,
+    tool_paths: Vec<String>,
+}
+
+fn validate_image_template(source: &ImageTemplate) -> Result<()> {
+    if source.schema_version != 1
+        || source.journal.schema != 1
+        || source.journal.device != "image-template"
+        || !source.journal.desktop_prepared
+        || source.journal.phase != "teaching"
+        || source.journal.original_flags.is_some()
+        || source.journal.command.is_some()
+        || source.journal.creating_account
+        || source.journal.session_key.is_some()
+        || !source.journal.machine_guid.is_empty()
+        || !source.config.machine_name.is_empty()
+        || !source.config.machine_guid.is_empty()
+        || source.tool_paths.is_empty()
+    {
+        return Err("image_template_not_recovered".into());
+    }
+    Ok(())
+}
+
+fn image_identity_lock(identity: &Path) -> Result<fs::File> {
+    if !ipc::is_system()? {
+        return Err("image_template_requires_system".into());
+    }
+    use std::os::windows::fs::OpenOptionsExt;
+    Ok(fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(identity.with_extension("lock"))?)
+}
+
+pub fn export_image(identity: &Path, executable: PathBuf, output: &Path) -> Result<()> {
+    let _lock = image_identity_lock(identity)?;
+    let device: crate::windows_agent::Identity = serde_json::from_slice(&fs::read(identity)?)?;
+    let mut native = Native::open(
+        &identity.with_extension("login-native.json"),
+        &device.device_id,
+        executable,
+    )?;
+    native.recover()?;
+    native.check_recovery()?;
+    native.check_tools(&native.journal.prepared_tool_paths)?;
+    if !native.journal.desktop_prepared {
+        return Err("mother_desktop_preparation_required".into());
+    }
+    let _guard = crate::file_transaction::guard_directory(output, true)?;
+    for entry in fs::read_dir(output)? {
+        let entry = entry?;
+        if ![
+            "template.json",
+            "contest.dpapi",
+            "recovery.dpapi",
+            "template.durable.tmp",
+            "contest.durable.tmp",
+            "recovery.durable.tmp",
+        ]
+        .contains(&entry.file_name().to_string_lossy().as_ref())
+        {
+            return Err("image_template_unknown_material".into());
+        }
+    }
+    for name in ["contest.dpapi", "recovery.dpapi"] {
+        crate::windows_agent::persist(&output.join(name), &fs::read(native.directory.join(name))?)
+            .map_err(|_| "image_secret_copy_failed")?;
+    }
+    native.config.machine_name.clear();
+    native.config.machine_guid.clear();
+    native.journal.device = "image-template".into();
+    native.journal.machine_guid.clear();
+    let tool_paths = native.journal.prepared_tool_paths.clone();
+    native.journal.command = None;
+    native.journal.sequence = 0;
+    native.journal.revision = 0;
+    native.journal.step = 0;
+    native.journal.session_key = None;
+    native.journal.detail = "image_prepared".into();
+    persist(
+        &output.join("template.json"),
+        &ImageTemplate {
+            schema_version: 1,
+            config: native.config.clone(),
+            journal: native.journal,
+            tool_paths,
+        },
+    )
+}
+
+pub fn import_image(template: &Path, identity: &Path) -> Result<()> {
+    let _lock = image_identity_lock(identity)?;
+    let _guard = crate::file_transaction::guard_directory(template, false)?;
+    let mut source: ImageTemplate =
+        serde_json::from_slice(&fs::read(template.join("template.json"))?)?;
+    validate_image_template(&source)?;
+    let device: crate::windows_agent::Identity = serde_json::from_slice(&fs::read(identity)?)?;
+    if !device.image_enrollment {
+        return Err("image_identity_required".into());
+    }
+    let account = platform::user(&source.config.account_name)?.ok_or("image_account_missing")?;
+    let teaching = platform::user(&source.config.teaching_name)?.ok_or("image_teaching_missing")?;
+    if source.journal.account_sid.as_deref() != Some(&account.sid)
+        || account.comment != source.journal.owner
+        || account.flags & DISABLED != 0
+        || teaching.flags & DISABLED != 0
+        || teaching.sid != source.journal.teaching_sid
+    {
+        return Err("image_account_ownership_mismatch".into());
+    }
+    let secret = platform::unprotect(&template.join("contest.dpapi"))?;
+    let token = platform::authenticate(&source.config.account_name, &secret)?;
+    if platform::administrator(token.0)? || platform::token_sid(token.0)? != account.sid {
+        return Err("image_contest_account_invalid".into());
+    }
+    platform::check_access(token.0, &source.tool_paths, &source.config.work_directory)?;
+    let recovery = platform::unprotect(&template.join("recovery.dpapi"))?;
+    let recovery_token = platform::authenticate(&source.config.recovery_name, &recovery)?;
+    if !platform::administrator(recovery_token.0)?
+        || platform::token_sid(recovery_token.0)? != source.config.recovery_sid
+    {
+        return Err("image_recovery_account_invalid".into());
+    }
+    source.config.machine_name = wccs_inventory::host_name()?;
+    source.config.machine_guid = platform::machine_guid()?;
+    source.journal.machine_guid = source.config.machine_guid.clone();
+    source.journal.device = device.device_id;
+    let path = identity.with_extension("login-native.json");
+    if path.exists() {
+        let existing = config(&path)?;
+        let journal: Journal = serde_json::from_slice(&fs::read(
+            path.with_extension("state").join("journal.json"),
+        )?)?;
+        if serde_json::to_value(existing)? != serde_json::to_value(&source.config)?
+            || journal.device != source.journal.device
+            || journal.owner != source.journal.owner
+        {
+            return Err("image_existing_account_binding_conflict".into());
+        }
+        return Ok(());
+    }
+    let directory = path.with_extension("state");
+    let _destination_guard = crate::file_transaction::guard_directory(&directory, true)?;
+    platform::protect(&directory.join("contest.dpapi"), &secret)?;
+    platform::protect(&directory.join("recovery.dpapi"), &recovery)?;
+    persist(&directory.join("journal.json"), &source.journal)?;
+    // Configuration is published last. The service cannot open an incomplete import.
+    persist(&path, &source.config)
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -46,6 +205,10 @@ struct Journal {
     step: u8,
     original_flags: Option<u32>,
     session_key: Option<String>,
+    #[serde(default)]
+    desktop_prepared: bool,
+    #[serde(default)]
+    prepared_tool_paths: Vec<String>,
 }
 pub struct Native {
     config: Config,
@@ -54,6 +217,7 @@ pub struct Native {
     _lock: fs::File,
     broker: Broker,
     probe: Option<Child>,
+    probe_requested: bool,
     executable: PathBuf,
     stage_started: u64,
     recovery_ready: bool,
@@ -91,6 +255,30 @@ fn config(path: &Path) -> Result<Config> {
 }
 
 /// Reuse the provisioned account identity and DPAPI secret without changing login state.
+pub fn recovery_target(identity: &Path, device: &str, teaching: bool) -> Result<PathBuf> {
+    let path = identity.with_extension("login-native.json");
+    let config = config(&path)?;
+    let directory = path.with_extension("state");
+    let journal: Journal = serde_json::from_slice(&fs::read(directory.join("journal.json"))?)?;
+    if journal.device != device
+        || journal.machine_guid != config.machine_guid
+        || journal.creating_account
+        || !["controlled", "teaching"].contains(&journal.phase.as_str())
+    {
+        return Err("recovery_identity_changed".into());
+    }
+    if teaching
+        && (journal.phase != "teaching"
+            || journal.original_flags.is_some()
+            || crate::contest_policy::state(&directory.join("contest-policy.json")).state
+                != "ready"
+            || identity.with_extension("waiting-policy.json").exists())
+    {
+        return Err("restore_teaching_required".into());
+    }
+    Ok(config.work_directory)
+}
+
 pub fn maintenance_account(
     identity_path: &Path,
     device: &str,
@@ -201,6 +389,8 @@ impl Native {
                 step: 0,
                 original_flags: None,
                 session_key: None,
+                desktop_prepared: false,
+                prepared_tool_paths: Vec::new(),
             };
             persist(&journal_path, &journal)?;
         }
@@ -219,6 +409,7 @@ impl Native {
             _lock: lock,
             broker,
             probe: None,
+            probe_requested: false,
             executable,
             stage_started: 0,
             recovery_ready: false,
@@ -227,7 +418,15 @@ impl Native {
         let _ = result.recover();
         result.reconcile_account_creation()?;
         result.recovery_ready = result.check_recovery().is_ok();
-        result.tools_ready = result.check_tools().is_ok();
+        let paths = result
+            .journal
+            .command
+            .as_ref()
+            .and_then(|c| c.login.as_ref())
+            .map_or(result.journal.prepared_tool_paths.as_slice(), |plan| {
+                plan.tool_paths.as_slice()
+            });
+        result.tools_ready = result.check_tools(paths).is_ok();
         Ok(result)
     }
     fn persist(&mut self) -> Result<()> {
@@ -260,7 +459,7 @@ impl Native {
         self.journal.creating_account = false;
         self.persist()
     }
-    fn check_tools(&self) -> Result<()> {
+    fn check_tools(&self, paths: &[String]) -> Result<()> {
         let user = platform::user(&self.config.account_name)?.ok_or("contest_account_missing")?;
         if user.comment != self.journal.owner
             || self.journal.account_sid.as_deref() != Some(&user.sid)
@@ -273,13 +472,6 @@ impl Native {
         if platform::token_sid(token.0)? != user.sid {
             return Err("account_sid_changed".into());
         }
-        let paths = &self
-            .journal
-            .command
-            .as_ref()
-            .and_then(|c| c.login.as_ref())
-            .ok_or("tool_snapshot_missing")?
-            .tool_paths;
         platform::check_access(token.0, paths, &self.config.work_directory)
     }
     pub fn state(&self) -> AccountState {
@@ -303,6 +495,9 @@ impl Native {
         .ok();
         let session_key = ipc::discover(false).ok().map(|s| s.key);
         AccountState {
+            policy: Some(crate::contest_policy::state(
+                &self.directory.join("contest-policy.json"),
+            )),
             adapter: "windows_test".into(),
             revision: self.journal.revision,
             phase: self.journal.phase.clone(),
@@ -327,6 +522,12 @@ impl Native {
             return Ok(());
         }
         let plan = command.login.as_ref().ok_or("native_login_plan_missing")?;
+        if plan.restrictions.as_ref().is_some_and(|r| r.enabled())
+            && self.state().session == "contest"
+            && !plan.confirm_session_end
+        {
+            return Err("contest_policy_session_confirmation_required".into());
+        }
         if !crate::login::sequence_is_new(
             self.journal.command.as_ref(),
             self.journal.sequence,
@@ -409,7 +610,13 @@ impl Native {
                         .as_deref()
                         .ok_or("contest_sid_missing")?,
                 )?;
-                self.check_tools()?;
+                self.check_tools(
+                    &command
+                        .login
+                        .as_ref()
+                        .ok_or("tool_snapshot_missing")?
+                        .tool_paths,
+                )?;
                 self.tools_ready = true;
             }
             1 => {
@@ -417,7 +624,13 @@ impl Native {
                     self.journal.account_sid.as_deref(),
                     &self.journal.teaching_sid,
                 )?;
-                if session.kind == "teaching"
+                if (session.kind == "teaching"
+                    || (session.kind == "contest"
+                        && command
+                            .login
+                            .as_ref()
+                            .and_then(|p| p.restrictions.as_ref())
+                            .is_some_and(|r| r.enabled())))
                     && command
                         .login
                         .as_ref()
@@ -432,6 +645,14 @@ impl Native {
                 }
             }
             2 => {
+                if let Some(restrictions) =
+                    command.login.as_ref().and_then(|p| p.restrictions.as_ref())
+                {
+                    crate::contest_policy::apply(
+                        &self.directory.join("contest-policy.json"),
+                        restrictions,
+                    )?;
+                }
                 let session = platform::console(
                     self.journal.account_sid.as_deref(),
                     &self.journal.teaching_sid,
@@ -509,6 +730,7 @@ impl Native {
                 }
                 if self.probe.is_none() {
                     self.probe = Some(Child::start(&self.executable, &session, false)?);
+                    self.probe_requested = false;
                 }
                 let probe = self.probe.as_mut().unwrap();
                 if !probe.ready()? {
@@ -521,14 +743,25 @@ impl Native {
                     {
                         return Err("native_desktop_evidence_invalid".into());
                     }
+                    crate::contest_policy::verify(&self.directory.join("contest-policy.json"))?;
                     self.journal.session_key = Some(session.key);
                     self.journal.phase = "controlled".into();
                     self.journal.detail = "desktop_observed".into();
+                    self.journal.desktop_prepared = true;
+                    self.journal.prepared_tool_paths = command
+                        .login
+                        .as_ref()
+                        .ok_or("tool_snapshot_missing")?
+                        .tool_paths
+                        .clone();
                     self.probe = None;
                     self.persist()?;
                     return Ok(true);
                 }
                 let mut probe_command = command.clone();
+                if self.probe_requested {
+                    return Ok(false);
+                }
                 probe_command.action = "probe_desktop".into();
                 probe_command.session_key = session.key;
                 probe_command.login.as_mut().unwrap().snapshot.target_sid =
@@ -539,6 +772,7 @@ impl Native {
                     command: probe_command,
                     lease_seconds: 5,
                 })?;
+                self.probe_requested = true;
                 return Ok(false);
             }
         }
@@ -547,10 +781,12 @@ impl Native {
         Ok(false)
     }
     pub fn recover(&mut self) -> Result<()> {
+        let policy_recovery =
+            crate::contest_policy::recover(&self.directory.join("contest-policy.json"));
         self.broker.revoke();
         self.probe = None;
         if self.journal.phase == "teaching" && self.journal.original_flags.is_none() {
-            return Ok(());
+            return policy_recovery;
         }
         self.journal.phase = "recovering".into();
         self.persist()?;
@@ -574,7 +810,8 @@ impl Native {
                 }
             }
             Ok(())
-        })();
+        })()
+        .and(policy_recovery);
         if result.is_err() {
             self.journal.phase = "recovery_failed".into();
             self.journal.detail = "recovery_conflict".into();
@@ -586,5 +823,51 @@ impl Native {
         self.journal.detail = "restored".into();
         self.journal.session_key = None;
         self.persist()
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixture() -> serde_json::Value {
+        json!({"schema_version":1,"config":{"machine_guid":"","machine_name":"",
+            "account_name":"WccsContest","teaching_name":"Administrator","recovery_name":"WccsRecovery",
+            "recovery_sid":"S-1-5-21-1-2-3-1001","work_directory":"C:/WCCS-Work"},
+            "journal":{"schema":1,"device":"image-template","machine_guid":"","owner":"WCCS:synthetic",
+            "account_sid":"S-1-5-21-1-2-3-1002","creating_account":false,"teaching_sid":"S-1-5-21-1-2-3-500",
+            "revision":0,"sequence":0,"command":null,"phase":"teaching","detail":"image_prepared",
+            "step":0,"original_flags":null,"session_key":null,"desktop_prepared":true},
+            "tool_paths":["C:/Tools/compiler.exe"]})
+    }
+
+    #[test]
+    fn image_template_requires_real_desktop_recovery_and_tools() {
+        let input = fixture();
+        let template: ImageTemplate = serde_json::from_value(input.clone()).unwrap();
+        validate_image_template(&template).unwrap();
+        assert_eq!(template.tool_paths, vec!["C:/Tools/compiler.exe"]);
+        for (field, value) in [
+            ("desktop_prepared", json!(false)),
+            ("phase", json!("controlled")),
+            ("original_flags", json!(512)),
+            ("session_key", json!("old-session")),
+            ("machine_guid", json!("mother-guid")),
+            ("creating_account", json!(true)),
+        ] {
+            let mut invalid = input.clone();
+            invalid["journal"][field] = value;
+            assert!(validate_image_template(&serde_json::from_value(invalid).unwrap()).is_err());
+        }
+        let mut missing = input.clone();
+        missing["tool_paths"] = json!([]);
+        assert!(validate_image_template(&serde_json::from_value(missing).unwrap()).is_err());
+        let mut legacy = input;
+        legacy["journal"]
+            .as_object_mut()
+            .unwrap()
+            .remove("desktop_prepared");
+        assert!(validate_image_template(&serde_json::from_value(legacy).unwrap()).is_err());
     }
 }

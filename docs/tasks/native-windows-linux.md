@@ -105,3 +105,12 @@ Linux PostgreSQL、Nginx、WCCS 保持 active / enabled，临时 ACK 代理已�
 | wccs-login-provider.dll | `DFC9C4D5B86B37E0B22A68F89BEB634EC33B857D3C3CF9857599104D76AEBC9C` |
 
 用户随后决定清理虚拟化环境，Windows 热重启及长期无交互等待/WSS 转入首次实机复核。软件开发和自动化加固继续推进，执行顺序以路线图最新记录为准。
+
+## 统一镜像接续（2026-11-16）
+
+新增母机普通账户模板导出、克隆重绑定及活动桌面/Windows Shell 探测。开发机仅执行构建和隔离文件回归，本轮完整 SAM/DPAPI、用户配置文件、首次欢迎与 C 盘复原尚无新增实机证据，503-41 既有单机通过记录仍保留。详见 [镜像记录](image-deployment.md) 和 [现场说明](image-deployment-field-guide.md)。
+
+
+## M3～M5 原生待验（2026-11-17）
+
+软件和模拟检查已通过，503-41 接续验证普通账户 compilecpp/submit、DOMjudge 与桌面暂停、可移动存储和软件关机限制、断网策略恢复、指定工作目录归档清理、真实重启和 C 盘整盘复原。开始前先更新并导出诊断，现场步骤见 [单机说明](m3-m5-field-guide.md)。开发机本轮只使用独立目录模拟，无原生系统修改。

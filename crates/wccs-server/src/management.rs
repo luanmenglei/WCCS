@@ -34,6 +34,7 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
         .query(
             "SELECT d.id, d.name, d.last_seen, d.boot_id, d.agent_version,
                 d.credential_hash IS NOT NULL AS registered, d.desired_job,
+                EXISTS(SELECT 1 FROM image_applications a WHERE a.device_id=d.id) AS image_managed,
                 d.lifecycle,d.lifecycle_version,d.application_id,d.application_at,d.enrollment_expires,
                 d.enrollment_generation,d.rotation_id,d.rotation_expires,
                 j.config_version, j.expires_at, r.result, r.received_at, r.id AS result_job,
@@ -62,6 +63,7 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
         let expires: Option<i64> = row.get("expires_at");
         json!({
             "id":row.get::<_,String>("id"), "name":row.get::<_,String>("name"),
+            "image_managed":row.get::<_,bool>("image_managed"),
             "health":row.get::<_,Option<Value>>("health_report"),
             "health_received_at":row.get::<_,Option<i64>>("health_received_at"),
             "diagnostics":row.get::<_,Option<Value>>("diagnostic_report"),
@@ -89,6 +91,9 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
     let seating = crate::seating::snapshot(&tx).await?;
     let roster = crate::roster::snapshot(&tx).await?;
     let mut value = json!({"identity":identity,"roster":roster,"registration_window":registration_window,"seating":seating,"protocol_version":1,"server_time":now(),"version":version,"configuration":configuration,"targets":targets,"catalog":serde_json::from_str::<Value>(TOOL_CATALOG).unwrap()["tools"],"devices":devices});
+    if identity.role == "admin" && identity.all_rooms {
+        value["image_applications"] = crate::image::snapshot(&tx).await?;
+    }
     if !identity.all_rooms {
         let allowed: Vec<String>=tx.query("SELECT id FROM devices WHERE cardinality(device_room_scope(id))>0 AND device_room_scope(id)<@$1",&[&identity.room_ids]).await?.iter().map(|r|r.get(0)).collect();
         restrict_state(&mut value, &identity.room_ids, &allowed);

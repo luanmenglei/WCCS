@@ -57,7 +57,24 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
         let instance: Option<String> = row.get("instance_id");
         let session: Option<String> = row.get("session_key");
         let capabilities: Option<Value> = row.get("capabilities");
-        let reason = if row.get::<_, String>("lifecycle") != "enabled" {
+        let recovery = if let Template::Recovery { options } = &input.template {
+            crate::recovery::plan(
+                tx,
+                options,
+                id,
+                instance.as_deref().unwrap_or(""),
+                row.get("enrollment_generation"),
+            )
+            .await?
+        } else {
+            None
+        };
+        let reason = if matches!(&input.template,Template::Recovery {options} if ["clean","reboot"].contains(&options.action.as_str()))
+            && row.get::<_, Option<Value>>("actual").is_none_or(|a| {
+                a["account"]["phase"] != "teaching" || a["account"]["policy"]["state"] != "ready"
+            }) {
+            Some("restore_teaching_required")
+        } else if row.get::<_, String>("lifecycle") != "enabled" {
             Some("device_disabled")
         } else if !row
             .get::<_, Option<i64>>("last_seen")
@@ -72,8 +89,13 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
         } else if session.is_none() {
             Some("no_session")
         } else if capabilities.as_ref().is_none_or(|v| {
-            !v.as_array()
-                .is_some_and(|caps| caps.iter().any(|c| c == input.template.capability()))
+            !v.as_array().is_some_and(|caps| {
+                caps.iter().any(|c| c == input.template.capability())
+                    && (preparation
+                        .as_ref()
+                        .is_none_or(|p| p.profile.competition.is_none())
+                        || caps.iter().any(|c| c == "competition-v1"))
+            })
         }) {
             Some("unsupported_client")
         } else if preparation.is_some()
@@ -133,7 +155,7 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
                 }
             }
         }
-        targets.push(json!({"device_id":id,"name":row.get::<_,String>("name"),"reason":reason,
+        targets.push(json!({"recovery":recovery,"device_id":id,"name":row.get::<_,String>("name"),"reason":reason,
             "generation":row.get::<_,i64>("enrollment_generation"),"device_version":row.get::<_,i64>("lifecycle_version"),
             "address_version":row.get::<_,i64>("address_version"),"instance_id":instance,"session_key":session,
             "adapter":row.get::<_,Option<String>>("adapter"),"identity":identity}));
@@ -194,6 +216,8 @@ pub async fn commit(
         .filter(|t| t["reason"].is_null())
     {
         let command = Command {
+            recovery: serde_json::from_value(target["recovery"].clone())
+                .map_err(|_| ApiError::internal())?,
             preparation: serde_json::from_value(plan["preparation"].clone())
                 .map_err(|_| ApiError::internal())?,
             schema_version: 1,
@@ -207,13 +231,27 @@ pub async fn commit(
             instance_id: target["instance_id"].as_str().unwrap().into(),
             identity: serde_json::from_value(target["identity"].clone())
                 .map_err(|_| ApiError::internal())?,
-            expires_at: now() + 180,
+            expires_at: now()
+                + if matches!(input.template, Template::Recovery { .. }) {
+                    900
+                } else {
+                    180
+                },
             template: input.template.clone(),
         };
         let value = serde_json::to_value(&command).unwrap();
         tx.execute("INSERT INTO maintenance_jobs(id,request_id,device_id,command,command_digest,actor_id,actor_version,room_ids,created_at,expires_at,updated_at)
             VALUES($1,$2,$3,$4,$5,$6,$7,device_room_scope($3),$8,$9,$8)",
             &[&command.job_id,&command.request_id,&command.device_id,&value,&digest(&value.to_string()),&identity.id,&identity.version,&now(),&command.expires_at]).await?;
+        if let Template::Recovery { options } = &command.template
+            && options.action == "archive"
+        {
+            tx.execute(
+                "INSERT INTO recovery_archives(job_id,snapshot,options) VALUES($1,$2,$3)",
+                &[&command.job_id, &json!(command.recovery), &json!(options)],
+            )
+            .await?;
+        }
         jobs.push(json!({"job_id":command.job_id,"device_id":command.device_id}));
     }
     let receipt = json!({"request_id":input.request_id,"jobs":jobs,"preview":plan});
@@ -251,11 +289,16 @@ pub async fn poll(
         || input.session_key.as_ref().is_some_and(|s| !valid_id(s))
         || !["service", "local_test"].contains(&input.adapter.as_str())
         || input.capabilities.is_empty()
-        || input.capabilities.len() > 2
-        || input
-            .capabilities
-            .iter()
-            .any(|c| !["identify-v1", "preparation-v1"].contains(&c.as_str()))
+        || input.capabilities.len() > 4
+        || input.capabilities.iter().any(|c| {
+            ![
+                "identify-v1",
+                "preparation-v1",
+                "competition-v1",
+                "recovery-v1",
+            ]
+            .contains(&c.as_str())
+        })
     {
         return Err(ApiError::bad("维护能力或会话格式无效"));
     }
@@ -305,10 +348,33 @@ pub async fn result(
     let tx = db.transaction().await?;
     crate::seating::lock(&tx).await?;
     let device = auth::device(&tx, &headers).await?;
-    let row=tx.query_opt("SELECT j.result,j.command_digest,j.stage,j.request_id,j.room_ids FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id WHERE j.id=$1 AND j.device_id=$2 AND (j.command->>'generation')::bigint=d.enrollment_generation",&[&input.job_id,&device]).await?
+    let row=tx.query_opt("SELECT j.result,j.command_digest,j.stage,j.request_id,j.room_ids,j.command FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id WHERE j.id=$1 AND j.device_id=$2 AND (j.command->>'generation')::bigint=d.enrollment_generation",&[&input.job_id,&device]).await?
         .ok_or_else(||ApiError::forbidden("维护任务不属于此设备"))?;
     if row.get::<_, String>(1) != input.command_digest {
         return Err(ApiError::conflict("维护内容摘要不匹配"));
+    }
+    let command: Command = serde_json::from_value(row.get(5)).map_err(|_| ApiError::internal())?;
+    if let Template::Recovery { options } = &command.template {
+        if input.stage == "succeeded" {
+            let manifest = input
+                .recovery
+                .as_ref()
+                .ok_or_else(|| ApiError::bad("恢复结果缺少范围清单"))?;
+            if manifest.target != options.target
+                || (options.scope == "volume" && manifest.volume.system)
+                || command
+                    .recovery
+                    .as_ref()
+                    .is_some_and(|snapshot| &snapshot.manifest != manifest)
+            {
+                return Err(ApiError::conflict("恢复结果与批准范围不同"));
+            }
+            if options.action=="archive" && !tx.query_one("SELECT EXISTS(SELECT 1 FROM recovery_archives WHERE job_id=$1 AND verified)",&[&input.job_id]).await?.get::<_,bool>(0) {
+                return Err(ApiError::conflict("归档尚未核验"));
+            }
+        }
+    } else if input.recovery.is_some() {
+        return Err(ApiError::bad("模板不接受恢复清单"));
     }
     let previous: Option<Value> = row.get(0);
     let stage: String = row.get(2);

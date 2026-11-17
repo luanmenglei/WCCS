@@ -4,6 +4,16 @@ import { api } from "./api";
 import { DetailsDialog } from "./DetailsDialog";
 
 export const eventSchema = z.object({
+  handling: z
+    .object({
+      version: z.number(),
+      status: z.enum(["open", "acknowledged", "resolved"]),
+      note: z.string(),
+      actor_id: z.string(),
+      updated_at: z.number(),
+    })
+    .nullable()
+    .optional(),
   id: z.string(),
   source: z.string(),
   source_id: z.string(),
@@ -70,6 +80,7 @@ const categories: Record<string, string> = {
   historical: "历史来源",
 };
 const outcomes: Record<string, string> = {
+  warning: "设备变化告警",
   succeeded: "成功",
   failed: "执行失败",
   accepted: "设备已接收",
@@ -81,7 +92,16 @@ const outcomes: Record<string, string> = {
   unknown: "未知",
 };
 
-export function Events() {
+export function Events({
+  csrf,
+  disabled,
+}: {
+  csrf: string;
+  disabled: boolean;
+}) {
+  const [note, setNote] = useState("");
+  const [handling, setHandling] = useState("acknowledged");
+  const [saving, setSaving] = useState(false);
   const [filters, setFilters] = useState<Record<string, string>>(() => ({
     request_id:
       new URLSearchParams(location.hash.split("?")[1]).get("request_id") ?? "",
@@ -143,7 +163,11 @@ export function Events() {
       const value = eventSchema.parse(
         await api(`events/${encodeURIComponent(id)}`),
       );
-      if (owner === detailsSequence.current) setDetail(value);
+      if (owner === detailsSequence.current) {
+        setDetail(value);
+        setNote(value.handling?.note ?? "");
+        setHandling(value.handling?.status ?? "acknowledged");
+      }
     } catch (error) {
       if (owner === detailsSequence.current)
         setError(error instanceof Error ? error.message : "详情读取失败");
@@ -389,6 +413,63 @@ export function Events() {
               <a href="#/operators">查看操作员</a>
             )}
           </div>
+          <h3>告警与事件处置</h3>
+          <p>
+            {detail.handling
+              ? `最近处理人 ${detail.handling.actor_id} · ${new Date(detail.handling.updated_at * 1000).toLocaleString("zh-CN")}`
+              : "尚无处置记录"}
+          </p>
+          <label>
+            处理状态
+            <select
+              value={handling}
+              disabled={disabled || saving}
+              onChange={(e) => setHandling(e.target.value)}
+            >
+              <option value="open">待处理</option>
+              <option value="acknowledged">已接手</option>
+              <option value="resolved">已处理</option>
+            </select>
+          </label>
+          <label>
+            处置说明
+            <textarea
+              value={note}
+              disabled={disabled || saving}
+              maxLength={1000}
+              onChange={(e) => setNote(e.target.value)}
+            />
+          </label>
+          <button
+            disabled={disabled || saving || !note.trim()}
+            onClick={async () => {
+              setSaving(true);
+              setError("");
+              try {
+                await api(
+                  "events/action",
+                  {
+                    request_id: crypto.randomUUID(),
+                    event_id: Number(detail.id),
+                    version: detail.handling?.version ?? 0,
+                    status: handling,
+                    note,
+                  },
+                  csrf,
+                );
+                await inspect(detail.id);
+                await load(query);
+              } catch (error) {
+                setError(
+                  error instanceof Error ? error.message : "处置保存失败",
+                );
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            保存处置
+          </button>
           <h3>持久结果</h3>
           <pre className="event-detail">
             {JSON.stringify(detail.detail, null, 2)}

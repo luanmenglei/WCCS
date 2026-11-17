@@ -3,7 +3,11 @@
 #[cfg(windows)]
 mod connection;
 #[cfg(windows)]
+mod contest_policy;
+#[cfg(windows)]
 mod diagnostics;
+#[cfg(windows)]
+mod distribution;
 #[cfg(windows)]
 mod file_transaction;
 #[cfg(windows)]
@@ -25,6 +29,8 @@ mod preparation;
 #[cfg(windows)]
 mod presentation;
 #[cfg(windows)]
+mod recovery;
+#[cfg(windows)]
 mod service;
 #[cfg(windows)]
 mod waiting_policy;
@@ -36,6 +42,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();
+        if args.get(1).is_some_and(|arg| arg == "--recovery-test") {
+            if args.len() != 4 {
+                return Err("用法 --recovery-test TEMPORARY_IDENTITY SIMULATION_INSTANCE".into());
+            }
+            maintenance::simulate_recovery_once(std::path::Path::new(&args[2]), &args[3])?;
+            println!("recovery_simulation_cycle_complete");
+            return Ok(());
+        }
+        if args.get(1).is_some_and(|arg| arg == "--distribution-test") {
+            if args.len() != 3 {
+                return Err("用法 --distribution-test TEMPORARY_IDENTITY".into());
+            }
+            distribution::simulate_once(std::path::Path::new(&args[2]))
+                .map_err(|_| "distribution_simulation_failed")?;
+            println!("distribution_simulation_cycle_complete");
+            return Ok(());
+        }
+        if args.get(1).is_some_and(|a| a == "--export-login-template") {
+            if args.len() != 5 {
+                return Err("用法 --export-login-template IDENTITY SESSION_EXE OUTPUT".into());
+            }
+            login_native::export_image(
+                std::path::Path::new(&args[2]),
+                args[3].clone().into(),
+                std::path::Path::new(&args[4]),
+            )
+            .map_err(|_| "login_template_export_failed")?;
+            println!("login_template_exported");
+            return Ok(());
+        }
+        if args.get(1).is_some_and(|a| a == "--import-login-template") {
+            if args.len() != 4 {
+                return Err("用法 --import-login-template TEMPLATE IDENTITY".into());
+            }
+            login_native::import_image(
+                std::path::Path::new(&args[2]),
+                std::path::Path::new(&args[3]),
+            )
+            .map_err(|_| "login_template_import_failed")?;
+            println!("login_template_imported");
+            return Ok(());
+        }
         if args.get(1).is_some_and(|a| a == "--health") && args.len() == 3 {
             println!(
                 "{}",

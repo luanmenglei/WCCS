@@ -116,6 +116,45 @@ pub struct Profile {
     pub script_directory: String,
     pub links: Vec<Link>,
     pub package: Option<Package>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub competition: Option<Competition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Competition {
+    pub compiler_tool_id: String,
+    pub compiler_arguments: Vec<String>,
+    pub judge_url: String,
+    pub contest_id: String,
+    pub language_id: String,
+}
+
+pub fn domjudge_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 36
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+impl Competition {
+    pub fn valid(&self) -> bool {
+        valid_id(&self.compiler_tool_id)
+            && domjudge_id(&self.contest_id)
+            && domjudge_id(&self.language_id)
+            && self.judge_url.starts_with("https://")
+            && self.judge_url.len() <= 2048
+            && !self.judge_url.chars().any(char::is_control)
+            && self.compiler_arguments.len() <= 32
+            && self.compiler_arguments.iter().all(|argument| {
+                !argument.is_empty()
+                    && argument.len() <= 256
+                    && !argument.chars().any(char::is_control)
+            })
+    }
 }
 impl Profile {
     pub fn valid(&self) -> bool {
@@ -146,6 +185,18 @@ impl Profile {
                 .len()
                 == self.links.len()
             && self.package.as_ref().is_none_or(Package::valid)
+            && self.competition.as_ref().is_none_or(|competition| {
+                competition.valid()
+                    && self.package.as_ref().is_some_and(|package| {
+                        ["compilecpp.ps1", "submit.ps1", "contest-common.ps1"]
+                            .iter()
+                            .all(|name| package.files.iter().any(|file| file.path == *name))
+                            && !package
+                                .files
+                                .iter()
+                                .any(|file| file.path.eq_ignore_ascii_case("contest.json"))
+                    })
+            })
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -172,6 +223,16 @@ pub struct Step {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn domjudge_ids_match_clics_length_and_boundaries() {
+        for id in ["a", "a-b.c_d", &"a".repeat(36)] {
+            assert!(super::domjudge_id(id));
+        }
+        for id in ["", "-a", "a_", "a/b", "中文", &"a".repeat(37)] {
+            assert!(!super::domjudge_id(id));
+        }
+    }
+
     #[test]
     fn rejects_package_traversal_device_names_and_path_aliases() {
         for path in [

@@ -5,6 +5,15 @@ use waiting_tests::{poll, socket_for};
 #[path = "capacity.rs"]
 mod capacity;
 
+#[path = "distribution.rs"]
+mod distribution;
+
+#[path = "recovery.rs"]
+mod recovery;
+
+#[path = "contest_control.rs"]
+mod contest_control;
+
 struct Fixture {
     admin: Harness,
     app: wccs_server::App,
@@ -30,6 +39,7 @@ impl Fixture {
         .unwrap();
         let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
         let (mut admin, server, app) = start_with_app(Config {
+            domjudge_config: None,
             bind: "127.0.0.1:0".into(),
             origin: String::new(),
             database_url: format!(
@@ -118,6 +128,185 @@ impl Fixture {
 
 fn observation() -> Value {
     json!({"protocol_version":1,"instance_id":"host-one","session_key":"session-one","capabilities":["waiting-v1"],"actual":{"state":"desktop","command_id":null,"session_key":null,"monitors":0,"detail":"standby"},"report":null})
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn image_registration_window_approval_retry_and_conflict() {
+    let f = Fixture::new().await;
+    let key = wccs_protocol::image_device_id("503-41").unwrap();
+    let input = json!({"machine_name":"503-41","registration":{"protocol_version":1,"device_id":key,
+        "enrollment_token":token(),"device_token":token()}});
+    assert_eq!(
+        f.admin.device("image-register", "", &input).await.status(),
+        409
+    );
+    f.db.execute(
+        "UPDATE registration_window SET closes_at=$1",
+        &[&(wccs_protocol::now() + 3600)],
+    )
+    .await
+    .unwrap();
+    let first = expect_ok(f.admin.device("image-register", "", &input).await).await;
+    assert_eq!(first["status"], "pending");
+    assert_eq!(
+        f.admin
+            .device("register", "", &input["registration"])
+            .await
+            .status(),
+        401
+    );
+    f.db.execute("UPDATE registration_window SET closes_at=0", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        expect_ok(f.admin.device("image-register", "", &input).await).await
+    );
+    f.db.execute(
+        "UPDATE image_applications SET expires_at=0,observed_ip='192.0.2.99'",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        expect_ok(f.admin.device("image-register", "", &input).await).await["status"],
+        "expired"
+    );
+    let state = f.admin.state().await;
+    let application = &state["image_applications"][0];
+    assert_eq!(application["machine_name"], "503-41");
+    assert_eq!(application["observed_ip"], "127.0.0.1");
+    let approve = json!({"request_id":token(),"approve":true,"targets":[{
+        "application_id":first["application_id"],"base_version":application["base_version"]}]});
+    let approved = expect_ok(f.admin.post("images/action", &approve).await).await;
+    assert_eq!(
+        approved,
+        expect_ok(f.admin.post("images/action", &approve).await).await
+    );
+    assert_eq!(
+        expect_ok(f.admin.device("image-register", "", &input).await).await["status"],
+        "enabled"
+    );
+    let heartbeat = json!({"protocol_version":1,"boot_id":token(),"agent_version":"image-test","reported_ips":[]});
+    expect_ok(
+        f.admin
+            .device(
+                "heartbeat",
+                input["registration"]["device_token"].as_str().unwrap(),
+                &heartbeat,
+            )
+            .await,
+    )
+    .await;
+    let mut restored = input.clone();
+    restored["registration"]["enrollment_token"] = token().into();
+    restored["registration"]["device_token"] = token().into();
+    assert_eq!(
+        f.admin
+            .device("image-register", "", &restored)
+            .await
+            .status(),
+        409
+    );
+    f.db.execute(
+        "UPDATE registration_window SET closes_at=$1",
+        &[&(wccs_protocol::now() + 3600)],
+    )
+    .await
+    .unwrap();
+    let second = expect_ok(f.admin.device("image-register", "", &restored).await).await;
+    assert_eq!(first["device_id"], second["device_id"]);
+    let state = f.admin.state().await;
+    let application = &state["image_applications"][0];
+    let replace = json!({"request_id":token(),"approve":true,"targets":[{
+        "application_id":second["application_id"],"base_version":application["base_version"]}]});
+    assert_eq!(f.admin.post("images/action", &replace).await.status(), 409);
+    f.db.execute("UPDATE devices SET last_seen=0 WHERE id=$1", &[&key])
+        .await
+        .unwrap();
+    expect_ok(f.admin.post("images/action", &replace).await).await;
+    assert_eq!(
+        f.admin
+            .device(
+                "heartbeat",
+                input["registration"]["device_token"].as_str().unwrap(),
+                &heartbeat
+            )
+            .await
+            .status(),
+        401
+    );
+    expect_ok(
+        f.admin
+            .device(
+                "heartbeat",
+                restored["registration"]["device_token"].as_str().unwrap(),
+                &heartbeat,
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(
+        f.db.query_one("SELECT count(*) FROM devices WHERE id=$1", &[&key])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+    let mut invalid = restored.clone();
+    invalid["machine_name"] = "503-42".into();
+    assert_eq!(
+        f.admin
+            .device("image-register", "", &invalid)
+            .await
+            .status(),
+        400
+    );
+    let serialized = f.admin.state().await.to_string();
+    for value in [&input, &restored] {
+        assert!(!serialized.contains(value["registration"]["device_token"].as_str().unwrap()));
+        assert!(!serialized.contains(value["registration"]["enrollment_token"].as_str().unwrap()));
+    }
+    let mut batch = Vec::new();
+    for (name, status) in [("503-42", "ready"), ("503-43", "bootstrap_failed")] {
+        let registration = json!({"machine_name":name,"bootstrap_status":status,"registration":{
+            "protocol_version":1,"device_id":wccs_protocol::image_device_id(name).unwrap(),
+            "enrollment_token":token(),"device_token":token()}});
+        let result = expect_ok(f.admin.device("image-register", "", &registration).await).await;
+        batch.push(json!({"application_id":result["application_id"],"base_version":1}));
+    }
+    let failed_batch = json!({"request_id":token(),"approve":true,"targets":batch});
+    assert_eq!(
+        f.admin.post("images/action", &failed_batch).await.status(),
+        409
+    );
+    let first_id = wccs_protocol::image_device_id("503-42").unwrap();
+    assert!(
+        f.db.query_one(
+            "SELECT credential_hash FROM devices WHERE id=$1",
+            &[&first_id]
+        )
+        .await
+        .unwrap()
+        .get::<_, Option<String>>(0)
+        .is_none()
+    );
+    assert_eq!(
+        f.admin
+            .client
+            .post(format!("{}/api/images/action", f.admin.url))
+            .json(&failed_batch)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    f.db.execute("UPDATE control_devices SET connected=false", &[])
+        .await
+        .unwrap();
+    f.finish().await;
 }
 
 #[tokio::test]
@@ -340,6 +529,120 @@ async fn preparation_profiles_bind_tools_permissions_and_task_recovery_receipts(
     .await
     .unwrap();
     assert_eq!(f.admin.post("preparation", &save).await.status(), 403);
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn competition_configuration_checks_paths_and_client_capability() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    expect_ok(
+        f.admin
+            .post(
+                "configuration",
+                &json!({"request_id":token(),"base_version":0,"tools":[
+        {"id":"powershell","name":"PowerShell","kind":"executable","path":"C:\\Tools\\pwsh.exe"},
+        {"id":"gcc-cpp","name":"GNU C++","kind":"executable","path":"C:\\Tools\\g++.exe"}
+    ],"targets":["device-1"]}),
+            )
+            .await,
+    )
+    .await;
+    let content = "Write-Output synthetic";
+    let files: Vec<_> = ["compilecpp.ps1", "submit.ps1", "contest-common.ps1"]
+        .iter()
+        .map(|path| json!({"path":path,"content":content,"sha256":wccs_protocol::digest(content)}))
+        .collect();
+    let mut save = json!({"request_id":token(),"base_version":0,"profile":{
+        "schema_version":1,"tool_version":1,"work_directory":"C:\\Contest",
+        "desktop_directory":"C:\\Users\\WccsContest\\Desktop","script_directory":"C:\\ProgramData\\WCCS\\Scripts",
+        "links":[],"package":{"schema_version":1,"id":"contest","version":"v1","configuration_version":"v1",
+            "runtime_tool_id":"powershell","runtime_file_version":"7.6.9","source":"synthetic","license":"test","files":files},
+        "competition":{"compiler_tool_id":"missing","compiler_arguments":["-O2"],"judge_url":"https://judge.test",
+            "contest_id":"demo","language_id":"cpp"}
+    }});
+    assert_eq!(f.admin.post("preparation", &save).await.status(), 400);
+    save["profile"]["competition"]["compiler_tool_id"] = json!("gcc-cpp");
+    save["profile"]["competition"]["judge_url"] = json!("https://user:secret@judge.test");
+    assert_eq!(f.admin.post("preparation", &save).await.status(), 400);
+    save["profile"]["competition"]["judge_url"] = json!("https://judge.test");
+    expect_ok(f.admin.post("preparation", &save).await).await;
+    let mut runtime = json!({"schema_version":1,"instance_id":"host-one","session_key":"session-one",
+        "adapter":"service","capabilities":["identify-v1","preparation-v1"]});
+    expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    let request = json!({"request_id":token(),"template_version":1,"targets":["device-1"],
+        "template":{"operation":"deploy_scripts","profile_version":1}});
+    assert_eq!(
+        expect_ok(f.admin.post("maintenance/preview", &request).await).await["targets"][0]["reason"],
+        "unsupported_client"
+    );
+    runtime["capabilities"] = json!(["identify-v1", "preparation-v1", "competition-v1"]);
+    expect_ok(
+        f.admin
+            .device("maintenance/poll", &f.credential, &runtime)
+            .await,
+    )
+    .await;
+    assert_eq!(
+        expect_ok(f.admin.post("maintenance/preview", &request).await).await["targets"][0]["reason"],
+        "ordinary_account_unavailable"
+    );
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn domjudge_jobs_require_global_authority_and_explicit_restart_review() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let listed = expect_ok(f.admin.get("domjudge").await).await;
+    assert_eq!(listed["configured"], false);
+    assert_eq!(listed["jobs"], json!([]));
+    let input = json!({"request_id":token(),"contest_id":"contest","remote_contest_id":"demo",
+        "group_id":"participants","participant_ids":["participant-1"]});
+    assert_eq!(f.admin.post("domjudge/preview", &input).await.status(), 400);
+    f.db.execute(
+        "UPDATE operators SET all_rooms=false,role='viewer' WHERE username='test-admin'",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.admin.get("domjudge").await.status(), 403);
+    f.db.execute(
+        "UPDATE operators SET all_rooms=true,role='viewer' WHERE username='test-admin'",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.admin.post("domjudge/preview", &input).await.status(), 403);
+    f.db.execute(
+        "UPDATE operators SET role='admin' WHERE username='test-admin'",
+        &[],
+    )
+    .await
+    .unwrap();
+    f.db.execute("INSERT INTO domjudge_jobs(id,actor_id,actor_version,stage,payload,plan,created_at,updated_at) SELECT 'interrupted-job',id,version,'running','{}','{}',0,0 FROM operators WHERE username='test-admin'", &[]).await.unwrap();
+    let restarted = wccs_server::connect(f.app.config.clone()).await.unwrap();
+    let row =
+        f.db.query_one(
+            "SELECT stage,detail FROM domjudge_jobs WHERE id='interrupted-job'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "interrupted");
+    assert_eq!(row.get::<_, String>(1), "server_restarted_review_required");
+    drop(restarted);
     ws.close(None).await.unwrap();
     f.finish().await;
 }

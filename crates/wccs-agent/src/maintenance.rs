@@ -63,6 +63,7 @@ pub fn diagnostic_summary(path: &Path, identity: &Identity) -> Vec<serde_json::V
 }
 fn result(command: &Command, stage: &str, detail: &str) -> TaskResult {
     TaskResult {
+        recovery: None,
         steps: Vec::new(),
         schema_version: 1,
         job_id: command.job_id.clone(),
@@ -100,17 +101,33 @@ fn poll(
     credential: &str,
     instance: &str,
     test_mode: bool,
+    simulation: bool,
 ) -> Result<Reply> {
-    let session = ipc::discover(test_mode).ok();
+    let session = if simulation {
+        None
+    } else {
+        ipc::discover(test_mode).ok()
+    };
     let input = Poll {
         schema_version: 1,
         instance_id: instance.into(),
-        session_key: session.map(|s| s.key),
+        session_key: if simulation {
+            Some("recovery-simulation".into())
+        } else {
+            session.map(|s| s.key)
+        },
         adapter: if test_mode { "local_test" } else { "service" }.into(),
-        capabilities: if test_mode {
+        capabilities: if simulation {
+            vec!["recovery-v1".into()]
+        } else if test_mode {
             vec!["identify-v1".into()]
         } else {
-            vec!["identify-v1".into(), "preparation-v1".into()]
+            vec![
+                "identify-v1".into(),
+                "preparation-v1".into(),
+                "competition-v1".into(),
+                "recovery-v1".into(),
+            ]
         },
     };
     let reply: Reply = client
@@ -169,6 +186,26 @@ fn recover(directory: &Path, identity_path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn simulate_recovery_once(path: &Path, instance: &str) -> Result<()> {
+    if !wccs_protocol::valid_id(instance) {
+        return Err("simulation_instance_invalid".into());
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    recover(&path.with_extension("maintenance"), path)?;
+    cycle(
+        &client,
+        path,
+        Path::new("unused-simulation-session.exe"),
+        instance,
+        true,
+        true,
+        &AtomicBool::new(false),
+    )
+}
+
 pub fn worker(
     path: &Path,
     executable: &Path,
@@ -190,7 +227,7 @@ pub fn worker(
         return;
     };
     while !stop.load(Ordering::Relaxed) {
-        if cycle(&client, path, executable, instance, test_mode, &stop).is_err() {
+        if cycle(&client, path, executable, instance, test_mode, false, &stop).is_err() {
             eprintln!("maintenance_sync_failed");
         }
         for _ in 0..10 {
@@ -208,6 +245,7 @@ fn cycle(
     executable: &Path,
     instance: &str,
     test_mode: bool,
+    simulation: bool,
     stop: &AtomicBool,
 ) -> Result<()> {
     let identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
@@ -236,7 +274,15 @@ fn cycle(
     }
     crate::file_transaction::recover_pending(&path.with_extension("preparation"))
         .map_err(|_| "maintenance_rollback_pending")?;
-    let reply = poll(client, &server, &identity, &credential, instance, test_mode)?;
+    let reply = poll(
+        client,
+        &server,
+        &identity,
+        &credential,
+        instance,
+        test_mode,
+        simulation,
+    )?;
     let Some(command) = reply.command else {
         return Ok(());
     };
@@ -272,7 +318,77 @@ fn cycle(
     save(&record_path, &record)?;
     post_result(client, &identity, &credential, &record)?;
     let command = record.command.clone();
-    if matches!(command.template, Template::Identify { .. }) {
+    if matches!(command.template, Template::Recovery { .. }) {
+        record.result = result(&command, "executing", "recovery_started");
+        save(&record_path, &record)?;
+        post_result(client, &identity, &credential, &record)?;
+        let started = Instant::now();
+        let execution = crate::recovery::execute(
+            path,
+            &command,
+            crate::recovery::Transfer {
+                client,
+                server: &server,
+                credential: &credential,
+            },
+            simulation,
+            || {
+                !stop.load(Ordering::Relaxed)
+                    && started.elapsed() < Duration::from_secs(900)
+                    && connection::server(path, &identity).ok().as_deref() == Some(&server)
+                    && poll(
+                        client,
+                        &server,
+                        &identity,
+                        &credential,
+                        instance,
+                        test_mode,
+                        simulation,
+                    )
+                    .ok()
+                    .and_then(|r| r.command)
+                    .as_ref()
+                        == Some(&command)
+            },
+        );
+        record.result = match execution {
+            Ok((detail, manifest)) => {
+                let mut value = result(&command, "succeeded", detail);
+                value.recovery = Some(manifest);
+                value
+            }
+            Err(error) => {
+                let mut value = result(&command, "failed", "execution_failed");
+                let message = error.to_string();
+                let safe = [
+                    "recovery_simulation_target_mismatch",
+                    "recovery_requires_system",
+                    "recovery_workspace_mismatch",
+                    "recovery_system_volume_rejected",
+                    "recovery_protected_path",
+                    "recovery_volume_unknown",
+                    "recovery_filename_invalid",
+                    "recovery_capacity_exceeded",
+                    "target_reparse_point",
+                    "recovery_authorization_ended",
+                    "recovery_target_changed",
+                    "recovery_archive_ack_mismatch",
+                    "restore_teaching_required",
+                ];
+                value.steps.push(wccs_protocol::preparation::Step {
+                    phase: "verification".into(),
+                    path: String::new(),
+                    outcome: "failed".into(),
+                    detail: if safe.contains(&message.as_str()) {
+                        message
+                    } else {
+                        "recovery_io_or_transfer_failed".into()
+                    },
+                });
+                value
+            }
+        };
+    } else if matches!(command.template, Template::Identify { .. }) {
         let outcome = display(
             executable,
             test_mode,
@@ -280,10 +396,18 @@ fn cycle(
             stop,
             || {
                 connection::server(path, &identity).ok().as_deref() == Some(&server)
-                    && poll(client, &server, &identity, &credential, instance, test_mode)
-                        .ok()
-                        .and_then(|r| r.command)
-                        .as_ref()
+                    && poll(
+                        client,
+                        &server,
+                        &identity,
+                        &credential,
+                        instance,
+                        test_mode,
+                        simulation,
+                    )
+                    .ok()
+                    .and_then(|r| r.command)
+                    .as_ref()
                         == Some(&command)
             },
             || {
@@ -306,10 +430,18 @@ fn cycle(
             crate::preparation::execute(path, &command, || {
                 !stop.load(Ordering::Relaxed)
                     && connection::server(path, &identity).ok().as_deref() == Some(&server)
-                    && poll(client, &server, &identity, &credential, instance, test_mode)
-                        .ok()
-                        .and_then(|r| r.command)
-                        .as_ref()
+                    && poll(
+                        client,
+                        &server,
+                        &identity,
+                        &credential,
+                        instance,
+                        test_mode,
+                        simulation,
+                    )
+                    .ok()
+                    .and_then(|r| r.command)
+                    .as_ref()
                         == Some(&command)
             })
         };
@@ -519,6 +651,7 @@ pub fn identify_local(path: &Path, executable: &Path, seconds: u64) -> Result<()
         .map(|c| format!("{} / {} 待核对", c.room_id, c.seat_number))
         .unwrap_or_else(|| "未配置座位".into());
     let command = Command {
+        recovery: None,
         preparation: None,
         schema_version: 1,
         job_id: token(),

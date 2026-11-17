@@ -91,6 +91,7 @@ fn status(path: &Path) -> Result<Value> {
         "session_binary_present":std::env::current_exe()?.with_file_name("wccs-session.exe").is_file(),
         "installation_service":service,
         "recent_maintenance":crate::maintenance::diagnostic_summary(path,&identity),
+        "pending_distribution":crate::distribution::diagnostic_summary(path,&identity),
         "latest_diagnostics":latest,"online_validation_pending":latest.is_none(),
         "presentation_cache":crate::presentation::cached_diagnostic(path).ok().flatten(),
         "credential_present":path.with_extension("credential").is_file()}),
@@ -310,7 +311,15 @@ fn diagnose(path: &Path, service: &str, output: &Path, test_mode: bool) -> Resul
     let credential = credential(path, &identity)?;
     let client = client()?;
     let context = if let Some(server) = &saved.configuration.server {
-        network_checks(&client, &identity, &credential, server, &mut report, prior)
+        network_checks(
+            path,
+            &client,
+            &identity,
+            &credential,
+            server,
+            &mut report,
+            prior,
+        )
     } else {
         for step in [
             Step::Server,
@@ -360,7 +369,8 @@ fn diagnose(path: &Path, service: &str, output: &Path, test_mode: bool) -> Resul
     let package = json!({"schema_version":1,"mode":if test_mode {"local_test"} else {"service"},
         "configuration":saved.configuration,"report":report,"server_context":context,
         "network":wccs_inventory::network(),"server_acknowledged":uploaded,
-        "associated_events":sanitized_events(path),"associated_tasks":crate::maintenance::diagnostic_summary(path,&identity)});
+        "associated_events":sanitized_events(path),"associated_tasks":crate::maintenance::diagnostic_summary(path,&identity),
+        "pending_distribution":crate::distribution::diagnostic_summary(path,&identity)});
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -456,6 +466,7 @@ fn sanitized_events(path: &Path) -> Vec<Value> {
 }
 
 fn network_checks(
+    path: &Path,
     client: &Client,
     identity: &Identity,
     credential: &str,
@@ -503,11 +514,19 @@ fn network_checks(
             enrollment_token: identity.enrollment_token.clone(),
             device_token: credential.into(),
         };
-        let registered = client
-            .post(format!("{server}/api/device/register"))
-            .json(&registration)
-            .send()
+        let registered = identity
+            .registration_body(registration, path)
             .ok()
+            .and_then(|body| {
+                client
+                    .post(format!(
+                        "{server}/api/device/{}",
+                        identity.registration_path()
+                    ))
+                    .json(&body)
+                    .send()
+                    .ok()
+            })
             .and_then(|r| r.error_for_status().ok())
             .and_then(|r| r.json::<Value>().ok());
         if registered

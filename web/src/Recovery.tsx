@@ -1,0 +1,484 @@
+import { useEffect, useState } from "react";
+import { z } from "zod";
+import { api } from "./api";
+import type { Snapshot } from "./contracts";
+import type { Mutation } from "./SeatChecks";
+import { maintenanceReasons, maintenanceStages } from "./maintenance-model";
+
+const optionsSchema = z.object({
+  action: z.string(),
+  contest_id: z.string(),
+  target: z.string(),
+  scope: z.string(),
+  extensions: z.array(z.string()),
+  skip_reason: z.string(),
+  previous_request: z.string().nullable(),
+  confirm_session_end: z.boolean(),
+});
+const manifestSchema = z.object({
+  target: z.string(),
+  volume: z.object({
+    guid: z.string(),
+    serial: z.string(),
+    label: z.string(),
+    system: z.boolean(),
+  }),
+  files: z.array(z.object({ path: z.string(), size: z.number() })),
+  directories: z.array(z.string()),
+});
+const jobSchema = z.object({
+  job_id: z.string(),
+  request_id: z.string(),
+  device_id: z.string(),
+  device_name: z.string(),
+  template: z.object({ options: optionsSchema }),
+  stage: z.string(),
+  expired: z.boolean(),
+  archive_verified: z.boolean(),
+  reboot_observed: z.boolean(),
+  result: z
+    .object({
+      detail: z.string(),
+      recovery: manifestSchema.optional(),
+      steps: z.array(z.object({ detail: z.string() })).default([]),
+    })
+    .nullable(),
+});
+const listSchema = z.object({ jobs: z.array(jobSchema) });
+const previewSchema = z.object({
+  preview_token: z.string(),
+  targets: z.array(
+    z.object({
+      device_id: z.string(),
+      name: z.string(),
+      reason: z.string().nullable(),
+      recovery: z.object({ manifest: manifestSchema }).nullable(),
+    }),
+  ),
+});
+const actions: Record<string, string> = {
+  inspect: "检查文件与卷",
+  archive: "归档或记录跳过",
+  clean: "清理批准范围",
+  reboot: "恢复后重启",
+};
+const details: Record<string, string> = {
+  recovery_inspected: "文件与卷已检查",
+  archive_verified: "服务器已核验归档",
+  archive_skipped: "已记录跳过归档",
+  cleanup_complete: "批准范围已清理",
+  reboot_requested: "已请求重启，等待重新上线",
+  recovery_started: "正在检查并执行",
+  recovery_target_changed: "文件或卷发生变化，请重新检查",
+  recovery_authorization_ended: "连接或授权结束，请重新检查",
+  target_reparse_point: "范围内存在链接或挂载点，请现场核对",
+  recovery_capacity_exceeded: "超出本轮上限，单台 4096 项、512 MiB，请调整范围",
+  restore_teaching_required: "请先恢复教学并核对策略已撤回",
+  recovery_io_or_transfer_failed:
+    "文件占用、权限或传输失败，请保存并关闭程序后重新检查",
+  execution_failed: "执行失败",
+  restart_interrupted: "服务重启中断，请重新检查剩余文件",
+};
+type Job = z.infer<typeof jobSchema>;
+function Scope({ manifest }: { manifest: z.infer<typeof manifestSchema> }) {
+  return (
+    <div>
+      <code>{manifest.target}</code>
+      <p>
+        {manifest.volume.system ? "系统卷内的指定目录" : "非系统卷"} ·{" "}
+        {manifest.volume.label || "无卷标"} · 序列号 {manifest.volume.serial}
+      </p>
+      <small>{manifest.volume.guid}</small>
+      <p>
+        {manifest.files.length} 个文件，
+        {manifest.files
+          .reduce((sum, f) => sum + f.size, 0)
+          .toLocaleString()}{" "}
+        字节，{manifest.directories.length} 个目录
+      </p>
+      <details>
+        <summary>查看实际文件清单</summary>
+        <ul>
+          {manifest.files.map((file) => (
+            <li key={file.path}>
+              {file.path} · {file.size} 字节
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+export function Recovery({
+  snapshot,
+  contestId,
+  csrf,
+  disabled,
+  onMutate,
+}: {
+  snapshot: Snapshot;
+  contestId: string;
+  csrf: string;
+  disabled: boolean;
+  onMutate: Mutation;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [options, setOptions] = useState<z.infer<typeof optionsSchema>>({
+    action: "inspect",
+    contest_id: contestId,
+    target: "C:\\WCCS-Work",
+    scope: "workspace",
+    extensions: ["cpp", "c", "h", "hpp", "py", "java", "pas"],
+    skip_reason: "",
+    previous_request: null,
+    confirm_session_end: false,
+  });
+  const [skip, setSkip] = useState(false);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [fresh, setFresh] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [reviewed, setReviewed] = useState("");
+  const [preview, setPreview] = useState<z.infer<typeof previewSchema> | null>(
+    null,
+  );
+  const [request, setRequest] = useState<Record<string, unknown> | null>(null);
+  const selection = JSON.stringify([selected, options, skip]);
+  const current = selection === reviewed ? preview : null;
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try {
+        const value = listSchema.parse(await api("recovery"));
+        if (active) {
+          setJobs(value.jobs);
+          setFresh(true);
+        }
+      } catch {
+        if (active) setFresh(false);
+      }
+      if (active) timer = setTimeout(() => void refresh(), 2000);
+    }
+    void refresh();
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, []);
+  async function review() {
+    setBusy(true);
+    setError("");
+    setPreview(null);
+    const body = {
+      request_id: crypto.randomUUID(),
+      template_version: 1,
+      targets: selected,
+      template: {
+        operation: "recovery",
+        options: {
+          ...options,
+          extensions: skip ? [] : options.extensions,
+          skip_reason: skip ? options.skip_reason : "",
+        },
+      },
+    };
+    try {
+      const value = previewSchema.parse(
+        await api("maintenance/preview", body, csrf),
+      );
+      setPreview(value);
+      setRequest({ ...body, preview_token: value.preview_token });
+      setReviewed(selection);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "预览失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+  function next(job: Job) {
+    const previous = job.template.options;
+    const action = (
+      { inspect: "archive", archive: "clean", clean: "reboot" } as Record<
+        string,
+        string
+      >
+    )[previous.action];
+    if (!action) return;
+    setOptions({
+      ...previous,
+      action,
+      previous_request: job.request_id,
+      confirm_session_end: false,
+    });
+    setSkip(previous.extensions.length === 0);
+    setSelected(
+      jobs
+        .filter(
+          (j) => j.request_id === job.request_id && j.stage === "succeeded",
+        )
+        .map((j) => j.device_id),
+    );
+    setPreview(null);
+    setRequest(null);
+  }
+  return (
+    <>
+      <section className="panel operations-panel">
+        <h2>赛后归档与恢复</h2>
+        <p>
+          检查 → 归档或明确跳过 → 恢复教学 → 清理 → 重启 →
+          再次检查。文件变化或任务中断后，从检查步骤重新核对。
+        </p>
+        <p>
+          单台本轮上限为 4096 个文件及目录、512 MiB。整卷清理保留 Windows
+          的回收站与 System Volume Information 系统目录。
+        </p>
+        <label>
+          当前步骤
+          <input readOnly value={actions[options.action]} />
+        </label>
+        <label>
+          清理范围
+          <select
+            value={options.scope}
+            disabled={options.action !== "inspect"}
+            onChange={(e) => setOptions({ ...options, scope: e.target.value })}
+          >
+            <option value="workspace">已配置的比赛工作目录</option>
+            <option value="volume">非系统卷整卷</option>
+          </select>
+        </label>
+        <label>
+          实际路径
+          <input
+            value={options.target}
+            disabled={options.action !== "inspect"}
+            onChange={(e) => setOptions({ ...options, target: e.target.value })}
+          />
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={skip}
+            disabled={options.action !== "inspect"}
+            onChange={(e) => setSkip(e.target.checked)}
+          />
+          本场明确跳过代码归档
+        </label>
+        {skip ? (
+          <label>
+            跳过原因
+            <input
+              value={options.skip_reason}
+              disabled={options.action !== "inspect"}
+              onChange={(e) =>
+                setOptions({ ...options, skip_reason: e.target.value })
+              }
+            />
+          </label>
+        ) : (
+          <label>
+            收集扩展名，空格分隔
+            <input
+              value={options.extensions.join(" ")}
+              disabled={options.action !== "inspect"}
+              onChange={(e) =>
+                setOptions({
+                  ...options,
+                  extensions: e.target.value.split(/\s+/).filter(Boolean),
+                })
+              }
+            />
+          </label>
+        )}
+        <p>清理会删除所选范围内全部文件。归档仅收集上面列出的扩展名。</p>
+        <div className="target-list">
+          {snapshot.devices.map((device) => (
+            <label key={device.id}>
+              <input
+                type="checkbox"
+                checked={selected.includes(device.id)}
+                onChange={(e) =>
+                  setSelected(
+                    e.target.checked
+                      ? [...selected, device.id]
+                      : selected.filter((id) => id !== device.id),
+                  )
+                }
+              />
+              {device.name} · {device.id}
+            </label>
+          ))}
+        </div>
+        {["clean", "reboot"].includes(options.action) && (
+          <label>
+            <input
+              type="checkbox"
+              checked={options.confirm_session_end}
+              onChange={(e) =>
+                setOptions({
+                  ...options,
+                  confirm_session_end: e.target.checked,
+                })
+              }
+            />
+            我已确认选手保存文件并结束使用，同意清理上述范围及本步骤涉及的会话结束。
+          </label>
+        )}
+        <div className="actions">
+          <button
+            disabled={disabled || busy || !selected.length || !contestId}
+            onClick={() => void review()}
+          >
+            预览本步骤
+          </button>
+          <button
+            disabled={busy}
+            onClick={() => {
+              setOptions({
+                ...options,
+                action: "inspect",
+                previous_request: null,
+                confirm_session_end: false,
+              });
+              setPreview(null);
+            }}
+          >
+            重新检查
+          </button>
+          <a href={`#/login?contest_id=${encodeURIComponent(contestId)}`}>
+            恢复教学账户
+          </a>
+        </div>
+        {error && (
+          <p role="alert" className="error">
+            {error}
+          </p>
+        )}
+        {current && (
+          <>
+            <h3>本次目标</h3>
+            {current.targets.map((target) => (
+              <div key={target.device_id}>
+                <h4>
+                  {target.name} ·{" "}
+                  {target.reason
+                    ? (maintenanceReasons[target.reason] ??
+                      details[target.reason] ??
+                      target.reason)
+                    : "可执行"}
+                </h4>
+                {target.recovery && (
+                  <Scope manifest={target.recovery.manifest} />
+                )}
+              </div>
+            ))}
+            <button
+              className="primary"
+              disabled={
+                disabled ||
+                busy ||
+                !request ||
+                !current.targets.some((t) => !t.reason)
+              }
+              onClick={() => {
+                if (!request) return;
+                setBusy(true);
+                void onMutate(
+                  "maintenance/commit",
+                  request,
+                  "赛后任务已下发，请核对逐机结果。",
+                )
+                  .then(() => {
+                    setPreview(null);
+                    setRequest(null);
+                  })
+                  .catch((e) =>
+                    setError(e instanceof Error ? e.message : "提交失败"),
+                  )
+                  .finally(() => setBusy(false));
+              }}
+            >
+              确认执行{actions[options.action]}
+            </button>
+          </>
+        )}
+      </section>
+      <section className="panel">
+        <h2>逐机恢复结果</h2>
+        {!fresh && <p role="status">结果连接中断，当前显示数据已过期。</p>}
+        {jobs.map((job) => (
+          <article key={job.job_id}>
+            <h3>
+              {job.device_name} · {actions[job.template.options.action]} ·{" "}
+              {job.template.options.action === "reboot" &&
+              job.stage === "succeeded" &&
+              !job.reboot_observed
+                ? "请求已受理"
+                : (maintenanceStages[job.stage] ?? job.stage)}
+            </h3>
+            <p>
+              {details[job.result?.detail ?? ""] ??
+                job.result?.detail ??
+                (job.expired ? "任务已过期，请重新检查" : "等待回传")}
+            </p>
+            {job.result?.steps.map((step, index) => (
+              <p key={index}>{details[step.detail] ?? step.detail}</p>
+            ))}
+            {job.template.options.action === "reboot" && (
+              <p>
+                {job.reboot_observed
+                  ? "已观察到重启后的教学状态，请再次检查复原后的工作目录。"
+                  : "尚未核对重启后的教学状态。"}
+              </p>
+            )}
+            {job.result?.recovery && (
+              <details>
+                <summary>查看范围与文件</summary>
+                <Scope manifest={job.result.recovery} />
+              </details>
+            )}
+            <div className="actions">
+              {job.stage === "succeeded" &&
+                job.template.options.action !== "reboot" && (
+                  <button
+                    disabled={disabled || busy || !fresh}
+                    onClick={() => next(job)}
+                  >
+                    为本批成功设备准备下一步
+                  </button>
+                )}
+              {job.archive_verified && (
+                <a
+                  href={`/api/recovery/archives/${encodeURIComponent(job.job_id)}`}
+                >
+                  下载归档 ZIP 与清单
+                </a>
+              )}
+              <a
+                href={`#/events?request_id=${encodeURIComponent(job.request_id)}`}
+              >
+                查看事件与处置
+              </a>
+              {["queued", "accepted", "executing"].includes(job.stage) && (
+                <button
+                  disabled={disabled || busy}
+                  onClick={() =>
+                    void onMutate(
+                      "maintenance/cancel",
+                      { job_id: job.job_id },
+                      "已请求停止，请核对实际结果。",
+                    ).catch((e) => setError(String(e)))
+                  }
+                >
+                  停止后续执行
+                </button>
+              )}
+            </div>
+          </article>
+        ))}
+      </section>
+    </>
+  );
+}

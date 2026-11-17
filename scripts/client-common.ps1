@@ -1,6 +1,30 @@
 # Shared offline package checks and file transactions. No system changes on import.
 Set-StrictMode -Version Latest
 
+function Register-ClientLoginProvider {
+    param([string]$Root, [string]$MachineGuid)
+    $null = Get-ClientPath $Root
+    Assert-ClientProtected $Root
+    $provider = Join-Path $Root 'bin/wccs-login-provider.dll'
+    $record = Join-Path $Root 'data/login-provider-installation.json'
+    $classId = '{954886e2-4dc2-4e85-a962-2687f7658e0c}'
+    $classPath = "HKLM:/SOFTWARE/Classes/CLSID/$classId/InprocServer32"
+    $registrationPath = "HKLM:/SOFTWARE/Microsoft/Windows/CurrentVersion/Authentication/Credential Providers/$classId"
+    if (Test-Path -LiteralPath $record) {
+        $owner = Read-ClientJson $record
+        if ($owner.machine_guid -ne $MachineGuid -or $owner.provider -ne $provider) { throw 'provider_record_conflict' }
+    } elseif ((Test-Path $classPath) -or (Test-Path $registrationPath)) {
+        throw 'provider_ownership_missing'
+    }
+    if ((Test-Path $classPath) -and (Get-Item $classPath).GetValue('') -ne $provider) { throw 'provider_registration_conflict' }
+    Write-ClientJson $record @{machine_guid=$MachineGuid; provider=$provider; operation=[guid]::NewGuid().ToString()}
+    New-Item -Path $classPath -Force | Out-Null
+    Set-Item -Path $classPath -Value $provider
+    New-ItemProperty -Path $classPath -Name ThreadingModel -Value Apartment -PropertyType String -Force | Out-Null
+    New-Item -Path $registrationPath -Force | Out-Null
+    Set-Item -Path $registrationPath -Value 'WCCS contest login'
+}
+
 function Assert-ClientTarget {
     param([string]$ExpectedName, [string]$ExpectedGuid, [string]$ActualName, [string]$ActualGuid)
     if ($ExpectedName -notmatch '^[^\x00-\x20\\/:"*?<>|]{1,63}$' -or
@@ -38,6 +62,14 @@ function Assert-ClientTree {
         if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse_tree_rejected' }
         if ($entry.PSIsContainer) { Assert-ClientTree $entry.FullName }
     }
+}
+
+function Assert-ClientUserProfile {
+    param([string]$Sid)
+    if ($Sid -notmatch '^S-1-5-21-[0-9-]+$') { throw 'image_profile_sid_invalid' }
+    $profile = (Get-ItemProperty -LiteralPath ('HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion/ProfileList/' + $Sid)).ProfileImagePath
+    $profile = Get-ClientPath ([Environment]::ExpandEnvironmentVariables($profile))
+    if (-not (Test-Path -LiteralPath (Join-Path $profile 'NTUSER.DAT'))) { throw 'image_profile_not_initialized' }
 }
 
 function Write-ClientJson {

@@ -34,6 +34,8 @@ pub(crate) fn sequence_is_new(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Machine {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restrictions: Option<wccs_protocol::login::Restrictions>,
     incarnation: String,
     account_sid: Option<String>,
     account_owner: Option<String>,
@@ -98,6 +100,7 @@ impl Simulator {
         let machine_path = directory.join("machine.json");
         if !journal_path.exists() && !machine_path.exists() {
             let machine = Machine {
+                restrictions: None,
                 incarnation: token(),
                 account_sid: None,
                 account_owner: None,
@@ -182,6 +185,15 @@ impl Simulator {
             "conflict"
         };
         AccountState {
+            policy: Some(wccs_protocol::login::PolicyState {
+                requested: m.restrictions.clone().unwrap_or_default(),
+                state: if m.restrictions.is_some() {
+                    "applied"
+                } else {
+                    "ready"
+                }
+                .into(),
+            }),
             adapter: "simulation".into(),
             revision: self.journal.revision,
             phase: self.journal.phase.clone(),
@@ -209,6 +221,12 @@ impl Simulator {
         }
         let plan = command.login.as_ref().ok_or("login_plan_missing")?;
         let state = self.state();
+        if plan.restrictions.as_ref().is_some_and(|r| r.enabled())
+            && state.session == "contest"
+            && !plan.confirm_session_end
+        {
+            return Err("contest_policy_session_confirmation_required".into());
+        }
         if state != plan.snapshot
             || state
                 .skip_reason(&command.action, plan.confirm_session_end)
@@ -266,7 +284,13 @@ impl Simulator {
                 self.write_machine(&m)?;
             }
             1 => {
-                if m.session == "teaching"
+                if (m.session == "teaching"
+                    || (m.session == "contest"
+                        && command
+                            .login
+                            .as_ref()
+                            .and_then(|p| p.restrictions.as_ref())
+                            .is_some_and(|r| r.enabled())))
                     && command
                         .login
                         .as_ref()
@@ -286,6 +310,11 @@ impl Simulator {
                 self.journal.original_enabled = Some(m.teaching_enabled);
                 self.journal.before_revision = Some(m.teaching_revision);
                 self.persist()?;
+                m.restrictions = command
+                    .login
+                    .as_ref()
+                    .and_then(|p| p.restrictions.clone())
+                    .filter(|r| r.enabled());
                 m.teaching_enabled = false;
                 m.teaching_revision += 1;
                 self.write_machine(&m)?;
@@ -341,6 +370,9 @@ impl Simulator {
     }
     pub fn recover(&mut self) -> Result<()> {
         self.permit = None;
+        let mut machine = self.machine()?;
+        machine.restrictions = None;
+        self.write_machine(&machine)?;
         // No online authority survives process startup or this method, including completed login.
         if self.journal.phase == "teaching" && self.journal.original_enabled.is_none() {
             self.machine()?;
@@ -462,6 +494,44 @@ mod tests {
         }
         assert!(s.state().login_complete());
     }
+    #[test]
+    fn contest_restrictions_restore_after_each_interrupted_step_and_require_new_confirmation() {
+        for steps in 0..=6 {
+            let f = Fixture::new();
+            let mut s = f.open();
+            let mut c = command(&s, 1);
+            c.login.as_mut().unwrap().restrictions = Some(wccs_protocol::login::Restrictions {
+                block_removable_storage: true,
+                block_shutdown: true,
+            });
+            s.accept(&c).unwrap();
+            for _ in 0..steps {
+                s.advance(&c, 100).unwrap();
+            }
+            if steps >= 3 {
+                assert_eq!(s.state().policy.unwrap().state, "applied");
+            }
+            let before = s.machine().unwrap();
+            drop(s);
+            let mut s = f.open();
+            assert_eq!(s.state().policy.unwrap().state, "ready");
+            assert!(s.state().teaching_enabled);
+            assert_eq!(s.machine().unwrap().session, before.session);
+            s.recover().unwrap();
+            if before.session == "contest" {
+                let mut next = command(&s, 2);
+                next.login.as_mut().unwrap().restrictions =
+                    c.login.as_ref().unwrap().restrictions.clone();
+                assert!(s.accept(&next).is_err());
+                next.login.as_mut().unwrap().confirm_session_end = true;
+                finish(&mut s, &next);
+                assert_eq!(s.state().policy.unwrap().state, "applied");
+                s.recover().unwrap();
+                assert_eq!(s.state().policy.unwrap().state, "ready");
+            }
+        }
+    }
+
     #[test]
     fn new_authenticated_connection_can_restart_server_sequence() {
         let fixture = Fixture::new();

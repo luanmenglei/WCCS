@@ -163,4 +163,16 @@ New-Item -ItemType Junction -Path $workspaceLink -Target $outside | Out-Null
 Assert-Rejected { Initialize-FieldWorkspace $workspaceLink }
 Remove-Item -LiteralPath $workspaceLink
 Assert-True ($script:workspaceAclWrites -eq 2) 'workspace_rejection_changed_acl'
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'image-common.ps1')
+$supportSource = Join-Path $Root 'support-source'
+$null = New-PackageFixture (Join-Path $supportSource 'old-runtime') 'old-runtime'
+$supportDestination = Join-Path $Root 'support-destination'
+$supportStaging = Join-Path $Root 'support-staging'
+New-Item -ItemType Directory -Path (Join-Path $supportStaging 'old-runtime') -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $supportStaging 'old-runtime/partial'), 'interrupted copy')
+Copy-ImageSupportPackages $supportSource $supportDestination $supportStaging
+Copy-ImageSupportPackages $supportSource $supportDestination $supportStaging
+$null = Test-ClientPackage (Join-Path $supportDestination 'old-runtime')
+[IO.File]::WriteAllText((Join-Path $supportDestination 'old-runtime/runtime/pwsh.exe'), 'external change')
+Assert-Rejected { Copy-ImageSupportPackages $supportSource $supportDestination $supportStaging }
 Write-Output 'client_common_checks_passed'

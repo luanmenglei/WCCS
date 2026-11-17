@@ -224,10 +224,15 @@ pub fn execute(
             let root = Path::new(&profile.script_directory);
             secure_directory(root, account.0)?;
             updates.push(files::owned_root(root, &command.device_id)?);
-            let version = root
+            let package_directory = root
                 .join("packages")
                 .join(&package.id)
                 .join(&package.version);
+            let version = if profile.competition.is_some() {
+                package_directory.join(format!("configuration-{}", snapshot.version))
+            } else {
+                package_directory
+            };
             for file in &package.files {
                 let target = version.join(&file.path);
                 if target.exists() && fs::read(&target)? != file.content.as_bytes() {
@@ -237,8 +242,65 @@ pub fn execute(
             }
             let manifest = serde_json::to_vec(package)?;
             updates.push((version.join("manifest.json"), manifest.clone()));
+            let mut active = serde_json::json!({"schema_version":1,"id":package.id,"version":package.version,"configuration_version":package.configuration_version,"manifest_sha256":files::bytes_digest(&manifest),"runtime_path":runtime.path,"runtime_file_version":package.runtime_file_version,"directory":version});
+            if let Some(competition) = &profile.competition {
+                let compiler = snapshot
+                    .tools
+                    .iter()
+                    .find(|tool| tool.id == competition.compiler_tool_id)
+                    .ok_or("competition_compiler_missing")?;
+                let configuration = serde_json::to_vec(&serde_json::json!({
+                    "schema_version": 1, "version": snapshot.version.to_string(),
+                    "compiler_path": compiler.path,
+                    "compiler_arguments": competition.compiler_arguments,
+                    "judge_url": competition.judge_url,
+                    "contest_id": competition.contest_id,
+                    "language_id": competition.language_id
+                }))?;
+                let configuration_path = version.join("contest.json");
+                if configuration_path.exists() && fs::read(&configuration_path)? != configuration {
+                    return Err("immutable_competition_configuration_conflict".into());
+                }
+                active["configuration_sha256"] =
+                    serde_json::json!(files::bytes_digest(&configuration));
+                updates.push((configuration_path, configuration));
+                updates.push((
+                    root.join("contest-launch.ps1"),
+                    include_bytes!("../../../scripts/contest-launch.ps1").to_vec(),
+                ));
+                // Batch only forwards user arguments into an ordinary-account PowerShell process.
+                let runtime_path = runtime.path.replace('%', "%%");
+                for name in ["compilecpp", "submit"] {
+                    let wrapper = format!(
+                        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"{runtime_path}\" -NoLogo -NoProfile -File \"%~dp0contest-launch.ps1\" {name} %*\r\nexit /b %errorlevel%\r\n"
+                    );
+                    updates.push((root.join(format!("{name}.cmd")), wrapper.into_bytes()));
+                }
+                let terminal = format!(
+                    "@echo off\r\nsetlocal DisableDelayedExpansion\r\nset \"PATH=%~dp0;%PATH%\"\r\ncd /d \"{}\"\r\n\"{runtime_path}\" -NoLogo -NoProfile -NoExit\r\n",
+                    profile.work_directory.replace('%', "%%")
+                );
+                let terminal_path = root.join("contest-terminal.cmd");
+                updates.push((terminal_path.clone(), terminal.into_bytes()));
+                let actual_desktop = desktop(account.0)?;
+                let _desktop_guards = files::guard_directory(&actual_desktop, false)?;
+                if actual_desktop.canonicalize()?
+                    != Path::new(&profile.desktop_directory).canonicalize()?
+                {
+                    return Err("desktop_account_path_mismatch".into());
+                }
+                let desktop_root = actual_desktop.join("WCCS");
+                updates.push(files::owned_root(&desktop_root, &command.device_id)?);
+                updates.push((
+                    desktop_root.join("比赛终端.lnk"),
+                    shortcut(
+                        &terminal_path.to_string_lossy(),
+                        &directory.join(format!("{}-terminal.lnk", command.job_id)),
+                    )?,
+                ));
+            }
             // The activation pointer is last, after all immutable version files have been verified.
-            updates.push((root.join("active.json"),serde_json::to_vec(&serde_json::json!({"schema_version":1,"id":package.id,"version":package.version,"configuration_version":package.configuration_version,"manifest_sha256":files::bytes_digest(&manifest),"runtime_path":runtime.path,"runtime_file_version":package.runtime_file_version,"directory":version}))?));
+            updates.push((root.join("active.json"), serde_json::to_vec(&active)?));
             "scripts_activated"
         }
         _ => return Err("preparation_template_required".into()),

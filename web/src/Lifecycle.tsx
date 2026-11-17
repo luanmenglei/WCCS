@@ -62,6 +62,9 @@ export function Material({
 const eventLabels: Record<string, string> = {
   created: "创建设备",
   registration_requested: "提交注册申请",
+  image_registration_requested: "镜像设备申请，等待人工核对",
+  image_approved: "镜像凭据已审核更新",
+  image_rejected: "镜像申请已拒绝",
   automatically_approved: "窗口自动批准",
   credential_rotated: "凭据切换完成",
   expired: "注册过期",
@@ -391,13 +394,17 @@ export function Enrollment({
   const registration = snapshot.registration_window;
   const detail = snapshot.devices.find((device) => device.id === detailId);
   const pending = snapshot.devices.filter(
-    (device) => device.lifecycle === filter,
+    (device) => device.lifecycle === filter && !device.image_managed,
   );
   return (
     <section className="panel">
       <div className="section-heading">
         <div>
           <h2>注册窗口</h2>
+          <p>
+            镜像设备在窗口开启后自动申请，工作人员核对来源 IP
+            和申请关联号后批准。窗口关闭时新镜像设备会继续重试。
+          </p>
           <p>
             {registration.open
               ? `已开启，${new Date(registration.closes_at * 1000).toLocaleString("zh-CN")} 关闭`
@@ -420,6 +427,13 @@ export function Enrollment({
       <p>
         开启后，首次使用有效逐机材料的申请自动批准。已有待审核申请及重新授权申请需要人工处理。服务重启保留窗口截止时间。
       </p>
+      {snapshot.image_applications && (
+        <ImageApplications
+          applications={snapshot.image_applications}
+          disabled={disabled}
+          onMutate={onMutate}
+        />
+      )}
       <div className="filter-bar">
         <label>
           申请筛选
@@ -487,6 +501,143 @@ export function Enrollment({
           <DeviceHistory key={`history-${detail.id}`} device={detail} />
         </DetailsDialog>
       )}
+    </section>
+  );
+}
+
+function ImageApplications({
+  applications,
+  disabled,
+  onMutate,
+}: {
+  applications: NonNullable<Snapshot["image_applications"]>;
+  disabled: boolean;
+  onMutate: Mutate;
+}) {
+  const [selected, setSelected] = useState<
+    Record<string, { application_id: string; base_version: number }>
+  >({});
+  const [confirmed, setConfirmed] = useState(false);
+  const targets = Object.values(selected);
+  function toggle(
+    application: (typeof applications)[number],
+    checked: boolean,
+  ) {
+    setConfirmed(false);
+    setSelected((previous) => {
+      const next = { ...previous };
+      if (checked)
+        next[application.id] = {
+          application_id: application.id,
+          base_version: application.base_version,
+        };
+      else delete next[application.id];
+      return next;
+    });
+  }
+  async function submit(approve: boolean) {
+    try {
+      await onMutate(
+        "images/action",
+        { approve, targets },
+        approve ? "镜像申请已批准，等待客户端重连并核对座位" : "镜像申请已拒绝",
+      );
+      setSelected({});
+      setConfirmed(false);
+    } catch {
+      /* The parent displays the API failure and retains the request for retry. */
+    }
+  }
+  return (
+    <section aria-label="镜像设备审核">
+      <h3>镜像设备与复原后接入</h3>
+      <p>
+        按当前系统机器名关联原设备。批准会更新设备凭据并取消旧任务，保留座位和历史。原设备仍在线时请先核对同名机器。比赛控制需要重新下发。
+      </p>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>选择</th>
+              <th>机器名</th>
+              <th>本次来源 IP</th>
+              <th>原来源 IP</th>
+              <th>核对提示</th>
+              <th>提交时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {applications.map((application) => (
+              <tr key={application.id}>
+                <td>
+                  <input
+                    type="checkbox"
+                    aria-label={`选择 ${application.machine_name} ${application.id}`}
+                    checked={Boolean(selected[application.id])}
+                    disabled={disabled}
+                    onChange={(event) =>
+                      toggle(application, event.target.checked)
+                    }
+                  />
+                </td>
+                <td>
+                  {application.machine_name}
+                  <small>{application.id}</small>
+                </td>
+                <td>{application.observed_ip ?? "来源未知"}</td>
+                <td>{application.previous_ip ?? "首次接入"}</td>
+                <td>
+                  {{
+                    "": "",
+                    ready: "",
+                    bootstrap_failed:
+                      "客户端初始化失败，请现场重试并查看启动状态",
+                    support_packages_failed: "工具运行时恢复失败，请现场重试",
+                    login_template_failed:
+                      "比赛账户模板导入失败，请核对账户、系统密钥与工具路径",
+                    service_start_failed:
+                      "客户端服务启动失败，请现场诊断并重试",
+                  }[application.bootstrap_status] ||
+                    (application.online
+                      ? "原设备仍在线"
+                      : application.competing > 1
+                        ? "同名存在多个申请，每次请选择一个"
+                        : "待核对")}
+                </td>
+                <td>
+                  {new Date(application.created_at * 1000).toLocaleString(
+                    "zh-CN",
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!applications.length && <p className="empty">没有待审核的镜像申请</p>}
+      <label>
+        <input
+          type="checkbox"
+          checked={confirmed}
+          disabled={disabled || !targets.length}
+          onChange={(event) => setConfirmed(event.target.checked)}
+        />
+        已核对所选机器名与来源 IP，确认更新这些设备的凭据
+      </label>
+      <div className="actions">
+        <button
+          disabled={disabled || !targets.length || !confirmed}
+          onClick={() => void submit(true)}
+        >
+          批准所选 {targets.length} 台
+        </button>
+        <button
+          disabled={disabled || !targets.length}
+          onClick={() => void submit(false)}
+        >
+          拒绝所选申请
+        </button>
+      </div>
     </section>
   );
 }

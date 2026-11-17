@@ -13,6 +13,15 @@ export const identitySchema = z.object({
   room_version: z.number(),
 });
 export const accountSchema = z.object({
+  policy: z
+    .object({
+      requested: z.object({
+        block_removable_storage: z.boolean(),
+        block_shutdown: z.boolean(),
+      }),
+      state: z.enum(["ready", "applied", "pending", "recovery_failed"]),
+    })
+    .optional(),
   adapter: z.enum(["unavailable", "simulation", "windows_test"]),
   revision: z.number(),
   phase: z.enum([
@@ -58,7 +67,14 @@ export function accountLabel(
     recovering: "恢复中",
     recovery_failed: "恢复失败",
   };
-  return `${account.adapter === "simulation" ? "模拟" : "Windows 测试"} · ${phases[account.phase]} · ${account.detail}`;
+  const policy = account.policy;
+  const policyText =
+    policy?.state === "applied"
+      ? ` · ${policy.requested.block_removable_storage ? "USB 存储受限 " : ""}${policy.requested.block_shutdown ? "软件关机受限" : ""}`
+      : policy?.state === "recovery_failed"
+        ? " · 策略恢复待处理"
+        : "";
+  return `${account.adapter === "simulation" ? "模拟" : "Windows 测试"} · ${phases[account.phase]} · ${account.detail}${policyText}`;
 }
 export const commandSchema = z.object({
   protocol_version: z.literal(1),
@@ -75,6 +91,12 @@ export const commandSchema = z.object({
   identity: identitySchema,
   login: z
     .object({
+      restrictions: z
+        .object({
+          block_removable_storage: z.boolean(),
+          block_shutdown: z.boolean(),
+        })
+        .optional(),
       tool_version: z.number().optional(),
       tool_paths: z.array(z.string()).optional(),
       connection_id: z.string(),
@@ -116,6 +138,7 @@ export const waitingPreviewSchema = z.object({
         "disabled",
         "other_contest",
         "login_unavailable",
+        "policy_unavailable",
         "recovery_required",
         "account_conflict",
         "recovery_unavailable",
@@ -172,6 +195,7 @@ export const stageLabels = {
   expired: "已过期",
 };
 export const skipLabels = {
+  policy_unavailable: "客户端尚不支持比赛策略，请先升级",
   maintenance_active: "维护任务正在执行",
   ready: "可执行",
   unbound: "未匹配设备",
@@ -186,7 +210,7 @@ export const skipLabels = {
   account_conflict: "账户所有权或权限冲突",
   recovery_unavailable: "离线恢复入口未就绪",
   tools_unavailable: "工具或工作目录访问未通过",
-  session_confirmation_required: "需确认教学会话已保存并同意退出",
+  session_confirmation_required: "需确认当前会话已保存并同意退出",
   unsupported_session: "锁屏、多会话、RDP 或未知会话需现场处理",
 };
 export function actualLabel(item: WaitingItem) {

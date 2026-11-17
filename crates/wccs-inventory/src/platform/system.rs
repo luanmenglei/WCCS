@@ -32,7 +32,7 @@ pub fn collect() -> System {
     }
 }
 
-fn host_name() -> WinResult<String> {
+pub fn host_name() -> WinResult<String> {
     let mut buffer = [0u16; 256];
     let mut size = buffer.len() as u32;
     // SAFETY: buffer and size describe writable UTF-16 storage. 256 accommodates DNS host names.

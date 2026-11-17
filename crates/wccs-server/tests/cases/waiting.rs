@@ -67,6 +67,7 @@ async fn waiting_authorization_control_and_recovery() {
     .unwrap();
     let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
     let config = Config {
+        domjudge_config: None,
         bind: "127.0.0.1:0".into(),
         origin: String::new(),
         database_url: format!(
@@ -525,6 +526,7 @@ async fn login_preview_connection_fencing_and_completion() {
     .unwrap();
     let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
     let config = Config {
+        domjudge_config: None,
         bind: "127.0.0.1:0".into(),
         origin: String::new(),
         database_url: format!(

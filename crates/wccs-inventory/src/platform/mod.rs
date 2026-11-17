@@ -2,7 +2,8 @@ mod account;
 pub mod health;
 mod network;
 mod system;
-mod volumes;
+pub use system::host_name;
+pub(crate) mod volumes;
 
 pub fn network() -> crate::model::Observation<Vec<crate::model::NetworkAdapter>> {
     observation(network::collect())

@@ -62,6 +62,24 @@ async fn tools(
     {
         return Err(ApiError::bad("脚本运行依赖未配置完整路径"));
     }
+    if let Some(competition) = &profile.competition {
+        if !has_tool(&competition.compiler_tool_id) {
+            return Err(ApiError::bad("竞赛编译器未配置完整路径"));
+        }
+        let url = url::Url::parse(&competition.judge_url)
+            .map_err(|_| ApiError::bad("DOMjudge 地址无效"))?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ApiError::bad(
+                "DOMjudge 地址需要不含凭据、查询参数的 HTTPS 地址",
+            ));
+        }
+    }
     Ok(tools)
 }
 #[derive(Deserialize, Serialize)]

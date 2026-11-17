@@ -16,12 +16,12 @@ use windows::{
 const SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\System";
 const VALUE: PCWSTR = w!("DisableTaskMgr");
 
-struct Privilege {
+pub(crate) struct Privilege {
     token: crate::login_windows::Handle,
     previous: TOKEN_PRIVILEGES,
 }
 impl Privilege {
-    fn enable(name: PCWSTR) -> Result<Self> {
+    pub(crate) fn enable(name: PCWSTR) -> Result<Self> {
         let mut handle = HANDLE::default();
         // SAFETY: borrowed current process, owned output token, one-entry privilege buffers.
         unsafe {
@@ -95,9 +95,9 @@ impl Drop for Key {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Value {
-    kind: u32,
-    bytes: Vec<u8>,
+pub(crate) struct Value {
+    pub kind: u32,
+    pub bytes: Vec<u8>,
 }
 fn applied() -> Option<Value> {
     Some(Value {
@@ -244,6 +244,9 @@ fn policy(root: &Key, create: bool) -> Result<Option<Key>> {
 }
 
 fn read(key: Option<&Key>) -> Result<Option<Value>> {
+    read_named(key, VALUE)
+}
+fn read_named(key: Option<&Key>, name: PCWSTR) -> Result<Option<Value>> {
     let Some(key) = key else {
         return Ok(None);
     };
@@ -254,7 +257,7 @@ fn read(key: Option<&Key>) -> Result<Option<Value>> {
     let result = unsafe {
         RegQueryValueExW(
             key.0,
-            VALUE,
+            name,
             None,
             Some(&mut kind),
             Some(bytes.as_mut_ptr()),
@@ -273,19 +276,22 @@ fn read(key: Option<&Key>) -> Result<Option<Value>> {
 }
 
 fn write(key: &Key, value: &Option<Value>) -> Result<()> {
+    write_named(key, VALUE, value)
+}
+fn write_named(key: &Key, name: PCWSTR, value: &Option<Value>) -> Result<()> {
     // SAFETY: owned writable key, bytes borrowed for synchronous registry call.
     unsafe {
         match value {
             Some(value) => RegSetValueExW(
                 key.0,
-                VALUE,
+                name,
                 Some(0),
                 REG_VALUE_TYPE(value.kind),
                 Some(&value.bytes),
             )
             .ok()?,
             None => {
-                let result = RegDeleteValueW(key.0, VALUE);
+                let result = RegDeleteValueW(key.0, name);
                 if result != ERROR_FILE_NOT_FOUND {
                     result.ok()?;
                 }
@@ -362,6 +368,49 @@ pub fn recover(path: &Path) -> Result<()> {
     root.finish()?;
     fs::remove_file(path)?;
     Ok(())
+}
+
+fn machine_key(subkey: &str, create: bool) -> Result<Option<Key>> {
+    let name = wide(subkey);
+    let mut key = HKEY::default();
+    // SAFETY: fixed caller-owned subkey strings, borrowed predefined root, owned output key.
+    let status = unsafe {
+        if create {
+            RegCreateKeyExW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(name.as_ptr()),
+                None,
+                None,
+                REG_OPTION_NON_VOLATILE,
+                KEY_QUERY_VALUE | KEY_SET_VALUE,
+                None,
+                &mut key,
+                None,
+            )
+        } else {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(name.as_ptr()),
+                Some(0),
+                KEY_QUERY_VALUE,
+                &mut key,
+            )
+        }
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    status.ok()?;
+    Ok(Some(Key(key, None)))
+}
+pub(crate) fn machine_read(subkey: &str, name: &str) -> Result<Option<Value>> {
+    let name = wide(name);
+    read_named(machine_key(subkey, false)?.as_ref(), PCWSTR(name.as_ptr()))
+}
+pub(crate) fn machine_write(subkey: &str, name: &str, value: &Option<Value>) -> Result<()> {
+    let name = wide(name);
+    let key = machine_key(subkey, true)?.ok_or("machine_policy_key_missing")?;
+    write_named(&key, PCWSTR(name.as_ptr()), value)
 }
 
 #[cfg(test)]

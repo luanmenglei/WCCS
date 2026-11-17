@@ -1020,6 +1020,14 @@ pub fn controlled() -> Result<u8, Box<dyn std::error::Error>> {
         {
             return Err("desktop_identity_mismatch".into());
         }
+        let started = Instant::now();
+        // SAFETY: GetShellWindow borrows a window handle owned by the shell in this session.
+        while !input_desktop_active() || unsafe { GetShellWindow().0.is_null() } {
+            if started.elapsed() > std::time::Duration::from_secs(90) {
+                return Err("desktop_shell_initialization_timeout".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         pipe.send(&Actual {
             state: "desktop".into(),
             command_id: Some(request.command.command_id),

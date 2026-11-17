@@ -79,7 +79,7 @@ async fn query(
     // Apply authorization before filters and pagination. No unfiltered counts or facets escape.
     let rows = tx
         .query(
-            "SELECT * FROM events WHERE id<=$1 AND (occurred_at,id)<($2,$3)
+            "SELECT *, (SELECT jsonb_build_object('version',a.version,'status',a.status,'note',a.note,'actor_id',a.actor_id,'updated_at',a.updated_at) FROM event_actions a WHERE a.event_id=events.id) AS handling FROM events WHERE id<=$1 AND (occurred_at,id)<($2,$3)
         AND ($4 OR (cardinality(room_ids)>0 AND room_ids<@$5))
         AND ($6 OR operation<>'operator_save')
         AND ($7::bigint IS NULL OR occurred_at>=$7) AND ($8::bigint IS NULL OR occurred_at<=$8)
@@ -119,7 +119,7 @@ async fn query(
         "device_ids":row.get::<_,Vec<String>>("device_ids"),"room_ids":row.get::<_,Option<Vec<String>>>("room_ids"),
         "contest_id":row.get::<_,Option<String>>("contest_id"),"request_id":row.get::<_,Option<String>>("request_id"),
         "version":row.get::<_,Option<i64>>("version"),"outcome":row.get::<_,String>("outcome"),
-        "scope_kind":scope_kind(row),"detail":row.get::<_,Value>("detail"),"legacy":row.get::<_,bool>("legacy")
+        "handling":row.get::<_,Option<Value>>("handling"),"scope_kind":scope_kind(row),"detail":row.get::<_,Value>("detail"),"legacy":row.get::<_,bool>("legacy")
     })).collect();
     if id.is_some() {
         return items
@@ -174,4 +174,67 @@ fn scope_kind(row: &tokio_postgres::Row) -> &'static str {
         return "global";
     }
     "unknown"
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Action {
+    request_id: String,
+    event_id: i64,
+    version: i64,
+    status: String,
+    note: String,
+}
+pub async fn action(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(input): Json<Action>,
+) -> ApiResult<Json<Value>> {
+    if !wccs_protocol::valid_id(&input.request_id)
+        || input.event_id <= 0
+        || input.version < 0
+        || !["open", "acknowledged", "resolved"].contains(&input.status.as_str())
+        || input.note.trim().is_empty()
+        || input.note.len() > 2000
+    {
+        return Err(ApiError::bad("请选择处理状态并填写 1～2000 字节处置说明"));
+    }
+    let session = auth::admin(&app, &headers, true).await?;
+    let mut db = app.db.lock().await?;
+    let tx = db.transaction().await?;
+    let actor = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
+    let event = tx
+        .query_opt(
+            "SELECT room_ids,operation FROM events WHERE id=$1 FOR UPDATE",
+            &[&input.event_id],
+        )
+        .await?
+        .ok_or_else(|| ApiError::new(404, "事件不存在"))?;
+    actor.rooms(event.get::<_, Option<Vec<String>>>(0).as_deref())?;
+    if event.get::<_, String>(1) == "operator_save" && actor.role != "admin" {
+        return Err(ApiError::forbidden("操作员事件需管理员处理"));
+    }
+    let payload = json!(input);
+    if let Some(value) =
+        crate::management::previous(&tx, &input.request_id, "event_action", &payload).await?
+    {
+        return Ok(Json(value));
+    }
+    let version = tx
+        .query_opt(
+            "SELECT version FROM event_actions WHERE event_id=$1",
+            &[&input.event_id],
+        )
+        .await?
+        .map(|r| r.get::<_, i64>(0))
+        .unwrap_or(0);
+    if version != input.version {
+        return Err(ApiError::conflict("处置记录已变化，请重新查看事件"));
+    }
+    tx.execute("INSERT INTO event_actions VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(event_id) DO UPDATE SET version=$2,status=$3,note=$4,actor_id=$5,updated_at=$6",
+        &[&input.event_id,&(version+1),&input.status,&input.note,&actor.id,&wccs_protocol::now()]).await?;
+    let receipt = json!({"event_id":input.event_id,"version":version+1,"status":input.status});
+    crate::management::record(&tx, &input.request_id, "event_action", &payload, &receipt).await?;
+    tx.commit().await?;
+    Ok(Json(receipt))
 }

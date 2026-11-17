@@ -97,6 +97,11 @@ pub fn run(
         crate::health::worker(&health_path, &health_instance, health_stop)
     });
     let maintenance_path = path.clone();
+    let distribution_path = path.clone();
+    let distribution_stop = stop.clone();
+    let distribution_worker = std::thread::spawn(move || {
+        crate::distribution::worker(&distribution_path, test_mode, distribution_stop)
+    });
     let maintenance_executable = executable.clone();
     let maintenance_stop = stop.clone();
     let maintenance_instance = instance.clone();
@@ -173,6 +178,9 @@ pub fn run(
     maintenance_worker
         .join()
         .map_err(|_| "maintenance_worker_panicked")?;
+    distribution_worker
+        .join()
+        .map_err(|_| "distribution_worker_panicked")?;
     Ok(())
 }
 

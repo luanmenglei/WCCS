@@ -13,6 +13,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'client-common.ps1')
 $machineGuid = (Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Cryptography').MachineGuid
 if ($env:COMPUTERNAME -ne $ExpectedMachineName -or $machineGuid -ne $ExpectedMachineGuid) {
     throw 'The explicitly authorized Windows test machine does not match.'
@@ -109,11 +110,5 @@ Invoke-Agent -Arguments @('--provision-login-native', $configPath, $RecoverySecr
 if ([IO.Path]::GetFullPath($ProviderDll) -ne $providerPath) {
     Copy-Item -LiteralPath $ProviderDll -Destination $providerPath
 }
-@{ machine_guid = $machineGuid; provider = $providerPath; operation = [guid]::NewGuid().ToString() } |
-    ConvertTo-Json | Set-Content -LiteralPath $recordPath
-New-Item -Path $classPath -Force | Out-Null
-Set-Item -Path $classPath -Value $providerPath
-New-ItemProperty -Path $classPath -Name ThreadingModel -Value Apartment -PropertyType String -Force | Out-Null
-New-Item -Path $registrationPath -Force | Out-Null
-Set-Item -Path $registrationPath -Value 'WCCS contest login'
+Register-ClientLoginProvider $root $machineGuid
 Write-Output 'Provider registered. Start the matching service explicitly.'

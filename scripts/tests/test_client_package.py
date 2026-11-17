@@ -16,6 +16,47 @@ spec.loader.exec_module(package)
 
 
 class ClientPackageTests(unittest.TestCase):
+    def test_image_delivery_rejects_private_target_material(self):
+        image_spec = importlib.util.spec_from_file_location("image_package", SCRIPTS / "package-image.py")
+        image_package = importlib.util.module_from_spec(image_spec)
+        image_spec.loader.exec_module(image_package)
+        with tempfile.TemporaryDirectory(prefix="wccs-image-package-") as temporary:
+            root = Path(temporary)
+            names = ["bin/wccs-agent.exe", "bin/wccs-session.exe", "bin/wccs-inventory.exe", "bin/wccs-login-provider.dll", "runtime/pwsh.exe"]
+            names += ["scripts/" + name for name in package.SCRIPTS]
+            source = root / "client.zip"
+            package.write_archive(source, {name: b"synthetic" for name in names}, {
+                "schema_version": 1, "state_schema": 1, "target": "x86_64-pc-windows-msvc", "version": "test",
+            })
+            ca = root / "ca.crt"
+            ca.write_bytes(b"synthetic CA")
+            target = {"machine_name": "503-41", "machine_guid": "00000000-0000-0000-0000-000000000001",
+                      "install_directory": "C:/Program Files/WCCS", "service_name": "WCCS-Agent",
+                      "server": "https://example.test", "ca_sha256": package.digest(ca.read_bytes())}
+            output = root / "image.zip"
+            image_package.build(source, ca, target, output)
+            with zipfile.ZipFile(output) as archive:
+                self.assertEqual(json.loads(archive.read("image/image.json"))["server"], target["server"])
+                self.assertNotIn("image/mother-target.json", archive.namelist())
+                self.assertNotIn("device.json", archive.namelist())
+                self.assertIn("M3-M5-FIELD-GUIDE.md", archive.namelist())
+                contest = json.loads(archive.read("contest-scripts-v1.json"))
+                self.assertEqual(contest["runtime_file_version"], "7.6.9.500")
+                self.assertEqual({item["path"] for item in contest["files"]},
+                                 {"compilecpp.ps1", "submit.ps1", "contest-common.ps1"})
+            with self.assertRaises(ValueError):
+                image_package.build(source, ca, target | {"enrollment_token": "synthetic-secret"}, root / "bad.zip")
+
+    @unittest.skipUnless(os.name == "nt", "Windows image routines")
+    def test_image_identity_independence_retry_and_seal(self):
+        with tempfile.TemporaryDirectory(prefix="wccs-image-") as temporary:
+            result = subprocess.run(
+                ["pwsh", "-NoProfile", "-File", str(SCRIPTS / "tests/image-common-tests.ps1"), "-Root", temporary],
+                text=True, capture_output=True, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("image_common_checks_passed", result.stdout)
+
     def test_deterministic_archive_and_exact_hashes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

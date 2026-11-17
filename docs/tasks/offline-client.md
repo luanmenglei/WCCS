@@ -168,3 +168,12 @@ Windows 测试数据库使用既有 `D:/PostgreSQL/18/bin/pg_ctl.exe` 在回环 
 当前新增安装和一次性 SYSTEM 包装层的软件/文件回归通过，SCM、证书存储、真实账户和 LogonUI 修改仍需明确实机目标。长期 WSS 超时、多屏混合 DPI、长期显示、RDP/S4、进程树及实际复原软件继续保留原验收项。下一项可执行工作为携带完整包和逐机注册材料按现场表启动代表性机器测试，开发侧继续比赛脚本与 DOMjudge 闭环。Git 提交和推送等待用户明确要求。
 
 清理本轮旧候选 ZIP 和解包目录的命令被自动审批拦截，工具仅返回 `blocked by policy`，删除命令未执行。旧候选包继续保存在 `artifacts/offline-client/` 和 `local/offline-client-tests/`；最终可复制交付集合为独立的 `delivery/` 目录，已逐项核对总摘要。
+
+## 统一镜像接续（2026-11-16）
+
+新增镜像准备包和母机 Upgrade/Seal/Diagnose/Recover 入口，复用现有安装、恢复、包摘要和诊断。克隆任务自动生成当前系统目标与独立注册材料，封装处理原安装目录中的逐机材料，旧公共支持包随镜像保存。详见 [镜像记录](image-deployment.md) 和 [现场说明](image-deployment-field-guide.md)。
+
+
+## M3～M5 客户端交付（2026-11-17）
+
+新增比赛策略、HTTPS 分发和归档清理恢复能力，复用离线退出控制、保留会话、重连需新操作的既有规则。最新软件回归与服务器 schema 18 部署见 [开发记录](m3-m5-implementation.md)。503-41 更新后先按 [现场说明](m3-m5-field-guide.md) 验证，复原镜像保持与真实重启继续待验。

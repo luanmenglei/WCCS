@@ -7,6 +7,20 @@ const responseSchema = z.object({
   version: z.number(),
   profile: z.record(z.string(), z.unknown()).nullable(),
 });
+const competitionSchema = z.object({
+  compiler_tool_id: z.string(),
+  compiler_arguments: z.array(z.string()),
+  judge_url: z.string(),
+  contest_id: z.string(),
+  language_id: z.string(),
+});
+const defaultCompetition = {
+  compiler_tool_id: "gcc-cpp",
+  compiler_arguments: ["-std=c++17", "-O2", "-Wall"],
+  judge_url: "",
+  contest_id: "",
+  language_id: "cpp",
+};
 export function Preparation({
   toolVersion,
   disabled,
@@ -23,6 +37,27 @@ export function Preparation({
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  let competition: z.infer<typeof competitionSchema> | null = null;
+  try {
+    const profile = z.record(z.string(), z.unknown()).parse(JSON.parse(text));
+    const parsed = competitionSchema.safeParse(profile.competition);
+    if (parsed.success) competition = parsed.data;
+  } catch {
+    /* The JSON editor displays errors when publishing. */
+  }
+  function updateCompetition(patch: Partial<typeof defaultCompetition> | null) {
+    try {
+      const profile = z.record(z.string(), z.unknown()).parse(JSON.parse(text));
+      profile.competition =
+        patch === null
+          ? null
+          : { ...defaultCompetition, ...competition, ...patch };
+      setText(JSON.stringify(profile, null, 2));
+      setError("");
+    } catch {
+      setError("请先修正维护配置 JSON，再编辑竞赛命令设置。");
+    }
+  }
   async function reload() {
     const value = responseSchema.parse(await api("preparation"));
     setVersion(value.version);
@@ -93,6 +128,73 @@ export function Preparation({
         <fieldset
           disabled={disabled || busy || !access.manage || !access.allRooms}
         >
+          <label>
+            <input
+              type="checkbox"
+              checked={competition !== null}
+              onChange={(event) =>
+                updateCompetition(event.target.checked ? {} : null)
+              }
+            />
+            启用 compilecpp 和 submit
+          </label>
+          {competition && (
+            <>
+              <label>
+                编译器工具 ID
+                <input
+                  value={competition.compiler_tool_id}
+                  onChange={(event) =>
+                    updateCompetition({ compiler_tool_id: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                编译参数，每行一个
+                <textarea
+                  rows={3}
+                  value={competition.compiler_arguments.join("\n")}
+                  onChange={(event) =>
+                    updateCompetition({
+                      compiler_arguments: event.target.value.split("\n"),
+                    })
+                  }
+                />
+              </label>
+              <label>
+                DOMjudge HTTPS 地址
+                <input
+                  type="url"
+                  value={competition.judge_url}
+                  onChange={(event) =>
+                    updateCompetition({ judge_url: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                DOMjudge 比赛 ID
+                <input
+                  value={competition.contest_id}
+                  onChange={(event) =>
+                    updateCompetition({ contest_id: event.target.value })
+                  }
+                />
+              </label>
+              <label>
+                默认语言 ID
+                <input
+                  value={competition.language_id}
+                  onChange={(event) =>
+                    updateCompetition({ language_id: event.target.value })
+                  }
+                />
+              </label>
+              <p>
+                导入竞赛脚本包后发布，再执行脚本部署。普通账户桌面将出现“比赛终端”，编译器路径取自当前工具配置。submit
+                使用已核对的 DOMjudge IP 账号。
+              </p>
+            </>
+          )}
           <label>
             版本化配置 JSON
             <textarea

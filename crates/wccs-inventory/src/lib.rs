@@ -10,6 +10,9 @@ mod platform;
 pub use platform::collect;
 
 #[cfg(windows)]
+pub use platform::host_name;
+
+#[cfg(windows)]
 pub use platform::file_version;
 
 #[cfg(windows)]
@@ -17,3 +20,6 @@ pub use platform::network;
 
 #[cfg(windows)]
 pub use platform::health::HealthCollector;
+
+#[cfg(windows)]
+pub use platform::volumes::collect as volumes;

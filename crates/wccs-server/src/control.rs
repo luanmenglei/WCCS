@@ -281,6 +281,15 @@ async fn exchange(
                     saved.login.as_ref().is_some_and(|plan| {
                         report.actual.account.as_ref().is_some_and(|s| {
                             s.login_complete()
+                                && plan
+                                    .restrictions
+                                    .as_ref()
+                                    .filter(|r| r.enabled())
+                                    .is_none_or(|requested| {
+                                        s.policy.as_ref().is_some_and(|p| {
+                                            p.state == "applied" && &p.requested == requested
+                                        })
+                                    })
                                 && s.adapter == plan.snapshot.adapter
                                 && plan
                                     .snapshot

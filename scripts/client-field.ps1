@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Verify','Collect','Preflight','Install','RollbackInstall','Upgrade','Rollback','Start','Stop','Diagnose','InitializeLogin','Recover','RemoveProvider')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('Verify','Collect','Preflight','Install','RollbackInstall','Upgrade','Rollback','Start','Stop','Diagnose','InitializeLogin','Recover','RemoveProvider','ExportImageLogin')][string]$Action,
     [string]$Target,
     [string]$Identity,
     [string]$CaCertificate,
@@ -283,7 +283,11 @@ try {
         if (-not $Identity -or -not $CaCertificate) { throw 'per_machine_identity_and_ca_required' }
         $seed = Read-ClientJson $Identity
         if ($seed.device_id -notmatch '^[A-Za-z0-9_-]{1,80}$' -or $seed.enrollment_token -notmatch '^[a-fA-F0-9]{64}$' -or
-            @($seed.Keys | Where-Object { $_ -notin @('server','device_id','enrollment_token') }).Count -gt 0) { throw 'fresh_registration_material_required' }
+            @($seed.Keys | Where-Object { $_ -notin @('server','device_id','enrollment_token','image_enrollment') }).Count -gt 0) { throw 'fresh_registration_material_required' }
+        if ($seed.ContainsKey('image_enrollment') -and
+            ($seed.image_enrollment -isnot [bool] -or -not $seed.image_enrollment -or -not $seed.device_id.StartsWith('image-'))) {
+            throw 'image_registration_material_invalid'
+        }
         $targetInfo.server = Get-ClientOrigin $targetInfo.server
         if ($seed.server -and (Get-ClientOrigin $seed.server) -ne $targetInfo.server) { throw 'https_origin_mismatch' }
         if ($targetInfo.ca_sha256 -notmatch '^[a-fA-F0-9]{64}$' -or (Get-FileHash -LiteralPath $CaCertificate).Hash -ne $targetInfo.ca_sha256) { throw 'ca_hash_mismatch' }
@@ -401,6 +405,7 @@ try {
         }
         'Recover' { Stop-ClientService; Invoke-SystemOperation 'Recover'; Write-Output 'teaching_recovered_service_stopped' }
         'RemoveProvider' { Stop-ClientService; Invoke-SystemOperation 'RemoveProvider'; Write-Output 'provider_removed_service_stopped' }
+        'ExportImageLogin' { Stop-ClientService; Invoke-SystemOperation 'Recover'; Invoke-SystemOperation 'ExportImageLogin'; Write-Output 'image_login_template_exported' }
         'InitializeLogin' {
             if (-not $LoginConfiguration) { throw 'login_configuration_required' }
             $configuration = Read-ClientJson $LoginConfiguration

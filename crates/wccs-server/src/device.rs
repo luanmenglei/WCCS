@@ -198,7 +198,7 @@ pub async fn result(
 
 // Walk X-Forwarded-For from the transport peer toward the client, stopping
 // at the first untrusted hop. A trusted proxy must append/replace this header.
-fn source_address(
+pub(crate) fn source_address(
     peer: std::net::IpAddr,
     headers: &HeaderMap,
     trusted: &[std::net::IpAddr],

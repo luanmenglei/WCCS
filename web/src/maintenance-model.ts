@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const maintenanceTemplates: Record<string, string> = {
+  recovery: "赛后恢复",
   identify: "设备识别",
   prepare_desktop: "桌面入口",
   check_workspace: "普通账户工作目录检查",

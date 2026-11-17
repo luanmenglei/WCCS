@@ -43,6 +43,7 @@ async fn enrollment_lifecycle_rotation_and_restart() {
     .unwrap();
     let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
     let config = Config {
+        domjudge_config: None,
         bind: "127.0.0.1:0".into(),
         origin: String::new(),
         database_url: format!(
@@ -632,6 +633,7 @@ async fn authenticated_configuration_lifecycle() {
         .unwrap()
         .to_string();
     let config = Config {
+        domjudge_config: None,
         bind: "127.0.0.1:0".into(),
         origin: String::new(),
         database_url: format!(
@@ -976,6 +978,7 @@ async fn seating_migration_binding_and_concurrency() {
     db.batch_execute("UPDATE configuration_head SET version=1; INSERT INTO jobs(id,device_id,config_version,expires_at,result,received_at) VALUES ('old-job','legacy',1,9999999999,'{\"historical\":true}',0)").await.unwrap();
     let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
     let config = Config {
+        domjudge_config: None,
         bind: "127.0.0.1:0".into(),
         origin: String::new(),
         database_url: format!(
@@ -1013,7 +1016,7 @@ async fn seating_migration_binding_and_concurrency() {
             .await
             .unwrap()
             .get::<_, i32>(0),
-        12
+        18
     );
     let mut room = room_input("A", 2, 3);
     room["seats"][0]["expected_ip"] = json!("127.0.0.1");
@@ -1372,6 +1375,7 @@ async fn roster_import_assignment_isolation_and_recovery() {
         .unwrap();
     let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
     let config = Config {
+        domjudge_config: None,
         bind: "127.0.0.1:0".into(),
         origin: String::new(),
         database_url: format!(
@@ -1805,6 +1809,7 @@ async fn operators_scopes_events_and_recovery() {
     db.batch_execute("INSERT INTO audit_events(actor,operation,request_id,created_at) VALUES('historical-admin','legacy_action','legacy-request',100)").await.unwrap();
     let salt = SaltString::encode_b64(b"synthetic-salt-16").unwrap();
     let config = Config {
+        domjudge_config: None,
         bind: "127.0.0.1:0".into(),
         origin: String::new(),
         database_url: format!(
@@ -2131,6 +2136,31 @@ async fn operators_scopes_events_and_recovery() {
     .await;
     assert_eq!(results["items"].as_array().unwrap().len(), 1);
     let result_id = results["items"][0]["id"].as_str().unwrap();
+    let action = json!({"request_id":"handle-event","event_id":result_id.parse::<i64>().unwrap(),"version":0,"status":"acknowledged","note":"已核对设备，等待工作人员复测"});
+    assert_eq!(viewer.post("events/action", &action).await.status(), 403);
+    let handled = expect_ok(restored.post("events/action", &action).await).await;
+    assert_eq!(
+        expect_ok(restored.post("events/action", &action).await).await,
+        handled
+    );
+    let mut stale = action.clone();
+    stale["request_id"] = json!("handle-event-stale");
+    assert_eq!(restored.post("events/action", &stale).await.status(), 409);
+    stale["version"] = json!(1);
+    stale["status"] = json!("resolved");
+    expect_ok(restored.post("events/action", &stale).await).await;
+    assert_eq!(
+        expect_ok(viewer.get(&format!("events/{result_id}")).await).await["handling"]["status"],
+        "resolved"
+    );
+    let mut forbidden = action.clone();
+    forbidden["request_id"] = json!("event-outside-room");
+    forbidden["event_id"] = json!(1);
+    assert_eq!(
+        restored.post("events/action", &forbidden).await.status(),
+        403
+    );
+
     db.batch_execute("UPDATE devices SET observed_ip='10.0.2.1' WHERE id='a'")
         .await
         .unwrap();

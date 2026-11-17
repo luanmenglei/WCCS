@@ -10,9 +10,11 @@ use std::collections::HashMap;
 use tokio_postgres::{IsolationLevel, Transaction};
 use wccs_protocol::{control::*, digest, now, token, valid_id};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Write {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restrictions: Option<wccs_protocol::login::Restrictions>,
     request_id: String,
     contest_id: String,
     seat_ids: Vec<String>,
@@ -28,8 +30,9 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value> {
-    if !valid_id(&input.request_id)
+pub(crate) async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value> {
+    if (input.restrictions.is_some() && input.action != "prepare_login")
+        || !valid_id(&input.request_id)
         || !valid_id(&input.contest_id)
         || input.seat_ids.is_empty()
         || input.seat_ids.len() > 500
@@ -252,6 +255,13 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
         {
             target["status"] = json!("tools_unavailable");
         }
+        if input.restrictions.as_ref().is_some_and(|r| r.enabled()) && target["status"] == "ready" {
+            if target["account"]["policy"].is_null() {
+                target["status"] = json!("policy_unavailable");
+            } else if target["account"]["session"] == "contest" && !input.confirm_session_end {
+                target["status"] = json!("session_confirmation_required");
+            }
+        }
         targets.push(target);
     }
     let mut result = json!({"contest_id":input.contest_id,"contest_name":contest.get::<_,String>(0),"contest_version":contest.get::<_,i64>(1),"action":input.action,"duration_seconds":input.duration_seconds,"targets":targets});
@@ -259,6 +269,9 @@ async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value
         result["confirm_session_end"] = json!(input.confirm_session_end);
         result["tool_version"] = json!(tool_version);
         result["tool_paths"] = json!(tool_paths.unwrap_or_default());
+        if let Some(restrictions) = &input.restrictions {
+            result["restrictions"] = json!(restrictions);
+        }
     }
     result["preview_token"] = json!(digest(&result.to_string()));
     Ok(result)
@@ -314,6 +327,18 @@ pub async fn commit(
     if input.preview_token.as_deref() != planned["preview_token"].as_str() {
         return Err(ApiError::conflict("目标、身份或版本已变化，请重新预览"));
     }
+    let result = issue(&tx, &actor, &input, planned).await?;
+    tx.commit().await?;
+    Ok(Json(result))
+}
+
+pub(crate) async fn issue(
+    tx: &Transaction<'_>,
+    actor: &auth::Identity,
+    input: &Write,
+    planned: Value,
+) -> ApiResult<Value> {
+    let payload = serde_json::to_value(input).map_err(|_| ApiError::internal())?;
     let targets: Vec<_> = planned["targets"]
         .as_array()
         .unwrap()
@@ -327,7 +352,7 @@ pub async fn commit(
         .iter()
         .map(|target| target["device_id"].as_str().unwrap().to_owned())
         .collect();
-    actor.devices(&tx, &devices, &input.request_id).await?;
+    actor.devices(tx, &devices, &input.request_id).await?;
     // Allocate and persist the batch in this transaction so control renewals do
     // not wait for several database round trips per selected seat.
     let sequences = tx.query(
@@ -352,6 +377,7 @@ pub async fn commit(
             expires_at: issued_at + input.duration_seconds,
             login: if !target["account"].is_null() {
                 Some(wccs_protocol::login::LoginPlan {
+                    restrictions: input.restrictions.clone(),
                     tool_version: planned["tool_version"].as_i64().unwrap_or(0),
                     tool_paths: serde_json::from_value(planned["tool_paths"].clone())
                         .unwrap_or_default(),
@@ -381,11 +407,10 @@ pub async fn commit(
         .iter()
         .map(|t| t["room_id"].as_str().unwrap().to_owned())
         .collect();
-    auth::context(&tx, &input.request_id, Some(&rooms), &devices).await?;
+    auth::context(tx, &input.request_id, Some(&rooms), &devices).await?;
     let result = json!({"request_id":input.request_id,"commands":commands,"preview":planned});
-    management::record(&tx, &input.request_id, "waiting_commit", &payload, &result).await?;
-    tx.commit().await?;
-    Ok(Json(result))
+    management::record(tx, &input.request_id, "waiting_commit", &payload, &result).await?;
+    Ok(result)
 }
 
 #[derive(Default, Deserialize)]

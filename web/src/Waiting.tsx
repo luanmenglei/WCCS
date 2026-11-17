@@ -27,6 +27,7 @@ type Request = {
   confirm_session_end?: boolean;
   duration_seconds: number;
   preview_token?: string;
+  restrictions?: { block_removable_storage: boolean; block_shutdown: boolean };
 };
 export function Waiting({
   snapshot,
@@ -51,6 +52,8 @@ export function Waiting({
     mode === "login" ? "prepare_login" : "enter",
   );
   const [confirmSessionEnd, setConfirmSessionEnd] = useState(false);
+  const [blockStorage, setBlockStorage] = useState(false);
+  const [blockShutdown, setBlockShutdown] = useState(false);
   const loginMode = mode === "login";
   const [duration, setDuration] = useState(900);
   const [preview, setPreview] = useState<z.infer<
@@ -72,6 +75,8 @@ export function Waiting({
     action,
     duration,
     confirmSessionEnd,
+    blockStorage,
+    blockShutdown,
   ]);
   const current = reviewed === selection ? preview : null;
   useEffect(() => {
@@ -193,7 +198,17 @@ export function Waiting({
                     action,
                     duration_seconds: duration,
                     ...(action === "prepare_login"
-                      ? { confirm_session_end: confirmSessionEnd }
+                      ? {
+                          confirm_session_end: confirmSessionEnd,
+                          ...(blockStorage || blockShutdown
+                            ? {
+                                restrictions: {
+                                  block_removable_storage: blockStorage,
+                                  block_shutdown: blockShutdown,
+                                },
+                              }
+                            : {}),
+                        }
                       : {}),
                   };
                   const value = waitingPreviewSchema.parse(
@@ -211,15 +226,35 @@ export function Waiting({
             </button>
           </div>
           {loginMode && action === "prepare_login" && (
-            <label>
-              <input
-                type="checkbox"
-                checked={confirmSessionEnd}
-                disabled={busy}
-                onChange={(e) => setConfirmSessionEnd(e.target.checked)}
-              />
-              已核对所选教学会话保存工作，同意在准备过程中退出这些会话。
-            </label>
+            <>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={blockStorage}
+                  disabled={busy}
+                  onChange={(e) => setBlockStorage(e.target.checked)}
+                />
+                比赛期间禁止访问 USB 等可移动存储
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={blockShutdown}
+                  disabled={busy}
+                  onChange={(e) => setBlockShutdown(e.target.checked)}
+                />
+                禁止比赛账户软件关机（需重新登录账户）
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={confirmSessionEnd}
+                  disabled={busy}
+                  onChange={(e) => setConfirmSessionEnd(e.target.checked)}
+                />
+                已核对所选当前会话保存工作，同意在准备过程中退出这些会话。
+              </label>
+            </>
           )}
           {error && (
             <p className="banner error" role="alert">

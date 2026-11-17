@@ -25,6 +25,13 @@ if ($service -and ($service.PathName -ne $installation.command -or $service.Stat
 $result = @{schema_version=1; operation=$request.operation; action=$request.action; success=$false; code='system_operation_failed'}
 try {
     switch ($request.action) {
+        'ExportImageLogin' {
+            $destination = Join-Path $root 'data/image-template'
+            & (Join-Path $root 'bin/wccs-agent.exe') --export-login-template (Join-Path $root 'data/device.json') (Join-Path $root 'bin/wccs-session.exe') $destination *> $null
+            if ($LASTEXITCODE -ne 0) { throw 'image_template_export_failed' }
+            $template = Read-ClientJson (Join-Path $destination 'template.json')
+            Assert-ClientUserProfile $template.journal.account_sid
+        }
         'InitializeLogin' {
             & (Join-Path $PSScriptRoot 'login-test.ps1') -Action Install -ExpectedMachineName $request.machine_name -ExpectedMachineGuid $request.machine_guid -InstallDirectory $root -ProviderDll (Join-Path $root 'bin/wccs-login-provider.dll') -Configuration (Join-Path $root 'data/native-input.json') -RecoverySecretFile (Join-Path $root 'data/recovery.secret') | Out-Null
         }

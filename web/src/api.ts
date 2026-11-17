@@ -30,9 +30,20 @@ export async function api(
         : {}),
       ...(body === undefined
         ? {}
-        : { "Content-Type": "application/json", "X-CSRF-Token": csrf ?? "" }),
+        : {
+            "Content-Type":
+              body instanceof Blob
+                ? "application/octet-stream"
+                : "application/json",
+            "X-CSRF-Token": csrf ?? "",
+          }),
     },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body:
+      body === undefined
+        ? undefined
+        : body instanceof Blob
+          ? body
+          : JSON.stringify(body),
     signal: AbortSignal.any([AbortSignal.timeout(12000), controller.signal]),
   }).catch(() => {
     throw new ApiError("无法连接服务，请检查网络或等待服务恢复", 0);

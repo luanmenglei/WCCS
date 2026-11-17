@@ -41,6 +41,26 @@ export function matchesSearch(
 }
 
 export const pages = {
+  recovery: {
+    label: "赛后恢复",
+    group: "赛场管理",
+    description: "核对归档范围，执行清理、重启并确认教学恢复。",
+  },
+  "contest-control": {
+    label: "比赛安排",
+    group: "赛场管理",
+    description: "安排开始、暂停、恢复与结束，核对 DOMjudge 和桌面的联动结果。",
+  },
+  distribution: {
+    label: "文件分发",
+    group: "赛前准备",
+    description: "上传资料、选择设备、安排发布并核对下载与补发结果。",
+  },
+  domjudge: {
+    label: "DOMjudge 账号",
+    group: "赛前准备",
+    description: "核对选手、座位和评测账号，更新绑定并撤销换机前的网页会话。",
+  },
   presentation: {
     label: "等待展示",
     group: "赛前准备",

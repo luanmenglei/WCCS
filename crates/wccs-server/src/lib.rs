@@ -1,18 +1,23 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+mod contest_control;
 mod control;
 mod database;
 mod device;
 mod diagnostics;
+mod distribution;
+mod domjudge;
 mod events;
 mod health;
+mod image;
 mod lifecycle;
 mod maintenance;
 mod management;
 mod operators;
 mod preparation;
 mod presentation;
+mod recovery;
 mod roster;
 mod seating;
 mod waiting;
@@ -47,6 +52,8 @@ pub struct Config {
     pub static_dir: String,
     #[serde(default)]
     pub trusted_proxies: Vec<std::net::IpAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domjudge_config: Option<String>,
     pub admin_username: String,
     pub admin_password_hash: String,
 }
@@ -58,7 +65,11 @@ pub struct AppState {
     pub preview_db: database::Database,
     pub sessions: Mutex<auth::Sessions>,
     pub password_slots: Arc<Semaphore>,
+    pub download_slots: Semaphore,
+    pub archive_slots: Semaphore,
+    pub download_limits: Mutex<HashMap<String, Instant>>,
     pub auth_limits: Mutex<HashMap<&'static str, (Instant, u32)>>,
+    pub(crate) domjudge: Option<domjudge::Remote>,
 }
 
 #[derive(Debug)]
@@ -120,6 +131,11 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         return Err("HTTP 仅允许本地回环验证，部署请配置 HTTPS 反向代理与 origin".into());
     }
     argon2::PasswordHash::new(&config.admin_password_hash).map_err(|_| "管理员密码摘要无效")?;
+    let domjudge = config
+        .domjudge_config
+        .as_deref()
+        .map(domjudge::Remote::load)
+        .transpose()?;
     let database = database::Database::new(&config.database_url)?;
     let preview_db = database::Database::new(&config.database_url)?;
     let mut db = database.lock().await.map_err(|_| "数据库连接不可用")?;
@@ -135,7 +151,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=12) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=18) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -193,20 +209,53 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         tx.batch_execute(include_str!("../migrations/012_preparation.sql"))
             .await?;
     }
+    if versions[0].get::<_, i32>(0) <= 12 {
+        tx.batch_execute(include_str!("../migrations/013_image_enrollment.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 13 {
+        tx.batch_execute(include_str!("../migrations/014_domjudge.sql"))
+            .await?;
+    }
+    tx.execute("UPDATE domjudge_jobs SET stage='interrupted',detail='server_restarted_review_required',updated_at=$1 WHERE stage IN ('queued','running')", &[&wccs_protocol::now()]).await?;
+    if versions[0].get::<_, i32>(0) <= 14 {
+        tx.batch_execute(include_str!("../migrations/015_distribution.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 15 {
+        tx.batch_execute(include_str!("../migrations/016_contest_control.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 16 {
+        tx.batch_execute(include_str!("../migrations/017_event_actions.sql"))
+            .await?;
+    }
+    if versions[0].get::<_, i32>(0) <= 17 {
+        tx.batch_execute(include_str!("../migrations/018_recovery_archives.sql"))
+            .await?;
+    }
+    tx.execute("UPDATE contest_control_jobs SET stage='interrupted',detail='server_restarted_review_required',updated_at=$1 WHERE stage IN ('scheduled','running')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$1 WHERE stage NOT IN ('failed','cancelled','expired')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE control_devices SET connected=false", &[])
         .await?;
     tx.commit().await?;
     drop(db);
-    Ok(Arc::new(AppState {
+    let app = Arc::new(AppState {
         config,
         server_epoch: wccs_protocol::token(),
         db: database,
         preview_db,
         sessions: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(2)),
+        download_slots: Semaphore::new(16),
+        archive_slots: Semaphore::new(2),
+        download_limits: Mutex::new(HashMap::new()),
         auth_limits: Mutex::new(HashMap::new()),
-    }))
+        domjudge,
+    });
+    domjudge::start(&app);
+    contest_control::start(&app);
+    Ok(app)
 }
 
 async fn response_policy(request: Request, next: Next) -> Response {
@@ -248,15 +297,36 @@ pub fn router(app: App) -> Router {
         .route("/api/maintenance/preview", post(maintenance::preview))
         .route("/api/maintenance/commit", post(maintenance::commit))
         .route("/api/preparation", get(preparation::get).post(preparation::save))
+        .route("/api/contest-control", get(contest_control::list))
+        .route("/api/contest-control/preview", post(contest_control::preview))
+        .route("/api/contest-control/commit", post(contest_control::commit))
+        .route("/api/contest-control/cancel", post(contest_control::cancel))
+        .route("/api/domjudge", get(domjudge::list))
+        .route("/api/domjudge/preview", post(domjudge::preview))
+        .route("/api/domjudge/commit", post(domjudge::commit))
+        .route("/api/distribution", get(distribution::list))
+        .route("/api/distribution/artifacts", post(distribution::create))
+        .route("/api/distribution/artifacts/{id}/{index}", post(distribution::upload))
+        .route("/api/distribution/preview", post(distribution::preview))
+        .route("/api/distribution/commit", post(distribution::commit))
+        .route("/api/distribution/cancel", post(distribution::cancel))
+        .route("/api/device/distribution/poll", post(distribution::poll))
+        .route("/api/device/distribution/progress", post(distribution::progress))
+        .route("/api/device/distribution/{job}/{index}", get(distribution::download))
         .route("/api/maintenance", get(maintenance::list))
         .route("/api/maintenance/cancel", post(maintenance::cancel))
         .route("/api/device/maintenance/poll", post(maintenance::poll))
-        .route("/api/device/maintenance/result", post(maintenance::result))
+        .route("/api/device/maintenance/result", post(maintenance::result).layer(DefaultBodyLimit::max(4 * 1024 * 1024)))
         .route("/api/login", post(auth::login))
         .route("/api/session", get(auth::session))
         .route("/api/logout", post(auth::logout))
         .route("/api/operators", get(operators::list).post(operators::save))
+        .route("/api/recovery", get(recovery::list))
+        .route("/api/recovery/archives/{job}", get(recovery::download))
+        .route("/api/device/recovery/{job}/{file}/{index}", post(recovery::upload))
+        .route("/api/device/recovery/{job}/finish", post(recovery::finish))
         .route("/api/events", get(events::list))
+        .route("/api/events/action", post(events::action))
         .route("/api/events/{id}", get(events::detail))
         .route("/api/state", get(management::state))
         .route("/api/roster/preview", post(roster::preview))
@@ -275,6 +345,8 @@ pub fn router(app: App) -> Router {
         .route("/api/seating/check", post(seating::check))
         .route("/api/seating/review", post(seating::review))
         .route("/api/device/register", post(device::register))
+        .route("/api/device/image-register", post(image::register))
+        .route("/api/images/action", post(image::action))
         .route("/api/device/heartbeat", post(device::heartbeat))
         .route("/api/device/result", post(device::result))
         .fallback_service(ServeDir::new(&app.config.static_dir))

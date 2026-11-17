@@ -13,7 +13,8 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ["client-field.ps1", "client-common.ps1", "client-system.ps1", "waiting-service.ps1", "login-test.ps1"]
+SCRIPTS = ["client-field.ps1", "client-common.ps1", "client-system.ps1", "waiting-service.ps1", "login-test.ps1",
+           "image-common.ps1", "image-deployment.ps1"]
 
 
 def digest(data):

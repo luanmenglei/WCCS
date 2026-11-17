@@ -127,6 +127,62 @@ test("座位目标预览识别设备禁用，未知生命周期拒绝", () => {
   );
 });
 
+test("镜像审核显示初始化阶段并保留旧式 image 前缀设备", () => {
+  const snapshot = stateSchema.parse({
+    protocol_version: 1,
+    server_time: 0,
+    version: 0,
+    configuration: { schema_version: 1, config_version: "0", tools: [] },
+    targets: [],
+    catalog: [],
+    roster: { version: 0, contests: [] },
+    registration_window: { version: 1, closes_at: 0, open: false },
+    devices: [
+      {
+        ...device,
+        id: "image-legacy",
+        name: "旧式设备申请",
+        lifecycle: "pending",
+      },
+      {
+        ...device,
+        id: "image-clone",
+        name: "镜像待审核设备",
+        lifecycle: "pending",
+        image_managed: true,
+      },
+    ],
+    image_applications: [
+      {
+        id: "application",
+        device_id: "image-clone",
+        machine_name: "503-41",
+        observed_ip: "192.0.2.41",
+        previous_ip: null,
+        created_at: 1,
+        expires_at: 2,
+        base_version: 1,
+        generation: 1,
+        competing: 1,
+        online: false,
+        bootstrap_status: "login_template_failed",
+      },
+    ],
+  });
+  const html = renderToStaticMarkup(
+    createElement(Enrollment, {
+      snapshot,
+      disabled: false,
+      onMutate: async () => {},
+    }),
+  );
+  assert.match(html, /比赛账户模板导入失败/);
+  assert.match(html, /503-41/);
+  assert.match(html, /旧式设备申请/);
+  assert.doesNotMatch(html, /镜像待审核设备/);
+  assert.match(html, /确认更新这些设备的凭据/);
+});
+
 test("重新授权设备按配置范围提供重查，撤销目标可取消选择", () => {
   const html = renderToStaticMarkup(
     createElement(DeviceDetails, {

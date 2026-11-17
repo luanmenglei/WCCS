@@ -1,9 +1,30 @@
 //! Public account observations contain no credentials. Native logon remains capability gated.
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Restrictions {
+    pub block_removable_storage: bool,
+    pub block_shutdown: bool,
+}
+impl Restrictions {
+    pub fn enabled(&self) -> bool {
+        self.block_removable_storage || self.block_shutdown
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyState {
+    pub requested: Restrictions,
+    pub state: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyState>,
     pub adapter: String,
     pub revision: u64,
     pub phase: String,
@@ -21,6 +42,7 @@ pub struct AccountState {
 impl AccountState {
     pub fn unavailable() -> Self {
         Self {
+            policy: None,
             adapter: "unavailable".into(),
             revision: 0,
             phase: "teaching".into(),
@@ -36,7 +58,9 @@ impl AccountState {
         }
     }
     pub fn valid(&self) -> bool {
-        ["unavailable", "simulation", "windows_test"].contains(&self.adapter.as_str())
+        self.policy.as_ref().is_none_or(|p| {
+            ["ready", "applied", "pending", "recovery_failed"].contains(&p.state.as_str())
+        }) && ["unavailable", "simulation", "windows_test"].contains(&self.adapter.as_str())
             && [
                 "teaching",
                 "preparing",
@@ -102,6 +126,10 @@ impl AccountState {
     }
     pub fn login_complete(&self) -> bool {
         self.valid()
+            && self
+                .policy
+                .as_ref()
+                .is_none_or(|p| p.state != "recovery_failed")
             && ["simulation", "windows_test"].contains(&self.adapter.as_str())
             && self.phase == "controlled"
             && self.account == "owned"
@@ -118,6 +146,8 @@ impl AccountState {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LoginPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restrictions: Option<Restrictions>,
     #[serde(default)]
     pub tool_version: i64,
     #[serde(default)]

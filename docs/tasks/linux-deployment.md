@@ -182,3 +182,14 @@ sudo sh -c 'runuser -u postgres -- pg_restore --exit-on-error -d wccs_restore_ch
 初次部署结束时保留 HTTPS 管理入口、运行中的 WCCS/Nginx/PostgreSQL、版本目录、配置、备份与恢复验证数据库，注册窗口关闭，开发机测试宿主停止。同日后续已执行整台服务器重启：WCCS、Nginx、PostgreSQL 自动恢复，客户端重连，旧授权失效，浏览器重新登录后历史保留。重启后内核为已安装的 `7.0.0-42-generic`，二进制版本不变。证据及当前状态见 [独立 Windows 10 原生联调](native-windows-linux.md)。
 
 本切片完成 Linux 原生和当前用户 Windows 宿主的跨机闭环。同日后续已覆盖独立 Windows 10 LocalSystem 机器证书信任、SCM/Session 0、普通比赛账户即时登录、维护模板和文件故障恢复；长期图形/连接稳定性等剩余项见上述联调记录。后续在同一 Linux 目标接入 200～300 台控制续租、500 模拟客户端、300 座位 UI 和真实 DOMjudge 测试实例。现场镜像、复原软件、多屏/RDP 继续保留原验收范围。
+
+## 统一镜像接续（2026-11-16）
+
+测试服务器已部署 7809210-image-1116.4，schema 13。部署前备份位于 /var/backups/wccs/image-1116.3，原 /etc/wccs 配置摘要、工具版本 4、准备配置版本 9 和机房座位名单表摘要一致。HTTPS、管理登录、状态与页面验证通过。详见 [镜像记录](image-deployment.md) 和 [现场说明](image-deployment-field-guide.md)。
+
+
+## M3～M5 部署更新（2026-11-17）
+
+当前 WCCS 为 `/opt/wccs/releases/7809210-m3m5-1117.2`，schema 18，备份 `/var/backups/wccs/m3m5-1117.2` 已在独立 PostgreSQL 库恢复验证。原有工具与准备配置版本 4/9、3 台设备、2 个机房保留。`/etc/wccs/domjudge.json` 为独立连接材料，server.json 新增 domjudge_config，其他配置保持一致。首次发布因公共 CA 读取权限失败自动回退，修复后重试及 HTTPS 核验通过。
+
+DOMjudge 9.0.2 位于 HTTPS 8443，单 judgehost 使用 CPU 2，MariaDB 独立于 WCCS PostgreSQL。最新备份 `/var/backups/wccs/domjudge-20261116T184506Z` 含数据库、服务设置及 WCCS 扩展，独立恢复后 5 条提交、5 条判题、15 个测试点一致。服务器整机重启和正式容量仍待验。完整材料位置、扩展边界和回退证据见 [开发记录](m3-m5-implementation.md)。

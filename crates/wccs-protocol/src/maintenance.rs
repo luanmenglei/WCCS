@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Template {
+    Recovery { options: crate::recovery::Options },
     Identify { duration_seconds: u64 },
     PrepareDesktop { profile_version: i64 },
     CheckWorkspace { profile_version: i64 },
@@ -11,7 +12,9 @@ pub enum Template {
 }
 impl Template {
     pub fn capability(&self) -> &str {
-        if matches!(self, Self::Identify { .. }) {
+        if matches!(self, Self::Recovery { .. }) {
+            "recovery-v1"
+        } else if matches!(self, Self::Identify { .. }) {
             "identify-v1"
         } else {
             "preparation-v1"
@@ -19,7 +22,7 @@ impl Template {
     }
     pub fn profile_version(&self) -> Option<i64> {
         match self {
-            Self::Identify { .. } => None,
+            Self::Identify { .. } | Self::Recovery { .. } => None,
             Self::PrepareDesktop { profile_version }
             | Self::CheckWorkspace { profile_version }
             | Self::DeployScripts { profile_version } => Some(*profile_version),
@@ -27,6 +30,7 @@ impl Template {
     }
     pub fn valid(&self) -> bool {
         match self {
+            Self::Recovery { options } => options.valid(),
             Self::Identify { duration_seconds } => (5..=120).contains(duration_seconds),
             Self::PrepareDesktop { profile_version }
             | Self::CheckWorkspace { profile_version }
@@ -38,6 +42,8 @@ impl Template {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Command {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::recovery::Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preparation: Option<crate::preparation::Snapshot>,
     pub schema_version: u32,
@@ -57,6 +63,8 @@ pub struct Command {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Result {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::recovery::Manifest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<crate::preparation::Step>,
     pub schema_version: u32,
@@ -67,7 +75,8 @@ pub struct Result {
 }
 impl Result {
     pub fn valid(&self) -> bool {
-        self.steps.len() <= 128
+        self.recovery.as_ref().is_none_or(|m| m.valid())
+            && self.steps.len() <= 128
             && self.steps.iter().all(|step| {
                 step.path.len() <= 1024
                     && step.detail.len() <= 200
@@ -96,6 +105,12 @@ impl Result {
             ]
             .contains(&self.stage.as_str())
             && [
+                "recovery_inspected",
+                "archive_verified",
+                "archive_skipped",
+                "cleanup_complete",
+                "reboot_requested",
+                "recovery_started",
                 "persisted",
                 "display_observed",
                 "display_closed",

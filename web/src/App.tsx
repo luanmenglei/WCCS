@@ -1,4 +1,8 @@
+import { Recovery } from "./Recovery";
 import { Presentation } from "./Presentation";
+import { ContestControl } from "./ContestControl";
+import { Domjudge } from "./Domjudge";
+import { Distribution } from "./Distribution";
 import { Maintenance } from "./Maintenance";
 import { Waiting } from "./Waiting";
 import { AccessContext, roleLabels } from "./access";
@@ -440,7 +444,50 @@ export function App() {
                 ) : (
                   <p role="alert">操作员管理需要管理员权限。</p>
                 ))}
-              {page === "events" && <Events />}
+              {page === "events" && (
+                <Events
+                  csrf={session.csrf}
+                  disabled={session.role === "viewer"}
+                />
+              )}
+              {page === "recovery" && (
+                <Recovery
+                  key={contestId}
+                  snapshot={snapshot}
+                  contestId={contestId}
+                  csrf={session.csrf}
+                  disabled={busy || !connected || session.role === "viewer"}
+                  onMutate={mutate}
+                />
+              )}
+              {page === "distribution" && (
+                <Distribution
+                  snapshot={snapshot}
+                  csrf={session.csrf}
+                  disabled={busy || !connected}
+                  onMutate={mutate}
+                />
+              )}
+              {page === "contest-control" && (
+                <ContestControl
+                  key={contestId}
+                  snapshot={snapshot}
+                  contestId={contestId}
+                  csrf={session.csrf}
+                  disabled={busy || !connected}
+                  onMutate={mutate}
+                />
+              )}
+              {page === "domjudge" && (
+                <Domjudge
+                  key={contestId}
+                  snapshot={snapshot}
+                  contestId={contestId}
+                  csrf={session.csrf}
+                  disabled={busy || !connected}
+                  onMutate={mutate}
+                />
+              )}
               {page === "presentation" && (
                 <Presentation
                   key={contestId}

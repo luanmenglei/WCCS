@@ -124,3 +124,8 @@ python scripts/package-contest-scripts.py --source-directory local/scripts-src -
 ```
 
 脚本包仅部署和激活，实际编译/提交命令契约另行验收。新增维护任务不得绕过任务日志、配置版本、普通账户访问检查和文件回退。参见 [对齐记录](tasks/machine-tools-alignment.md)。
+
+
+## M3～M5 回归入口
+
+使用既有 check-m2.ps1、check-rust.ps1、check-linux.py 和 scripts/tests 覆盖 DOMjudge 调度、分发、策略模拟与恢复。客户端 `--distribution-test` 与 `--recovery-test` 必须传入独立测试身份和实例，只允许身份旁的模拟目录。原生策略与重启通过指定实机受控入口验证。ZIP 归档固定使用 zip 9.6.0 的 Stored 写入，依赖已锁定。实际证据见 [连续开发记录](tasks/m3-m5-implementation.md)。

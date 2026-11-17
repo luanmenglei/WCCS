@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
+pub mod recovery;
+
 pub mod control;
 pub mod diagnostics;
+pub mod distribution;
 pub mod health;
 pub mod login;
 pub mod maintenance;
@@ -127,6 +130,30 @@ pub struct Registration {
     pub device_id: String,
     pub enrollment_token: String,
     pub device_token: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageRegistration {
+    pub registration: Registration,
+    pub machine_name: String,
+    #[serde(default)]
+    pub bootstrap_status: String,
+}
+
+pub fn image_device_id(machine_name: &str) -> Option<String> {
+    if machine_name.is_empty()
+        || machine_name.len() > 63
+        || !machine_name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    {
+        return None;
+    }
+    Some(format!(
+        "image-{}",
+        &digest(&machine_name.to_ascii_uppercase())[..32]
+    ))
 }
 
 #[derive(Debug, Deserialize, Serialize)]

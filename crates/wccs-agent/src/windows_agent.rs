@@ -14,11 +14,46 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Identity {
+    #[serde(default)]
+    pub image_enrollment: bool,
     pub server: String,
     pub device_id: String,
     pub enrollment_token: String,
     #[serde(default)]
     pub device_token: Option<String>,
+}
+
+impl Identity {
+    pub fn registration_body(
+        &self,
+        registration: Registration,
+        path: &Path,
+    ) -> Result<serde_json::Value> {
+        if self.image_enrollment {
+            let machine_name = wccs_inventory::host_name()?;
+            if wccs_protocol::image_device_id(&machine_name).as_deref() != Some(&self.device_id) {
+                return Err("image_machine_name_changed_requires_review".into());
+            }
+            Ok(serde_json::to_value(wccs_protocol::ImageRegistration {
+                registration,
+                machine_name,
+                bootstrap_status: fs::read(path.with_extension("image-status.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|value| value["code"].as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+            })?)
+        } else {
+            Ok(serde_json::to_value(registration)?)
+        }
+    }
+    pub fn registration_path(&self) -> &'static str {
+        if self.image_enrollment {
+            "image-register"
+        } else {
+            "register"
+        }
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -120,8 +155,11 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
             device_token: credential.clone(),
         };
         let registered: serde_json::Value = client
-            .post(format!("{server}/api/device/register"))
-            .json(&registration)
+            .post(format!(
+                "{server}/api/device/{}",
+                identity.registration_path()
+            ))
+            .json(&identity.registration_body(registration, path)?)
             .send()?
             .error_for_status()?
             .json()?;

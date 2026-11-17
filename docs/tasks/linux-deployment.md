@@ -193,3 +193,8 @@ sudo sh -c 'runuser -u postgres -- pg_restore --exit-on-error -d wccs_restore_ch
 当前 WCCS 为 `/opt/wccs/releases/7809210-m3m5-1117.2`，schema 18，备份 `/var/backups/wccs/m3m5-1117.2` 已在独立 PostgreSQL 库恢复验证。原有工具与准备配置版本 4/9、3 台设备、2 个机房保留。`/etc/wccs/domjudge.json` 为独立连接材料，server.json 新增 domjudge_config，其他配置保持一致。首次发布因公共 CA 读取权限失败自动回退，修复后重试及 HTTPS 核验通过。
 
 DOMjudge 9.0.2 位于 HTTPS 8443，单 judgehost 使用 CPU 2，MariaDB 独立于 WCCS PostgreSQL。最新备份 `/var/backups/wccs/domjudge-20261116T184506Z` 含数据库、服务设置及 WCCS 扩展，独立恢复后 5 条提交、5 条判题、15 个测试点一致。服务器整机重启和正式容量仍待验。完整材料位置、扩展边界和回退证据见 [开发记录](m3-m5-implementation.md)。
+
+
+## 稳定性配套部署（2026-11-17）
+
+后端、Web 和 Nginx 已更新至 `/opt/wccs/releases/7b6418e-stability-1117.1`，schema 18。备份为 `/var/backups/wccs/stability-1117.1`，已完成独立数据库恢复验证。原配置摘要、业务表摘要及配置版本 4/9 一致，三个服务 active。HTTPS、管理员登录、恢复 API、静态资源精确匹配、新能力摘要续租和大回执代理检查通过。实际命令与回执见 [稳定性服务端更新记录](client-deployment-stability.md#服务端更新2026-11-17)。

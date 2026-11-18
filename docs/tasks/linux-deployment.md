@@ -198,3 +198,7 @@ DOMjudge 9.0.2 位于 HTTPS 8443，单 judgehost 使用 CPU 2，MariaDB 独立�
 ## 稳定性配套部署（2026-11-17）
 
 后端、Web 和 Nginx 已更新至 `/opt/wccs/releases/7b6418e-stability-1117.1`，schema 18。备份为 `/var/backups/wccs/stability-1117.1`，已完成独立数据库恢复验证。原配置摘要、业务表摘要及配置版本 4/9 一致，三个服务 active。HTTPS、管理员登录、恢复 API、静态资源精确匹配、新能力摘要续租和大回执代理检查通过。实际命令与回执见 [稳定性服务端更新记录](client-deployment-stability.md#服务端更新2026-11-17)。
+
+## 审查修复发布（2026-11-18）
+
+`10.16.37.123` 已切换至 `/opt/wccs/releases/f101380-review-1118.1`。schema 19、配置及业务数据摘要、外部 HTTPS 与服务状态均已验证。原库备份位于 `/var/backups/wccs/review-1118.1`。Linux 测试及恢复库信息见[发布与线上核验](project-review-2026-11-18.md#发布与线上核验2026-11-18)。

@@ -643,7 +643,17 @@ async fn domjudge_jobs_require_global_authority_and_explicit_restart_review() {
     assert_eq!(listed["jobs"], json!([]));
     let input = json!({"request_id":token(),"contest_id":"contest","remote_contest_id":"demo",
         "group_id":"participants","participant_ids":["participant-1"]});
+    assert_eq!(f.admin.post("domjudge/preview", &input).await.status(), 409);
+    let binding = json!({"request_id":token(),"contest_id":"contest","remote_contest_id":"demo","previous":null});
+    let bound = expect_ok(f.admin.post("domjudge/bind", &binding).await).await;
+    assert_eq!(
+        bound,
+        expect_ok(f.admin.post("domjudge/bind", &binding).await).await
+    );
     assert_eq!(f.admin.post("domjudge/preview", &input).await.status(), 400);
+    let mut wrong = input.clone();
+    wrong["remote_contest_id"] = json!("wrong");
+    assert_eq!(f.admin.post("domjudge/preview", &wrong).await.status(), 409);
     f.db.execute(
         "UPDATE operators SET all_rooms=false,role='viewer' WHERE username='test-admin'",
         &[],

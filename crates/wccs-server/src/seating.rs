@@ -266,6 +266,18 @@ async fn room_preview(tx: &Transaction<'_>, input: &RoomWrite) -> ApiResult<Valu
     if let Some(row) = tx.query_opt("SELECT c.name,p.code FROM assignments a JOIN contests c ON c.id=a.contest_id JOIN participants p ON p.id=a.participant_id WHERE a.seat_id=ANY($1) LIMIT 1", &[&removed_ids]).await? {
         return Err(ApiError::conflict(&format!("移除座位仍分配给比赛 {} 的选手 {}，请在对应比赛先调整或解除分配",row.get::<_,String>(0),row.get::<_,String>(1))));
     }
+    if tx
+        .query_opt(
+            "SELECT 1 FROM pause_seats WHERE seat_id=ANY($1) LIMIT 1",
+            &[&removed_ids],
+        )
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::conflict(
+            "不能移除待恢复的暂停座位，请先完成比赛恢复",
+        ));
+    }
     let mut changes = Vec::new();
     for seat in &input.seats {
         let previous = old_seats
@@ -538,17 +550,14 @@ pub async fn review(
     {
         return Ok(Json(response));
     }
-    let count = tx.execute("UPDATE devices SET excluded=$1,needs_review=false,address_version=address_version+1 WHERE id=$2 AND address_version=$3", &[&input.exclude,&input.device_id,&input.base_version]).await?;
-    if count == 0 {
-        return Err(ApiError::conflict("设备地址已变化，请重新加载后核对"));
-    }
+    let version: i64 = tx.query_opt("UPDATE devices SET excluded=$1,needs_review=false,address_version=address_version+CASE WHEN excluded<>$1 OR needs_review THEN 1 ELSE 0 END WHERE id=$2 AND address_version=$3 RETURNING address_version", &[&input.exclude,&input.device_id,&input.base_version]).await?.ok_or_else(|| ApiError::conflict("设备地址已变化，请重新加载后核对"))?.get(0);
     let response = management::remember(
         &tx,
         &app,
         &input.request_id,
         "address_review",
         &payload,
-        input.base_version + 1,
+        version,
     )
     .await?;
     tx.commit().await?;

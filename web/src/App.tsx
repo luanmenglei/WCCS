@@ -27,7 +27,27 @@ import {
 import { ConfigurationEditor } from "./ConfigurationEditor";
 import { Rooms } from "./Rooms";
 import { Seats } from "./Seats";
-import { pages, pageFromHash } from "./fleet";
+import { pages, pageFromHash, type Page } from "./fleet";
+
+const navigation: { group: string; routes: Page[] }[] = [
+  { group: "现场巡查", routes: ["seats", "devices", "events"] },
+  {
+    group: "赛前布置",
+    routes: [
+      "enrollment",
+      "rooms",
+      "roster",
+      "domjudge",
+      "configuration",
+      "targets",
+      "login",
+      "presentation",
+      "distribution",
+    ],
+  },
+  { group: "比赛与收场", routes: ["waiting", "contest-control", "recovery"] },
+  { group: "系统管理", routes: ["maintenance", "operators"] },
+];
 import { Enrollment } from "./Lifecycle";
 import { Devices } from "./Devices";
 
@@ -65,6 +85,7 @@ export function App() {
   const [error, setError] = useState("");
   const [connectionError, setConnectionError] = useState("");
   const [notice, setNotice] = useState("");
+  const [receipt, setReceipt] = useState("");
   const [busy, setBusy] = useState(false);
   const [editorKey, setEditorKey] = useState(0);
   const requestIds = useRef(new Map<string, string>());
@@ -73,6 +94,7 @@ export function App() {
       sessionEpoch.current++;
       advanceSession();
       requestIds.current.clear();
+      setReceipt("");
       setSession(null);
       setSnapshot(null);
       setSeatSelection([]);
@@ -177,6 +199,7 @@ export function App() {
     setBusy(true);
     setError("");
     setNotice("");
+    setReceipt("");
     const key = JSON.stringify([path, body]);
     const requestId =
       typeof body.request_id === "string"
@@ -186,13 +209,28 @@ export function App() {
     try {
       await api(path, { ...body, request_id: requestId }, session.csrf);
       if (epoch !== sessionEpoch.current) return;
-      await refresh();
-      if (epoch !== sessionEpoch.current) return;
       requestIds.current.delete(key);
+      setReceipt(requestId);
       setNotice(success);
+      try {
+        await refresh();
+      } catch (refreshError) {
+        if (epoch === sessionEpoch.current) {
+          setNotice(
+            `操作已受理（${requestId}）。状态刷新失败，请刷新核对，不要重新提交。`,
+          );
+          setConnectionError(message(refreshError));
+        }
+      }
     } catch (error) {
       if (epoch === sessionEpoch.current) {
-        setError(message(error));
+        if (
+          error instanceof ApiError &&
+          (error.status === 0 || error.status >= 500)
+        ) {
+          setReceipt(requestId);
+          setError(`未能确认请求 ${requestId} 的结果，请先核对任务记录。`);
+        } else setError(message(error));
         if (error instanceof ApiError && error.status === 401) {
           sessionEpoch.current++;
           advanceSession();
@@ -293,23 +331,21 @@ export function App() {
             </span>
           </div>
           <nav aria-label="页面导航" id="main-navigation">
-            {["赛场管理", "赛前准备", "系统管理"].map((group) => (
+            {navigation.map(({ group, routes }) => (
               <div className="nav-group" key={group}>
                 <p>{group}</p>
-                {Object.entries(pages)
+                {routes
                   .filter(
-                    ([id, info]) =>
-                      info.group === group &&
-                      (id !== "operators" || session.role === "admin"),
+                    (id) => id !== "operators" || session.role === "admin",
                   )
-                  .map(([id, info]) => (
+                  .map((id) => (
                     <a
                       key={id}
                       href={`#/${id}`}
                       aria-current={page === id ? "page" : undefined}
                       onClick={() => setMenuOpen(false)}
                     >
-                      {info.label}
+                      {pages[id].label}
                     </a>
                   ))}
               </div>
@@ -405,6 +441,11 @@ export function App() {
               {notice}
             </p>
           )}
+          {receipt && (notice || error) && (
+            <a href={`#/events?request_id=${encodeURIComponent(receipt)}`}>
+              按请求编号核对操作记录
+            </a>
+          )}
           {snapshot && (
             <label className="panel contest-context">
               当前比赛
@@ -412,7 +453,10 @@ export function App() {
                 aria-label="当前比赛"
                 value={contestId}
                 disabled={busy}
-                onChange={(event) => setContestId(event.target.value)}
+                onChange={(event) => {
+                  setSeatSelection([]);
+                  setContestId(event.target.value);
+                }}
               >
                 <option value="">请选择比赛</option>
                 {snapshot.roster.contests.map((contest) => (
@@ -564,6 +608,7 @@ export function App() {
               </div>
               <div className="page-view" hidden={page !== "rooms"}>
                 <Rooms
+                  contestId={contestId}
                   snapshot={snapshot}
                   csrf={session.csrf}
                   disabled={busy || !connected || session.role !== "admin"}

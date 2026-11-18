@@ -1016,7 +1016,7 @@ async fn seating_migration_binding_and_concurrency() {
             .await
             .unwrap()
             .get::<_, i32>(0),
-        19
+        20
     );
     let mut room = room_input("A", 2, 3);
     room["seats"][0]["expected_ip"] = json!("127.0.0.1");

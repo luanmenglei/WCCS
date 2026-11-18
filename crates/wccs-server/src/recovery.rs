@@ -268,6 +268,7 @@ pub struct Filter {
     contest_id: String,
     #[serde(default)]
     offset: i32,
+    request_id: Option<String>,
 }
 
 pub async fn list(
@@ -284,9 +285,9 @@ pub async fn list(
         j.recovery_files AS file_count, j.recovery_bytes::text AS recovery_bytes,
         j.recovery_directories AS directory_count
         FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id LEFT JOIN recovery_archives a ON a.job_id=j.id
-        WHERE j.recovery_contest=$3
-        AND ($1 OR (cardinality(j.room_ids)>0 AND j.room_ids<@$2)) ORDER BY j.created_at DESC,j.id LIMIT 500",
-        &[&actor.all_rooms,&actor.room_ids,&filter.contest_id]).await?;
+        WHERE j.recovery_contest=$3 AND ($4::text IS NULL OR j.request_id=$4)
+        AND ($1 OR (cardinality(j.room_ids)>0 AND j.room_ids<@$2)) ORDER BY j.created_at DESC,j.id LIMIT CASE WHEN $4::text IS NULL THEN 500 ELSE NULL END",
+&[&actor.all_rooms,&actor.room_ids,&filter.contest_id,&filter.request_id]).await?;
     let jobs:Vec<_> = rows.iter().map(|r| json!({"job_id":r.get::<_,String>("id"),"request_id":r.get::<_,String>("request_id"),
         "device_id":r.get::<_,String>("device_id"),"device_name":r.get::<_,String>("name"),"stage":r.get::<_,String>("stage"),
         "template":r.get::<_,Value>("template"),"result":r.get::<_,Option<Value>>("result"),"expired":r.get::<_,i64>("expires_at")<=now(),

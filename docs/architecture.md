@@ -58,6 +58,8 @@ Windows 离线客户端由成套 agent/session/inventory/Credential Provider、�
 
 ## Web 管理界面
 
+schema 20 的管理操作入口按值班步骤组织。评测比赛绑定与未结暂停范围由服务端持久化和强制核验；恢复批次在比赛、请求编号和操作员机房授权范围内读取。管理页面不从截断的历史列表重建目标。详见[管理员操作走查](tasks/admin-workflows.md)和 [ADR 0016](decisions/0016-contest-control-and-recovery.md)。
+
 管理端 UI 与核心业务流程以 Natsume 为参照，用户已排除打印和拍照。当前按业务分为座位总览、设备、选手名单、注册审核、检查任务、机房设置、工具配置、操作员和全局事件，导航及视觉规则见 [界面规范](ui-design.md)。页面使用同一认证快照并保留本次登录内草稿，旧会话响应通过代次隔离。后续领域与适配边界见 [对齐记录](tasks/natsume-alignment.md)。
 
 管理员从机房内其他机器的浏览器访问。管理端包含以下页面，每个页面都有对应的 API、权限检查、加载状态、失败反馈和可验证操作结果。

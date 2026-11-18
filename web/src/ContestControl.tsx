@@ -22,6 +22,7 @@ const previewSchema = z.object({
   }),
 });
 const jobsSchema = z.object({
+  pending: z.array(z.object({ remote: z.string(), seat: z.string() })),
   jobs: z.array(
     z.object({
       id: z.string(),
@@ -92,7 +93,23 @@ export function ContestControl({
 }) {
   const access = useAccess();
   const [selected, setSelected] = useState<string[]>([]);
-  const [remoteContest, setRemoteContest] = useState("");
+  const remoteContest =
+    snapshot.roster.contests.find((c) => c.id === contestId)
+      ?.remote_contest_id ?? "";
+  const [pending, setPending] = useState<z.infer<typeof jobsSchema>["pending"]>(
+    [],
+  );
+  const required = pending
+    .filter((item) => item.remote === remoteContest)
+    .map((item) => item.seat);
+  const includesPaused = (value: string) => value !== "pause";
+  const seatLabels = new Map(
+    snapshot.seating.rooms.flatMap((room) =>
+      room.seats.map(
+        (seat) => [seat.id, `${room.name} / ${seat.number}`] as const,
+      ),
+    ),
+  );
   const [action, setAction] = useState("pause");
   const [at, setAt] = useState("");
   const [duration, setDuration] = useState(900);
@@ -110,8 +127,15 @@ export function ContestControl({
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
-        const value = jobsSchema.parse(await api("contest-control"));
-        if (active) setJobs(value.jobs);
+        const value = jobsSchema.parse(
+          await api(
+            `contest-control?contest_id=${encodeURIComponent(contestId)}`,
+          ),
+        );
+        if (active) {
+          setJobs(value.jobs);
+          setPending(value.pending);
+        }
       } catch (error) {
         if (active)
           setError(error instanceof Error ? error.message : "读取失败");
@@ -123,7 +147,7 @@ export function ContestControl({
       active = false;
       clearTimeout(timer);
     };
-  }, [access.allRooms]);
+  }, [access.allRooms, contestId]);
   function invalidate() {
     setPreview(null);
     setConfirmed(false);
@@ -160,22 +184,18 @@ export function ContestControl({
       </p>
       {error && <p role="alert">{error}</p>}
       <fieldset disabled={disabled || busy || !access.manage}>
-        <label>
-          DOMjudge 比赛 ID
-          <input
-            value={remoteContest}
-            onChange={(event) => {
-              setRemoteContest(event.target.value);
-              invalidate();
-            }}
-          />
-        </label>
+        <p>
+          本场绑定的 DOMjudge 比赛：{remoteContest || "未绑定"} ·{" "}
+          <a href="#/domjudge">核对比赛绑定</a>
+        </p>
         <label>
           操作
           <select
             value={action}
             onChange={(event) => {
               setAction(event.target.value);
+              if (includesPaused(event.target.value) && required.length)
+                setSelected(required);
               invalidate();
             }}
           >
@@ -214,6 +234,21 @@ export function ContestControl({
             />
           </label>
         )}
+        {includesPaused(action) && required.length > 0 && (
+          <p>
+            本次范围必须包括 {required.length} 个暂停座位，尚缺{" "}
+            {required.filter((id) => !selected.includes(id)).length} 个。{" "}
+            <button
+              title={required.map((id) => seatLabels.get(id) ?? id).join("、")}
+              onClick={() => {
+                setSelected([...new Set([...selected, ...required])]);
+                invalidate();
+              }}
+            >
+              加入全部待恢复座位
+            </button>
+          </p>
+        )}
         <Seats
           contest={snapshot.roster.contests.find(
             (contest) => contest.id === contestId,
@@ -232,7 +267,13 @@ export function ContestControl({
           {false}
         </Seats>
         <button
-          disabled={!contestId || !remoteContest || selected.length === 0}
+          disabled={
+            !contestId ||
+            !remoteContest ||
+            selected.length === 0 ||
+            (includesPaused(action) &&
+              required.some((id) => !selected.includes(id)))
+          }
           onClick={() =>
             void run(async () => {
               invalidate();
@@ -289,7 +330,9 @@ export function ContestControl({
                 checked={confirmed}
                 onChange={(event) => setConfirmed(event.target.checked)}
               />
-              已核对比赛及全部目标，确认同时操作 DOMjudge 和桌面
+              已核对：评测比赛 {remoteContest}{" "}
+              的计时和提交对全场生效，桌面操作仅涉及预览中的{" "}
+              {preview.desktop.targets.length} 个座位。
             </label>
             <button
               disabled={

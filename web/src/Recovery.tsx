@@ -245,6 +245,15 @@ export function Recovery({
   onMutate: Mutation;
 }) {
   const [selected, setSelected] = useState<string[]>([]);
+  const [room, setRoom] = useState("");
+  const roomDevices = new Set(
+    snapshot.seating.rooms
+      .filter((item) => item.id === room)
+      .flatMap((item) => item.seats.flatMap((seat) => seat.devices)),
+  );
+  const visible = snapshot.devices.filter(
+    (device) => !room || roomDevices.has(device.id),
+  );
   const [options, setOptions] = useState<z.infer<typeof optionsSchema>>({
     limits: {
       max_entries: 100000,
@@ -269,6 +278,8 @@ export function Recovery({
     [skip, extensionText],
   );
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [batchFilter, setBatchFilter] = useState("");
+  const [batchInput, setBatchInput] = useState("");
   const [fresh, setFresh] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -291,7 +302,9 @@ export function Recovery({
     async function refresh() {
       try {
         const value = listSchema.parse(
-          await api(`recovery?contest_id=${encodeURIComponent(contestId)}`),
+          await api(
+            `recovery?contest_id=${encodeURIComponent(contestId)}&${batchFilter ? "request_id=" + encodeURIComponent(batchFilter) : ""}`,
+          ),
         );
         if (active) {
           setJobs(
@@ -311,7 +324,7 @@ export function Recovery({
       active = false;
       clearTimeout(timer);
     };
-  }, [contestId]);
+  }, [contestId, batchFilter]);
   async function review() {
     setBusy(true);
     setError("");
@@ -343,7 +356,8 @@ export function Recovery({
       setBusy(false);
     }
   }
-  function next(job: Job) {
+  const [batchNote, setBatchNote] = useState("");
+  async function next(job: Job) {
     const previous = job.template.options;
     const action = (
       { inspect: "archive", archive: "clean", clean: "reboot" } as Record<
@@ -352,28 +366,42 @@ export function Recovery({
       >
     )[previous.action];
     if (!action || previous.contest_id !== contestId) return;
-    setExtensionText(previous.extensions.join(" "));
-    setOptions({
-      ...previous,
-      action,
-      previous_request: job.request_id,
-      confirm_session_end: false,
-    });
-    setSkip(previous.extensions.length === 0);
-    setSelected(
-      jobs
-        .filter(
-          (j) => j.request_id === job.request_id && j.stage === "succeeded",
-        )
-        .map((j) => j.device_id),
-    );
+    setBusy(true);
     setPreview(null);
     setRequest(null);
+    setBatchNote("");
+    setError("");
+    try {
+      const batch = listSchema.parse(
+        await api(
+          `recovery?contest_id=${encodeURIComponent(contestId)}&request_id=${encodeURIComponent(job.request_id)}`,
+        ),
+      ).jobs;
+      const successes = batch.filter((item) => item.stage === "succeeded");
+      if (!successes.length) throw new Error("本批没有可继续的成功设备。");
+      setBatchNote(
+        `按当前权限核对本批 ${batch.length} 台，已选成功 ${successes.length} 台，未进入下一步 ${batch.length - successes.length} 台。`,
+      );
+      setExtensionText(previous.extensions.join(" "));
+      setOptions({
+        ...previous,
+        action,
+        previous_request: job.request_id,
+        confirm_session_end: false,
+      });
+      setSkip(previous.extensions.length === 0);
+      setSelected(successes.map((item) => item.device_id));
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "批次读取失败");
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <>
       <section className="panel operations-panel">
         <h2>赛后归档与恢复</h2>
+        {batchNote && <p role="status">{batchNote}</p>}
         <p>
           检查 → 归档或明确跳过 → 恢复教学 → 清理 → 重启 →
           再次检查。文件变化或任务中断后，从检查步骤重新核对。
@@ -503,8 +531,42 @@ export function Recovery({
           </label>
         )}
         <p>清理会删除所选范围内全部文件。归档仅收集上面列出的扩展名。</p>
+        <label>
+          按机房查看
+          <select value={room} onChange={(e) => setRoom(e.target.value)}>
+            <option value="">全部授权设备</option>
+            {snapshot.seating.rooms.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {options.action === "inspect" && (
+          <button
+            disabled={disabled || busy || !room || !visible.length}
+            onClick={() =>
+              setSelected([
+                ...new Set([
+                  ...selected,
+                  ...visible.map((device) => device.id),
+                ]),
+              ])
+            }
+          >
+            追加本机房设备
+          </button>
+        )}
+        <p>
+          已选 {selected.length} 台，其中{" "}
+          {
+            selected.filter((id) => !visible.some((device) => device.id === id))
+              .length
+          }{" "}
+          台不在当前视图。
+        </p>
         <div className="target-list">
-          {snapshot.devices.map((device) => (
+          {visible.map((device) => (
             <label key={device.id}>
               <input
                 type="checkbox"
@@ -624,6 +686,27 @@ export function Recovery({
       </section>
       <section className="panel">
         <h2>逐机恢复结果</h2>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (batchFilter !== batchInput.trim()) {
+              setJobs([]);
+              setFresh(false);
+              setBatchFilter(batchInput.trim());
+            }
+          }}
+        >
+          <label>
+            按批次请求编号查找
+            <input
+              value={batchInput}
+              onChange={(event) => setBatchInput(event.target.value)}
+              placeholder="留空显示最近 500 条"
+            />
+          </label>
+          <button>查看批次</button>
+        </form>
+        {fresh && !jobs.length && <p>没有匹配的可见任务。</p>}
         {!fresh && <p role="status">结果连接中断，当前显示数据已过期。</p>}
         {jobs.map((job) => (
           <article key={job.job_id}>
@@ -640,6 +723,7 @@ export function Recovery({
                 job.result?.detail ??
                 (job.expired ? "任务已过期，请重新检查" : "等待回传")}
             </p>
+            <small>批次：{job.request_id}</small>
             {job.result?.steps.map((step, index) => (
               <p key={index}>{details[step.detail] ?? step.detail}</p>
             ))}

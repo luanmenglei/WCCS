@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SeatChecks } from "./SeatChecks";
 import { api } from "./api";
 import { checkLabel, type Snapshot } from "./contracts";
@@ -16,6 +16,7 @@ import type { z } from "zod";
 
 type Props = {
   snapshot: Snapshot;
+  contestId?: string;
   csrf: string;
   disabled: boolean;
   onMutate: (
@@ -41,7 +42,19 @@ export function Rooms(props: Props) {
   });
   const [key, setKey] = useState(0);
   const [open, setOpen] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [exceptions, setExceptions] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (!dirty) return;
+    const guard = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [dirty]);
   function load(room: Draft) {
+    if (dirty && !window.confirm("当前机房有未保存的修改。放弃草稿并切换？"))
+      return;
+    setDirty(false);
     setDraft(room);
     setKey(key + 1);
     setOpen(true);
@@ -79,6 +92,7 @@ export function Rooms(props: Props) {
           key={key}
           {...props}
           initial={draft}
+          onDirty={setDirty}
           onReload={() => {
             const room = props.snapshot.seating.rooms.find(
               (room) => room.id === draft.id,
@@ -87,7 +101,26 @@ export function Rooms(props: Props) {
           }}
         />
       )}
-      <h3>地址与设备核对</h3>
+      <h3>原位换电脑 / 地址核对</h3>
+      <p>
+        选手不换座时，不要改名单。先找到物理座位并核对新旧电脑，再处理旧设备占用。选手要去另一座位，请到{" "}
+        <a href="#/roster">名单与分配</a>。
+      </p>
+      <label>
+        查找机房、座号、机器或 IP{" "}
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          checked={exceptions}
+          onChange={(event) => setExceptions(event.target.checked)}
+        />
+        只看冲突、待核对或未匹配
+      </label>
       <p>
         来源地址由服务端连接或显式信任代理提供。客户端报告地址仅用于核对。排除占用后可恢复参与匹配。
       </p>
@@ -110,10 +143,45 @@ export function Rooms(props: Props) {
                   .filter((seat) => seat.devices.includes(device.id))
                   .map((seat) => ({ room, seat })),
               );
+              const machine =
+                props.snapshot.devices.find((item) => item.id === device.id)
+                  ?.name ?? device.id;
+              const roster = props.snapshot.roster.contests.find(
+                (contest) => contest.id === props.contestId,
+              );
+              const locations = matches
+                .map(({ room, seat }) => {
+                  const person = roster?.participants.find(
+                    (item) => item.seat_id === seat.id,
+                  );
+                  return `${room.name} / ${seat.number}（${roster ? (person?.name ?? "本场空座") : "未选比赛"}）`;
+                })
+                .join("、");
+              if (
+                exceptions &&
+                matches.length &&
+                !device.needs_review &&
+                !matches.some(({ seat }) => seat.status === "conflict")
+              )
+                return null;
+              if (
+                ![
+                  locations,
+                  device.id,
+                  machine,
+                  device.observed_ip,
+                  device.previous_ip,
+                  ...device.reported_ips,
+                ]
+                  .join(" ")
+                  .toLowerCase()
+                  .includes(query.trim().toLowerCase())
+              )
+                return null;
               return (
                 <tr key={device.id}>
                   <td>
-                    {device.id}
+                    {machine} · {device.id}
                     <br />
                     {matches.length
                       ? matches
@@ -148,7 +216,10 @@ export function Rooms(props: Props) {
                   </td>
                   <td>
                     <button
-                      disabled={props.disabled}
+                      disabled={
+                        props.disabled ||
+                        (!device.excluded && !device.needs_review)
+                      }
                       onClick={() =>
                         void props
                           .onMutate(
@@ -163,11 +234,18 @@ export function Rooms(props: Props) {
                           .catch(() => {})
                       }
                     >
-                      核对 / 恢复匹配
+                      {device.excluded
+                        ? "恢复参与匹配"
+                        : device.needs_review
+                          ? "确认新地址"
+                          : "无需核对"}
                     </button>
                     <button
                       disabled={props.disabled || device.excluded}
                       onClick={() =>
+                        window.confirm(
+                          `排除 ${machine}（${device.observed_ip ?? "地址未知"}）在 ${locations || "当前未匹配座位"} 的占用？不会撤销凭据或移动选手。`,
+                        ) &&
                         void props
                           .onMutate(
                             "seating/review",
@@ -197,8 +275,13 @@ export function Rooms(props: Props) {
 function RoomEditor({
   initial,
   onReload,
+  onDirty,
   ...props
-}: Props & { initial: Draft; onReload: () => void }) {
+}: Props & {
+  initial: Draft;
+  onReload: () => void;
+  onDirty: (dirty: boolean) => void;
+}) {
   const [draft, setDraft] = useState(initial);
   const [dimensions, setDimensions] = useState({
     rows: initial.rows,
@@ -225,6 +308,12 @@ function RoomEditor({
   const conflict = (current?.version ?? 0) !== draft.version;
   const dimensionsPending =
     dimensions.rows !== draft.rows || dimensions.columns !== draft.columns;
+  const [edited, setEdited] = useState(false);
+  const [showUnchanged, setShowUnchanged] = useState(false);
+  const dirty = edited || dimensionsPending || !!batch || !!text;
+  useEffect(() => {
+    onDirty(dirty);
+  }, [dirty, onDirty]);
   const invalid = errors(draft);
   const disabled = props.disabled || busy;
   const liveSeats = new Map(
@@ -234,6 +323,7 @@ function RoomEditor({
     props.snapshot.devices.map((device) => [device.id, device]),
   );
   function edit(next: Draft) {
+    setEdited(true);
     setDraft(next);
     setPreview(null);
     setBatch(null);
@@ -282,6 +372,11 @@ function RoomEditor({
           重新加载机房
         </button>
       </div>
+      {dirty && (
+        <p role="status">
+          有未保存的修改。在线状态来自已生效的布局；请先保存，再对新绑定发起检查。
+        </p>
+      )}
       {conflict && (
         <p role="alert" className="error">
           机房已更新到 v{current?.version}，草稿已保留。请重新加载后编辑。
@@ -489,6 +584,12 @@ function RoomEditor({
                               }
                             />
                           </label>
+                          {live && live.expected_ip !== seat.expected_ip && (
+                            <small>
+                              生效 IP：{live.expected_ip ?? "未配置"} → 草稿：
+                              {seat.expected_ip ?? "清空"}
+                            </small>
+                          )}
                           {invalid.has(key) && (
                             <span role="alert" className="error">
                               {invalid.get(key)}
@@ -546,7 +647,11 @@ function RoomEditor({
               起始 IPv4
               <input
                 value={startIp}
-                onChange={(event) => setStartIp(event.target.value)}
+                onChange={(event) => {
+                  setStartIp(event.target.value);
+                  setBatch(null);
+                  setPreview(null);
+                }}
               />
             </label>
             <label>
@@ -555,14 +660,22 @@ function RoomEditor({
                 type="number"
                 min={1}
                 value={step}
-                onChange={(event) => setStep(Number(event.target.value))}
+                onChange={(event) => {
+                  setStep(Number(event.target.value));
+                  setBatch(null);
+                  setPreview(null);
+                }}
               />
             </label>
             <label>
               分配顺序
               <select
                 value={order}
-                onChange={(event) => setOrder(event.target.value)}
+                onChange={(event) => {
+                  setOrder(event.target.value);
+                  setBatch(null);
+                  setPreview(null);
+                }}
               >
                 <option value="number">座位号递增</option>
                 <option value="position">行优先，从左上开始</option>
@@ -583,7 +696,11 @@ function RoomEditor({
             粘贴格式
             <select
               value={pasteMode}
-              onChange={(event) => setPasteMode(event.target.value)}
+              onChange={(event) => {
+                setPasteMode(event.target.value);
+                setBatch(null);
+                setPreview(null);
+              }}
             >
               <option value="pairs">座位号 / IP 两列</option>
               <option value="matrix">按位置的 IP 矩阵</option>
@@ -594,7 +711,11 @@ function RoomEditor({
             <textarea
               rows={5}
               value={text}
-              onChange={(event) => setText(event.target.value)}
+              onChange={(event) => {
+                setText(event.target.value);
+                setBatch(null);
+                setPreview(null);
+              }}
               placeholder="从表格复制制表符分隔的单元格，空白 IP 表示清空"
             />
           </label>
@@ -618,7 +739,10 @@ function RoomEditor({
               />
               <button
                 disabled={errors({ ...draft, seats: batch }).size > 0}
-                onClick={() => edit({ ...draft, seats: batch })}
+                onClick={() => {
+                  edit({ ...draft, seats: batch });
+                  setText("");
+                }}
               >
                 应用映射到草稿
               </button>
@@ -638,7 +762,8 @@ function RoomEditor({
               dimensionsPending ||
               invalid.size > 0 ||
               !draft.name.trim() ||
-              !!batch
+              !!batch ||
+              !!text
             }
             onClick={() =>
               void run(async () =>
@@ -656,6 +781,14 @@ function RoomEditor({
         {preview && (
           <div className="save-preview">
             <h4>保存影响预览</h4>
+            <label>
+              <input
+                type="checkbox"
+                checked={showUnchanged}
+                onChange={(event) => setShowUnchanged(event.target.checked)}
+              />
+              显示未变化的位置
+            </label>
             <p>
               新增{" "}
               {
@@ -672,7 +805,15 @@ function RoomEditor({
                 preview.changes.filter((change) => change.kind === "removed")
                   .length
               }
-              。移除位置将解除其 IP 与座位关联。
+              。其中{" "}
+              {
+                preview.changes.filter(
+                  (change) =>
+                    change.kind === "retained" &&
+                    change.previous?.expected_ip !== change.expected_ip,
+                ).length
+              }{" "}
+              个保留位置更换了 IP。移除位置将解除其 IP 与座位关联。
             </p>
             <div className="table-scroll">
               <table>
@@ -686,37 +827,51 @@ function RoomEditor({
                   </tr>
                 </thead>
                 <tbody>
-                  {preview.changes.map((change) => (
-                    <tr key={`${change.row},${change.column}`}>
-                      <td>
-                        {change.row + 1} 行 {change.column + 1} 列
-                      </td>
-                      <td>
-                        {
-                          { added: "新增", retained: "保留", removed: "移除" }[
-                            change.kind
-                          ]
-                        }
-                      </td>
-                      <td>
-                        {change.previous?.number ?? "—"} →{" "}
-                        {change.kind === "removed" ? "移除" : change.number}
-                      </td>
-                      <td>
-                        {change.previous?.expected_ip ?? "未配置"} →{" "}
-                        {change.expected_ip ?? "清空 / 未配置"}
-                      </td>
-                      <td>
-                        {change.previous?.devices.join("、") || "—"} →{" "}
-                        {change.incoming_devices
-                          .map(
-                            (device) =>
-                              `${device.id}${device.needs_review ? "（待核对）" : ""}`,
-                          )
-                          .join("、") || "—"}
-                      </td>
-                    </tr>
-                  ))}
+                  {preview.changes
+                    .filter(
+                      (change) =>
+                        showUnchanged ||
+                        change.kind !== "retained" ||
+                        change.previous?.number !== change.number ||
+                        change.previous.expected_ip !== change.expected_ip ||
+                        change.previous.devices.join(",") !==
+                          change.incoming_devices
+                            .map((device) => device.id)
+                            .join(","),
+                    )
+                    .map((change) => (
+                      <tr key={`${change.row},${change.column}`}>
+                        <td>
+                          {change.row + 1} 行 {change.column + 1} 列
+                        </td>
+                        <td>
+                          {
+                            {
+                              added: "新增",
+                              retained: "保留",
+                              removed: "移除",
+                            }[change.kind]
+                          }
+                        </td>
+                        <td>
+                          {change.previous?.number ?? "—"} →{" "}
+                          {change.kind === "removed" ? "移除" : change.number}
+                        </td>
+                        <td>
+                          {change.previous?.expected_ip ?? "未配置"} →{" "}
+                          {change.expected_ip ?? "清空 / 未配置"}
+                        </td>
+                        <td>
+                          {change.previous?.devices.join("、") || "—"} →{" "}
+                          {change.incoming_devices
+                            .map(
+                              (device) =>
+                                `${device.id}${device.needs_review ? "（待核对）" : ""}`,
+                            )
+                            .join("、") || "—"}
+                        </td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
             </div>
@@ -731,6 +886,8 @@ function RoomEditor({
                     "机房与 IP 已保存。",
                   );
                   edit({ ...draft, version: draft.version + 1 });
+                  setEdited(false);
+                  setText("");
                 })
               }
             >
@@ -761,7 +918,7 @@ function RoomEditor({
             snapshot={props.snapshot}
             selected={selected}
             csrf={props.csrf}
-            disabled={disabled || conflict || !!preview}
+            disabled={disabled || dirty || conflict || !!preview}
             onMutate={props.onMutate}
           />
         )}

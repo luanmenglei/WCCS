@@ -40,7 +40,16 @@ impl Write {
     }
 }
 
+async fn check_scope(tx: &Transaction<'_>, input: &Write) -> ApiResult<()> {
+    crate::contest_binding::require(tx, &input.contest_id, &input.remote_contest_id).await?;
+    if input.action != "pause" && tx.query_opt("SELECT 1 FROM pause_seats WHERE remote_contest_id=$1 AND NOT(seat_id=ANY($2)) LIMIT 1",&[&input.remote_contest_id,&input.seat_ids]).await?.is_some() {
+        return Err(ApiError::conflict("尚有暂停座位未选中，请加入全部待恢复座位"));
+    }
+    Ok(())
+}
+
 async fn desktop_plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value> {
+    check_scope(tx, input).await?;
     waiting::desktop_plan(tx, app, &input.desktop()?, true, input.action == "pause").await
 }
 
@@ -84,6 +93,7 @@ async fn plan(app: &App, session: &auth::Session, input: &Write) -> ApiResult<Va
         auth::authorize_snapshot(&tx, session, auth::Permission::Admin)
             .await?
             .global()?;
+        check_scope(&tx, input).await?;
     }
     let remote = app
         .domjudge
@@ -181,16 +191,34 @@ pub async fn commit(
     Ok(Json(result))
 }
 
-pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+#[derive(Deserialize)]
+pub struct ListFilter {
+    contest_id: Option<String>,
+}
+
+pub async fn list(
+    State(app): State<App>,
+    headers: HeaderMap,
+    axum::extract::Query(filter): axum::extract::Query<ListFilter>,
+) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, false).await?;
     let mut db = app.preview_db.lock().await?;
     let tx = db.transaction().await?;
     auth::authorize_snapshot(&tx, &session, auth::Permission::Read)
         .await?
         .global()?;
-    let rows = tx.query("SELECT id,stage,payload,results,detail,execute_at,updated_at FROM contest_control_jobs ORDER BY created_at DESC,id LIMIT 50",&[]).await?;
+    let pending: Vec<Value> = tx
+        .query(
+            "SELECT remote_contest_id,seat_id FROM pause_seats ORDER BY remote_contest_id,seat_id",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| json!({"remote":row.get::<_,String>(0),"seat":row.get::<_,String>(1)}))
+        .collect();
+    let rows = tx.query("SELECT id,stage,payload,results,detail,execute_at,updated_at FROM contest_control_jobs WHERE $1::text IS NULL OR payload->>'contest_id'=$1 ORDER BY created_at DESC,id LIMIT 50",&[&filter.contest_id]).await?;
     Ok(Json(
-        json!({"jobs":rows.iter().map(|row|json!({"id":row.get::<_,String>(0),"stage":row.get::<_,String>(1),"payload":row.get::<_,Value>(2),"results":row.get::<_,Value>(3),"detail":row.get::<_,String>(4),"execute_at":row.get::<_,i64>(5),"updated_at":row.get::<_,i64>(6)})).collect::<Vec<_>>()}),
+        json!({"pending":pending,"jobs":rows.iter().map(|row|json!({"id":row.get::<_,String>(0),"stage":row.get::<_,String>(1),"payload":row.get::<_,Value>(2),"results":row.get::<_,Value>(3),"detail":row.get::<_,String>(4),"execute_at":row.get::<_,i64>(5),"updated_at":row.get::<_,i64>(6)})).collect::<Vec<_>>()}),
     ))
 }
 
@@ -324,6 +352,14 @@ async fn execute(
         let mut db = app.db.lock().await?;
         let tx = db.transaction().await?;
         checked_desktop(&tx, app, input, planned, session, false).await?;
+        if input.action == "pause" {
+            tx.execute(
+                "INSERT INTO pause_seats SELECT $1,unnest($2::text[]) ON CONFLICT DO NOTHING",
+                &[&input.remote_contest_id, &input.seat_ids],
+            )
+            .await?;
+        }
+        tx.commit().await?;
     }
     if input.opens() {
         let state = app
@@ -420,7 +456,13 @@ async fn work(app: &App) -> ApiResult<()> {
     };
     loop {
         let saved: ApiResult<()> = async {
-            app.db.lock().await?.execute("UPDATE contest_control_jobs SET stage=$2,results=$3,detail=$4,updated_at=$5,plan=$6 WHERE id=$1",&[&id,&stage,&results,&detail,&now(),&planned]).await?;
+            let mut db = app.db.lock().await?;
+            let tx = db.transaction().await?;
+            if stage=="succeeded" && input.action != "pause" {
+                tx.execute("DELETE FROM pause_seats WHERE remote_contest_id=$1 AND seat_id=ANY($2)",&[&input.remote_contest_id,&input.seat_ids]).await?;
+            }
+            tx.execute("UPDATE contest_control_jobs SET stage=$2,results=$3,detail=$4,updated_at=$5,plan=$6 WHERE id=$1",&[&id,&stage,&results,&detail,&now(),&planned]).await?;
+            tx.commit().await?;
             Ok(())
         }.await;
         if saved.is_ok() {

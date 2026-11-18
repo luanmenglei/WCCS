@@ -53,6 +53,8 @@ export function Roster({
     (Participant & { base_version: number }) | null
   >(null);
   const [target, setTarget] = useState("");
+  const [seatAction, setSeatAction] = useState("move");
+  const [handoff, setHandoff] = useState<string[]>([]);
   const [history, setHistory] = useState<z.infer<typeof historySchema>>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const seats = snapshot.seating.rooms.flatMap((room) =>
@@ -103,6 +105,11 @@ export function Roster({
         { ...prepared.input, preview_token: prepared.preview.preview_token },
         `操作已保存，请求编号 ${String(prepared.input.request_id)}。可在操作历史核对结果。`,
       );
+      setHandoff(
+        prepared.preview.changes
+          .filter((change) => change.before?.seat_id !== change.after.seat_id)
+          .map((change) => change.after.id),
+      );
       setPrepared(null);
       setEditing(null);
     } catch (error) {
@@ -152,6 +159,16 @@ export function Roster({
   const locked = disabled || loading;
   return (
     <div className="fleet-page roster-page">
+      {handoff.length > 0 && (
+        <p className="panel" role="status">
+          本地分配已保存，涉及 {handoff.length} 名选手。评测账号尚需核对：
+          <a
+            href={`#/domjudge?participants=${encodeURIComponent(handoff.join(","))}`}
+          >
+            继续核对这些选手的 IP 与旧会话
+          </a>
+        </p>
+      )}
       <section className="panel">
         <details>
           <summary>创建比赛</summary>
@@ -350,7 +367,8 @@ export function Roster({
                           disabled={locked}
                           onClick={() => {
                             setEditing({ ...p, base_version: contest.version });
-                            setTarget(p.seat_id ?? "");
+                            setTarget("");
+                            setSeatAction("move");
                             setPrepared(null);
                           }}
                         >
@@ -523,28 +541,71 @@ export function Roster({
             预览资料修正
           </button>
           <label>
+            座位操作
+            <select
+              value={seatAction}
+              disabled={locked}
+              onChange={(e) => {
+                setSeatAction(e.target.value);
+                setTarget("");
+              }}
+            >
+              <option value="move">移到空座</option>
+              <option value="swap" disabled={!editing.seat_id}>
+                与另一名选手交换
+              </option>
+              <option value="remove" disabled={!editing.seat_id}>
+                解除本人的座位分配
+              </option>
+            </select>
+          </label>
+          <label>
             目标座位
             <select
               value={target}
               disabled={locked}
               onChange={(event) => setTarget(event.target.value)}
             >
-              <option value="">解除分配</option>
-              {seats.map(({ room, seat }) => (
-                <option key={seat.id} value={seat.id}>
-                  {room.name} / {seat.number} ·{" "}
-                  {contest.participants.find((p) => p.seat_id === seat.id)
-                    ?.code ?? "空座位"}{" "}
-                  · {seatStatusLabels[seat.status]}
-                </option>
-              ))}
+              <option value="">
+                {seatAction === "remove" ? "解除分配" : "请选择目标座位"}
+              </option>
+              {seats
+                .filter(
+                  ({ seat }) =>
+                    seatAction !== "remove" &&
+                    seat.id !== editing.seat_id &&
+                    contest.participants.some((p) => p.seat_id === seat.id) ===
+                      (seatAction === "swap"),
+                )
+                .map(({ room, seat }) => (
+                  <option key={seat.id} value={seat.id}>
+                    {room.name} / {seat.number} ·{" "}
+                    {contest.participants.find((p) => p.seat_id === seat.id)
+                      ?.code ?? "空座位"}{" "}
+                    · {seatStatusLabels[seat.status]}
+                  </option>
+                ))}
             </select>
           </label>
           <p>
-            选择已占座位将交换两名选手的位置。当前未分配时，原占座选手将变为未分配。解除操作保留历史。
+            {editing.name}：{location(editing.seat_id)} →{" "}
+            {target
+              ? location(target)
+              : seatAction === "remove"
+                ? "未分配"
+                : "请选择座位"}
+            。
+            {seatAction === "swap" &&
+              target &&
+              `${contest.participants.find((p) => p.seat_id === target)?.name} 将移至 ${location(editing.seat_id)}。`}{" "}
+            若只是原位换电脑，请到{" "}
+            <a href="#/rooms" onClick={() => setEditing(null)}>
+              机房设置
+            </a>{" "}
+            核对占用。
           </p>
           <button
-            disabled={locked}
+            disabled={locked || (!target && seatAction !== "remove")}
             onClick={() => {
               const other = contest.participants.find(
                 (p) => p.seat_id === target && p.id !== editing.id,

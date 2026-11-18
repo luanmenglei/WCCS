@@ -207,7 +207,15 @@ export function Seats({
         </div>
       </div>
       <div className="selection-bar">
-        <span>已选择 {selection.length} 个座位</span>
+        <span>
+          已选择 {selection.length} 个座位，其中{" "}
+          {
+            selection.filter(
+              (id) => !visible.some(({ seat }) => seat.id === id),
+            ).length
+          }{" "}
+          个不在当前筛选中
+        </span>
         <button
           disabled={!visible.length}
           onClick={() =>
@@ -216,7 +224,7 @@ export function Seats({
             ])
           }
         >
-          选择筛选结果
+          追加当前筛选结果
         </button>
         <button disabled={!selection.length} onClick={() => onSelect([])}>
           清除选择

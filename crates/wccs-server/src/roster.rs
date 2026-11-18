@@ -66,13 +66,13 @@ pub(crate) async fn snapshot(tx: &Transaction<'_>) -> ApiResult<Value> {
     let mut contests = Vec::new();
     for row in tx
         .query(
-            "SELECT id,name,version FROM contests ORDER BY created_at,id",
+            "SELECT id,name,version,remote_contest_id FROM contests ORDER BY created_at,id",
             &[],
         )
         .await?
     {
         let id: String = row.get(0);
-        contests.push(json!({"id":id,"name":row.get::<_,String>(1),"version":row.get::<_,i64>(2),"participants":participants(tx,&id).await?}));
+        contests.push(json!({"id":id,"name":row.get::<_,String>(1),"version":row.get::<_,i64>(2),"remote_contest_id":row.get::<_,Option<String>>(3),"participants":participants(tx,&id).await?}));
     }
     Ok(json!({"version":version,"contests":contests}))
 }

@@ -2,6 +2,34 @@ use super::*;
 
 #[tokio::test]
 #[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn recovery_batch_is_not_truncated_by_newer_steps() {
+    let fixture = Fixture::new().await;
+    let mut socket = socket_for(&fixture.admin, &fixture.credential, "device-1").await;
+    poll(&mut socket, &observation()).await.unwrap();
+    fixture.db.batch_execute("INSERT INTO maintenance_jobs
+        (id,request_id,device_id,command,command_digest,actor_id,actor_version,room_ids,created_at,expires_at,stage,updated_at)
+        SELECT 'step-'||sequence, CASE WHEN sequence<=300 THEN 'inspected' ELSE 'archived' END,
+        'device-'||(1+(sequence-1)%300),'{\"template\":{\"operation\":\"recovery\",\"options\":{\"contest_id\":\"contest\"}}}',
+        'test',actor.id,1,ARRAY['room'],sequence,9999999999,'succeeded',sequence
+        FROM generate_series(1,600) sequence CROSS JOIN (SELECT id FROM operators WHERE role='admin' LIMIT 1) actor").await.unwrap();
+    let latest = expect_ok(fixture.admin.get("recovery?contest_id=contest").await).await;
+    assert_eq!(latest["jobs"].as_array().unwrap().len(), 500);
+    let batch = expect_ok(
+        fixture
+            .admin
+            .get("recovery?contest_id=contest&request_id=inspected")
+            .await,
+    )
+    .await;
+    let rows = batch["jobs"].as_array().unwrap();
+    assert_eq!(rows.len(), 300);
+    assert!(rows.iter().all(|job| job["request_id"] == "inspected"));
+    socket.close(None).await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
 async fn recovery_v2_negotiates_capacity_and_compact_authorization() {
     let f = Fixture::new().await;
     let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
@@ -193,6 +221,17 @@ async fn recovery_requires_verified_archive_confirmation_and_frozen_target() {
                 .await,
         )
         .await;
+        let batch = expect_ok(
+            f.admin
+                .get(&format!(
+                    "recovery?contest_id=contest&request_id={}",
+                    input["request_id"].as_str().unwrap()
+                ))
+                .await,
+        )
+        .await;
+        assert_eq!(batch["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(batch["jobs"][0]["request_id"], input["request_id"]);
         options["previous_request"] = input["request_id"].clone();
         options["confirm_session_end"] = json!(false);
         if action == "clean" {

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+mod contest_binding;
 mod contest_control;
 mod control;
 mod database;
@@ -153,7 +154,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=19) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=20) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -240,6 +241,10 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         tx.batch_execute(include_str!("../migrations/019_review.sql"))
             .await?;
     }
+    if versions[0].get::<_, i32>(0) <= 19 {
+        tx.batch_execute(include_str!("../migrations/020_operator_workflows.sql"))
+            .await?;
+    }
     tx.execute("UPDATE contest_control_jobs SET stage='interrupted',detail='server_restarted_review_required',updated_at=$1 WHERE stage IN ('scheduled','running')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$1 WHERE stage NOT IN ('failed','cancelled','expired')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE control_devices SET connected=false", &[])
@@ -310,6 +315,8 @@ pub fn router(app: App) -> Router {
         .route("/api/contest-control/commit", post(contest_control::commit))
         .route("/api/contest-control/cancel", post(contest_control::cancel))
         .route("/api/domjudge", get(domjudge::list))
+        .route("/api/domjudge/bind", post(contest_binding::bind))
+        .route("/api/domjudge/choices", get(contest_binding::choices))
         .route("/api/domjudge/preview", post(domjudge::preview))
         .route("/api/domjudge/commit", post(domjudge::commit))
         .route("/api/distribution", get(distribution::list))

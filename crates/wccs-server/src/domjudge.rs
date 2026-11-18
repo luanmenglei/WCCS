@@ -176,6 +176,7 @@ async fn local_plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
     if rows.len() != input.participant_ids.len() {
         return Err(ApiError::bad("选手不属于本场比赛"));
     }
+    crate::contest_binding::require(tx, &input.contest_id, &input.remote_contest_id).await?;
     let seats = seating::snapshot(tx).await?;
     let devices = tx
         .query(

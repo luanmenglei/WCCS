@@ -138,5 +138,6 @@ test("机房入口提供创建、尺寸和未分配设备核对", () => {
   );
   assert.match(html, /创建机房/);
   assert.match(html, /未分配/);
-  assert.match(html, /核对.*恢复匹配/);
+  assert.match(html, /只看冲突、待核对或未匹配/);
+  assert.match(html, /<button disabled="">无需核对<\/button>/);
 });

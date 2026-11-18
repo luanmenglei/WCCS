@@ -119,9 +119,29 @@ export function Domjudge({
 }) {
   const access = useAccess();
   const [state, setState] = useState<z.infer<typeof stateSchema> | null>(null);
-  const [remoteContest, setRemoteContest] = useState("");
+  const contest = snapshot.roster.contests.find(
+    (item) => item.id === contestId,
+  );
+  const remoteContest = contest?.remote_contest_id ?? "";
+  const [candidate, setCandidate] = useState("");
+  const [choices, setChoices] = useState<{ id: string; name: string }[]>([]);
   const [group, setGroup] = useState("participants");
-  const [selected, setSelected] = useState<string[]>([]);
+  const [selected, setSelected] = useState<string[]>(() => {
+    const ids =
+      new URLSearchParams(globalThis.location?.hash.split("?")[1])
+        .get("participants")
+        ?.split(",") ?? [];
+    return (
+      contest?.participants
+        .filter((p) => ids.includes(p.id))
+        .map((p) => p.id) ?? []
+    );
+  });
+  const seatMap = new Map(
+    snapshot.seating.rooms.flatMap((room) =>
+      room.seats.map((seat) => [seat.id, seat] as const),
+    ),
+  );
   const [preview, setPreview] = useState<z.infer<typeof previewSchema> | null>(
     null,
   );
@@ -180,16 +200,84 @@ export function Domjudge({
       <fieldset
         disabled={disabled || busy || !access.manage || !state?.configured}
       >
-        <label>
-          DOMjudge 比赛 ID
-          <input
-            value={remoteContest}
-            onChange={(event) => {
-              setRemoteContest(event.target.value);
-              invalidate();
+        <p>
+          本地比赛：{contest?.name ?? "请先选择当前比赛"} · 已绑定的评测比赛：
+          {remoteContest || "未绑定"}
+        </p>
+        <details open={!remoteContest || undefined}>
+          <summary>设置评测比赛绑定</summary>
+          <button
+            disabled={!contestId}
+            onClick={async () => {
+              setBusy(true);
+              setError("");
+              try {
+                setChoices(
+                  z
+                    .object({
+                      contests: z.array(
+                        z.object({ id: z.string(), name: z.string() }),
+                      ),
+                    })
+                    .parse(await api("domjudge/choices")).contests,
+                );
+              } catch (error) {
+                setError(
+                  error instanceof Error ? error.message : "读取比赛失败",
+                );
+              } finally {
+                setBusy(false);
+              }
             }}
-          />
-        </label>
+          >
+            读取评测端比赛列表
+          </button>
+          <label>
+            目标评测比赛
+            <select
+              value={candidate}
+              onChange={(event) => setCandidate(event.target.value)}
+            >
+              <option value="">选择名称和编号</option>
+              {choices.map((choice) => (
+                <option key={choice.id} value={choice.id}>
+                  {choice.name} · {choice.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            disabled={!candidate || !contestId || candidate === remoteContest}
+            onClick={async () => {
+              if (
+                !window.confirm(
+                  `将「${contest?.name}」绑定到「${choices.find((c) => c.id === candidate)?.name} · ${candidate}」？账号同步和整场计时都将使用此绑定。`,
+                )
+              )
+                return;
+              setBusy(true);
+              setError("");
+              try {
+                await onMutate(
+                  "domjudge/bind",
+                  {
+                    contest_id: contestId,
+                    previous: remoteContest || null,
+                    remote_contest_id: candidate,
+                  },
+                  "比赛绑定已保存",
+                );
+                invalidate();
+              } catch (error) {
+                setError(error instanceof Error ? error.message : "绑定失败");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            确认绑定两场比赛
+          </button>
+        </details>
         <label>
           该比赛的分组 ID
           <input
@@ -245,6 +333,19 @@ export function Domjudge({
                     {binding
                       ? `${binding.remote_contest_id} / ${binding.ip}`
                       : "尚未同步"}
+                    {binding &&
+                      (binding.remote_contest_id !== remoteContest ||
+                        binding.ip !==
+                          seatMap.get(participant.seat_id ?? "")
+                            ?.expected_ip) && (
+                        <strong>
+                          {" "}
+                          ·{" "}
+                          {participant.seat_id
+                            ? "座位 IP 待核对"
+                            : "旧绑定待撤销"}
+                        </strong>
+                      )}
                   </td>
                 </tr>
               );
@@ -399,7 +500,10 @@ export function Domjudge({
                   setSelected(
                     job.plan.targets.map((target) => target.participant_id),
                   );
-                  setRemoteContest(job.plan.remote_contest_id);
+                  if (job.plan.remote_contest_id !== remoteContest) {
+                    setError("历史任务的比赛与当前绑定不同");
+                    return;
+                  }
                   setGroup(job.plan.group_id);
                   invalidate();
                 }}

@@ -14,6 +14,34 @@ async fn contest_schedule_cancel_replay_and_restart() {
             .status(),
         409
     );
+    expect_ok(f.admin.post("domjudge/bind",&json!({"request_id":token(),"contest_id":"contest","remote_contest_id":"demo","previous":null})).await).await;
+    f.db.execute(
+        "INSERT INTO pause_seats VALUES('demo','seat-1'),('demo','seat-2')",
+        &[],
+    )
+    .await
+    .unwrap();
+    let mut resume = input.clone();
+    resume["action"] = json!("resume");
+    let rejected = f.admin.post("contest-control/preview", &resume).await;
+    assert_eq!(rejected.status(), 409);
+    assert!(rejected.text().await.unwrap().contains("暂停座位未选中"));
+    resume["seat_ids"] = json!(["seat-1", "seat-2"]);
+    assert!(
+        f.admin
+            .post("contest-control/preview", &resume)
+            .await
+            .text()
+            .await
+            .unwrap()
+            .contains("尚未配置 DOMjudge")
+    );
+    let review =
+        json!({"request_id":token(),"device_id":"device-2","base_version":0,"exclude":false});
+    assert_eq!(
+        expect_ok(f.admin.post("seating/review", &review).await).await["version"],
+        0
+    );
     let actor: String =
         f.db.query_one("SELECT id FROM operators WHERE role='admin'", &[])
             .await

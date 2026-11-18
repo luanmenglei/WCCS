@@ -11,6 +11,7 @@ export const contestSchema = z.object({
   id: z.string(),
   name: z.string(),
   version: z.number().int(),
+  remote_contest_id: z.string().nullable().optional(),
   participants: z.array(participantSchema),
 });
 export const rosterSchema = z.object({

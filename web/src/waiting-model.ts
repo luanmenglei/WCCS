@@ -195,6 +195,7 @@ export const stageLabels = {
   expired: "已过期",
 };
 export const skipLabels = {
+  pause_upgrade_required: "请更新客户端后再执行持续暂停",
   policy_unavailable: "客户端尚不支持比赛策略，请先升级",
   maintenance_active: "维护任务正在执行",
   ready: "可执行",

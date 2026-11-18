@@ -91,6 +91,8 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
         } else if capabilities.as_ref().is_none_or(|v| {
             !v.as_array().is_some_and(|caps| {
                 caps.iter().any(|c| c == input.template.capability())
+                    && (!matches!(&input.template, Template::Recovery { options } if options.scope == "volume")
+                        || caps.iter().any(|c| c == "deployment-volume-v1"))
                     && (preparation
                         .as_ref()
                         .is_none_or(|p| p.profile.competition.is_none())
@@ -272,12 +274,12 @@ pub async fn commit(
 
 pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, false).await?;
-    let mut db = app.db.lock().await?;
+    let mut db = app.preview_db.lock().await?;
     let tx = db.transaction().await?;
-    let identity = auth::authorize(&tx, &session, auth::Permission::Read).await?;
-    let rows=tx.query("SELECT id,request_id,device_id,command,stage,result,updated_at,expires_at,cancel_requested FROM maintenance_jobs
+    let identity = auth::authorize_snapshot(&tx, &session, auth::Permission::Read).await?;
+    let rows=tx.query("SELECT id,request_id,device_id,COALESCE(recovery_template,command->'template'),stage,CASE WHEN recovery_contest IS NULL THEN result ELSE recovery_summary END,updated_at,expires_at,cancel_requested FROM maintenance_jobs
         WHERE $1 OR (cardinality(room_ids)>0 AND room_ids<@$2) ORDER BY created_at DESC,id DESC LIMIT 500",&[&identity.all_rooms,&identity.room_ids]).await?;
-    let jobs:Vec<_>=rows.iter().map(|r|json!({"job_id":r.get::<_,String>(0),"request_id":r.get::<_,String>(1),"device_id":r.get::<_,String>(2),"command":json!({"template":r.get::<_,Value>(3)["template"]}),
+    let jobs:Vec<_>=rows.iter().map(|r|json!({"job_id":r.get::<_,String>(0),"request_id":r.get::<_,String>(1),"device_id":r.get::<_,String>(2),"command":json!({"template":r.get::<_,Value>(3)}),
         "stage":r.get::<_,String>(4),"result":r.get::<_,Option<Value>>(5),"updated_at":r.get::<_,i64>(6),"expired":r.get::<_,i64>(7)<=now(),"cancel_requested":r.get::<_,bool>(8)})).collect();
     Ok(Json(json!({"jobs":jobs,"server_time":now()})))
 }
@@ -325,9 +327,16 @@ async fn poll_response(
     let tx = db.transaction().await?;
     crate::seating::lock(&tx).await?;
     let device = auth::device(&tx, &headers).await?;
+    let volume_policy = headers
+        .get("x-wccs-volume-policy")
+        .is_some_and(|v| v == "1");
+    let mut capabilities = input.capabilities;
+    if volume_policy {
+        capabilities.push("deployment-volume-v1".into());
+    }
     tx.execute("INSERT INTO maintenance_devices VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id) DO UPDATE SET
         instance_id=$2,session_key=$3,adapter=$4,capabilities=$5,last_seen=$6",
-        &[&device,&input.instance_id,&input.session_key,&input.adapter,&json!(input.capabilities),&now()]).await?;
+        &[&device,&input.instance_id,&input.session_key,&input.adapter,&json!(capabilities),&now()]).await?;
     // Recheck credentials, actor authority, connection and identity on every active lease.
     let row=tx.query_opt("SELECT CASE WHEN $5 THEN to_jsonb(j.command_digest) ELSE j.command END FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id
         JOIN operators o ON o.id=j.actor_id JOIN control_devices c ON c.device_id=d.id
@@ -335,6 +344,7 @@ async fn poll_response(
         AND o.enabled AND o.version=j.actor_version AND o.role<>'viewer'
         AND (o.all_rooms OR (cardinality(j.room_ids)>0 AND j.room_ids<@o.room_ids AND device_room_scope(d.id)<@o.room_ids))
         AND c.connected AND c.last_seen>$2-15 AND c.instance_id=$3 AND c.session_key=$4
+        AND ($6 OR j.command#>>'{template,options,scope}' IS DISTINCT FROM 'volume')
         AND j.command->>'instance_id'=$3 AND j.command->>'session_key'=$4
         AND (j.command->>'generation')::bigint=d.enrollment_generation
         AND (j.command->>'device_version')::bigint=d.lifecycle_version
@@ -342,7 +352,7 @@ async fn poll_response(
         AND (j.command->'preparation' IS NULL OR (c.actual->'account'->>'adapter'='windows_test' AND c.actual->'account'->>'phase'='controlled' AND c.actual->'account'->>'account'='owned' AND c.actual->'account'->>'desktop_confirmed'='true' AND c.actual->'account'->>'target_sid'=c.actual->'account'->>'observed_sid'))
         AND (j.command->'preparation' IS NULL OR ((j.command->'preparation'->>'version')::bigint=(SELECT max(version) FROM preparation_profiles) AND (j.command->'preparation'->'profile'->>'tool_version')::bigint=(SELECT version FROM configuration_head WHERE id=1)))
         AND (j.command->'identity'->>'room_id'='' OR EXISTS(SELECT 1 FROM rooms r JOIN seats s ON s.room_id=r.id WHERE r.id=j.command->'identity'->>'room_id' AND r.version=(j.command->'identity'->>'room_version')::bigint AND s.id=j.command->'identity'->>'seat_id' AND s.expected_ip=d.observed_ip))
-        ORDER BY j.created_at,j.id LIMIT 1",&[&device,&now(),&input.instance_id,&input.session_key,&compact]).await?;
+        ORDER BY j.created_at,j.id LIMIT 1",&[&device,&now(),&input.instance_id,&input.session_key,&compact,&volume_policy]).await?;
     let value: Option<Value> = row.map(|row| row.get(0));
     tx.commit().await?;
     if compact {
@@ -413,7 +423,9 @@ pub async fn result(
             return Err(ApiError::conflict("维护任务已有后续或终态回执"));
         }
         tx.execute(
-            "UPDATE maintenance_jobs SET result=$2,stage=$3,updated_at=$4 WHERE id=$1",
+            "UPDATE maintenance_jobs SET result=$2,stage=$3,updated_at=$4,
+                reboot_requested_at=CASE WHEN $3='succeeded' AND command#>>'{template,options,action}'='reboot'
+                    AND $2::jsonb->>'detail'='reboot_requested' THEN COALESCE(reboot_requested_at,$4) ELSE reboot_requested_at END WHERE id=$1",
             &[&input.job_id, &value, &input.stage, &now()],
         )
         .await?;

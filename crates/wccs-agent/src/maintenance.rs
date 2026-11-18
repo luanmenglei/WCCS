@@ -33,10 +33,57 @@ struct Record {
 fn save(path: &Path, record: &Record) -> Result<()> {
     persist(path, &serde_json::to_vec(record)?)
 }
+fn history_path(path: &Path, group: &str) -> Result<std::path::PathBuf> {
+    let directory = path.parent().ok_or("maintenance_path_invalid")?.join(group);
+    fs::create_dir_all(&directory)?;
+    Ok(directory.join(path.file_name().ok_or("maintenance_path_invalid")?))
+}
+
+fn archive_ack(path: &Path, record: &mut Record) -> Result<()> {
+    record.acknowledged = true;
+    // Keep the digest of the complete command; large immutable payloads have
+    // already been accepted by the server. Commit the marker before unlinking.
+    record.command.recovery = None;
+    record.command.preparation = None;
+    record.result.recovery = None;
+    save(&history_path(path, "confirmed")?, record)?;
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+fn load_pending(path: &Path) -> Result<Option<Record>> {
+    match serde_json::from_slice(&fs::read(path)?) {
+        Ok(record) => Ok(Some(record)),
+        Err(_) => {
+            fs::rename(path, history_path(path, "quarantine")?)?;
+            eprintln!("maintenance_journal_quarantined");
+            Ok(None)
+        }
+    }
+}
+
+pub fn quarantined_count(path: &Path) -> usize {
+    ["maintenance", "maintenance-v2"]
+        .iter()
+        .filter_map(|ext| fs::read_dir(path.with_extension(ext).join("quarantine")).ok())
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .count()
+}
+
 pub fn diagnostic_summary(path: &Path, identity: &Identity) -> Vec<serde_json::Value> {
     let entries = ["maintenance", "maintenance-v2"]
         .into_iter()
-        .filter_map(|extension| fs::read_dir(path.with_extension(extension)).ok())
+        .flat_map(|extension| {
+            let base = path.with_extension(extension);
+            [
+                base.clone(),
+                base.join("confirmed"),
+                base.join("quarantine"),
+            ]
+        })
+        .filter_map(|directory| fs::read_dir(directory).ok())
         .flatten();
     let binding = connection::binding(identity);
     let mut records: Vec<Record> = entries
@@ -135,6 +182,7 @@ fn poll(
     let send = |input: &Poll| {
         client
             .post(format!("{server}/api/device/maintenance/poll"))
+            .header("x-wccs-volume-policy", "1")
             .bearer_auth(credential)
             .header("X-WCCS-Device-ID", &identity.device_id)
             .json(input)
@@ -162,7 +210,13 @@ fn recover(directory: &Path, identity_path: &Path) -> Result<()> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let mut record: Record = serde_json::from_slice(&fs::read(&path)?)?;
+        let Some(mut record) = load_pending(&path)? else {
+            continue;
+        };
+        if record.acknowledged {
+            archive_ack(&path, &mut record)?;
+            continue;
+        }
         if !record.result.terminal() {
             record.result = result(&record.command, "interrupted", "restart_interrupted");
             if record.command.preparation.is_some() {
@@ -268,7 +322,6 @@ fn cycle(
     let credential = diagnostics::credential(path, &identity)?;
     let binding = connection::binding(&identity);
     let directory = path.with_extension("maintenance");
-    let mut count = 0;
     let directories = [directory.clone(), path.with_extension("maintenance-v2")];
     for entry in directories
         .iter()
@@ -281,17 +334,32 @@ fn cycle(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        count += 1;
-        let mut record: Record = serde_json::from_slice(&fs::read(&path)?)?;
+        let Some(mut record) = load_pending(&path)? else {
+            continue;
+        };
+        if record.acknowledged {
+            archive_ack(&path, &mut record)?;
+            continue;
+        }
         if !record.result.terminal() {
             record.result = result(&record.command, "failed", "execution_failed");
             record.acknowledged = false;
             save(&path, &record)?;
         }
         if !record.acknowledged && record.server == server && record.device_binding == binding {
-            post_result(client, &identity, &credential, &record)?;
-            record.acknowledged = true;
-            save(&path, &record)?;
+            match post_result(client, &identity, &credential, &record) {
+                Ok(()) => archive_ack(&path, &mut record)?,
+                Err(error)
+                    if error
+                        .downcast_ref::<reqwest::Error>()
+                        .and_then(|e| e.status())
+                        .is_some_and(|s| matches!(s.as_u16(), 400 | 403 | 404 | 409 | 422)) =>
+                {
+                    fs::rename(&path, history_path(&path, "quarantine")?)?;
+                    eprintln!("maintenance_receipt_requires_review");
+                }
+                Err(_) => eprintln!("maintenance_receipt_retry_pending"),
+            }
         }
     }
     crate::file_transaction::recover_pending(&path.with_extension("preparation"))
@@ -333,8 +401,38 @@ fn cycle(
         post_result(client, &identity, &credential, &record)?;
         return Ok(());
     }
-    if count >= 4096 {
-        return Err("maintenance_journal_capacity".into());
+    let confirmed = history_path(&record_path, "confirmed")?;
+    let quarantined = history_path(&record_path, "quarantine")?.try_exists()?;
+    if confirmed.try_exists()? || quarantined {
+        let mut receipt = result(&command, "interrupted", "restart_interrupted");
+        if !quarantined {
+            let saved: Record = serde_json::from_slice(&fs::read(confirmed)?)?;
+            if saved.server != server
+                || saved.device_binding != binding
+                || saved.result.command_digest != receipt.command_digest
+            {
+                return Err("maintenance_identifier_conflict".into());
+            }
+            if !matches!(command.template, Template::Recovery { .. })
+                || saved.result.stage != "succeeded"
+            {
+                receipt = saved.result;
+            }
+        }
+        // A restored server may request work already performed. For a damaged
+        // journal or compacted manifest only interruption can be attested.
+        return post_result(
+            client,
+            &identity,
+            &credential,
+            &Record {
+                server,
+                device_binding: binding,
+                command,
+                result: receipt,
+                acknowledged: false,
+            },
+        );
     }
     let mut record = Record {
         server: server.clone(),
@@ -388,6 +486,7 @@ fn cycle(
                     };
                     client
                         .post(format!("{server}/api/device/maintenance/authorize"))
+                        .header("x-wccs-volume-policy", "1")
                         .bearer_auth(&credential)
                         .header("X-WCCS-Device-ID", &identity.device_id)
                         .json(&input)
@@ -436,6 +535,9 @@ fn cycle(
                     "recovery_system_volume_rejected",
                     "recovery_protected_path",
                     "recovery_volume_unknown",
+                    "recovery_volume_not_provisioned",
+                    "recovery_volume_policy_invalid",
+                    "recovery_volume_identity_mismatch",
                     "recovery_filename_invalid",
                     "recovery_capacity_exceeded",
                     "target_reparse_point",
@@ -581,8 +683,7 @@ fn cycle(
     }
     save(&record_path, &record)?;
     post_result(client, &identity, &credential, &record)?;
-    record.acknowledged = true;
-    save(&record_path, &record)
+    archive_ack(&record_path, &mut record)
 }
 
 fn display(
@@ -858,6 +959,20 @@ mod tests {
         assert!(!recovered.acknowledged);
         recover(&directory, &directory.join("device.json")).unwrap();
         assert_eq!(fs::read(&path).unwrap(), first);
+        let confirmed = directory.join("confirmed");
+        fs::create_dir(&confirmed).unwrap();
+        for id in 0..4097 {
+            fs::write(confirmed.join(format!("done-{id}.json")), b"historical").unwrap();
+        }
+        fs::write(directory.join("corrupt.json"), b"{").unwrap();
+        let mut recovered: Record = serde_json::from_slice(&first).unwrap();
+        recovered.acknowledged = true;
+        save(&path, &recovered).unwrap();
+        recover(&directory, &directory.join("device.json")).unwrap();
+        assert!(directory.join("quarantine/corrupt.json").exists());
+        assert!(confirmed.join("job.json").exists());
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(&confirmed).unwrap().count(), 4098);
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -178,7 +178,20 @@ async fn image_registration_window_approval_retry_and_conflict() {
     assert_eq!(application["machine_name"], "503-41");
     assert_eq!(application["observed_ip"], "127.0.0.1");
     let approve = json!({"request_id":token(),"approve":true,"targets":[{
-        "application_id":first["application_id"],"base_version":application["base_version"]}]});
+        "application_id":first["application_id"],"base_version":application["base_version"],"review_token":application["review_token"]}]});
+    f.db.execute(
+        "UPDATE image_applications SET observed_ip='192.0.2.42' WHERE id=$1",
+        &[&first["application_id"].as_str().unwrap()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.admin.post("images/action", &approve).await.status(), 409);
+    f.db.execute(
+        "UPDATE image_applications SET observed_ip='127.0.0.1' WHERE id=$1",
+        &[&first["application_id"].as_str().unwrap()],
+    )
+    .await
+    .unwrap();
     let approved = expect_ok(f.admin.post("images/action", &approve).await).await;
     assert_eq!(
         approved,
@@ -219,12 +232,25 @@ async fn image_registration_window_approval_retry_and_conflict() {
     assert_eq!(first["device_id"], second["device_id"]);
     let state = f.admin.state().await;
     let application = &state["image_applications"][0];
-    let replace = json!({"request_id":token(),"approve":true,"targets":[{
-        "application_id":second["application_id"],"base_version":application["base_version"]}]});
+    let mut replace = json!({"request_id":token(),"approve":true,"targets":[{
+        "application_id":second["application_id"],"base_version":application["base_version"],"review_token":application["review_token"]}]});
     assert_eq!(f.admin.post("images/action", &replace).await.status(), 409);
     f.db.execute("UPDATE devices SET last_seen=0 WHERE id=$1", &[&key])
         .await
         .unwrap();
+    let mut competing = restored.clone();
+    competing["registration"]["enrollment_token"] = token().into();
+    competing["registration"]["device_token"] = token().into();
+    expect_ok(f.admin.device("image-register", "", &competing).await).await;
+    assert_eq!(f.admin.post("images/action", &replace).await.status(), 409);
+    let refreshed = f.admin.state().await;
+    let refreshed = refreshed["image_applications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == second["application_id"])
+        .unwrap();
+    replace["targets"][0]["review_token"] = refreshed["review_token"].clone();
     expect_ok(f.admin.post("images/action", &replace).await).await;
     assert_eq!(
         f.admin
@@ -274,7 +300,14 @@ async fn image_registration_window_approval_retry_and_conflict() {
             "protocol_version":1,"device_id":wccs_protocol::image_device_id(name).unwrap(),
             "enrollment_token":token(),"device_token":token()}});
         let result = expect_ok(f.admin.device("image-register", "", &registration).await).await;
-        batch.push(json!({"application_id":result["application_id"],"base_version":1}));
+        let state = f.admin.state().await;
+        let app = state["image_applications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == result["application_id"])
+            .unwrap();
+        batch.push(json!({"application_id":result["application_id"],"base_version":1,"review_token":app["review_token"]}));
     }
     let failed_batch = json!({"request_id":token(),"approve":true,"targets":batch});
     assert_eq!(

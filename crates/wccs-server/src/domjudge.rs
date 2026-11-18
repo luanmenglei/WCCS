@@ -172,7 +172,7 @@ async fn local_plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
     {
         return Err(ApiError::bad("DOMjudge 比赛、分组或选手范围无效"));
     }
-    let rows = tx.query("SELECT p.id,p.code,p.name,p.school,a.seat_id FROM participants p LEFT JOIN assignments a ON a.participant_id=p.id WHERE p.contest_id=$1 AND p.id=ANY($2) ORDER BY p.id", &[&input.contest_id,&input.participant_ids]).await?;
+    let rows = tx.query("SELECT p.id,p.code,p.name,p.school,a.seat_id,b.remote_contest_id FROM participants p LEFT JOIN domjudge_bindings b ON b.participant_id=p.id LEFT JOIN assignments a ON a.participant_id=p.id WHERE p.contest_id=$1 AND p.id=ANY($2) ORDER BY p.id", &[&input.contest_id,&input.participant_ids]).await?;
     if rows.len() != input.participant_ids.len() {
         return Err(ApiError::bad("选手不属于本场比赛"));
     }
@@ -205,6 +205,13 @@ async fn local_plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
         );
         let mut target = json!({"participant_id":id,"code":row.get::<_,String>("code"),"name":row.get::<_,String>("name"),
             "school":row.get::<_,String>("school"),"username":username,"seat_id":seat_id,"reason":"seat_unassigned"});
+        if seat_id.is_none()
+            && row.get::<_, Option<String>>("remote_contest_id").as_deref()
+                == Some(&input.remote_contest_id)
+        {
+            target["revoke_only"] = json!(true);
+            target["reason"] = Value::Null;
+        }
         if let Some((room, seat)) = seat {
             target["room_id"] = room["id"].clone();
             target["room_version"] = room["version"].clone();
@@ -544,6 +551,15 @@ async fn execute(
         if !team.is_null() && team["public_description"] != marker {
             return Err("remote_team_conflict".into());
         }
+        if target["revoke_only"] == true {
+            if !current.is_null() && (current["enabled"] == true || !current["ip"].is_null()) {
+                remote.user(target, None, false, false).await?;
+            }
+            results[index]["stage"] = json!("succeeded");
+            results[index]["detail"] = json!("unassigned_account_revoked");
+            save_progress(app, job, results).await?;
+            continue;
+        }
         let previous = app
             .db
             .lock()
@@ -584,7 +600,7 @@ async fn execute(
         save_progress(app, job, results).await?;
     }
     for (index, target) in targets.iter().enumerate() {
-        if results[index]["detail"] == "already_synced" {
+        if target["revoke_only"] == true || results[index]["detail"] == "already_synced" {
             continue;
         }
         still_authorized(app, input, plan, actor_id, actor_version).await?;
@@ -641,6 +657,16 @@ async fn execute(
         results[index]["stage"] = json!("succeeded");
         results[index]["detail"] = json!("account_ip_verified");
         save_progress(app, job, results).await?;
+    }
+    let revoked: Vec<_> = targets
+        .iter()
+        .filter(|t| t["revoke_only"] == true)
+        .filter_map(|t| t["participant_id"].as_str())
+        .collect();
+    if !revoked.is_empty() {
+        app.db.lock().await.map_err(|_| "local_database_unavailable")?
+            .execute("DELETE FROM domjudge_bindings WHERE participant_id=ANY($1) AND remote_contest_id=$2", &[&revoked,&input.remote_contest_id])
+            .await.map_err(|_| "local_database_unavailable")?;
     }
     Ok(())
 }

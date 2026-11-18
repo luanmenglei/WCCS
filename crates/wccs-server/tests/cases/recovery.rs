@@ -204,8 +204,22 @@ async fn recovery_requires_verified_archive_confirmation_and_frozen_target() {
             .unwrap();
         }
     }
-    let listed = expect_ok(f.admin.get("recovery").await).await;
+    let listed = expect_ok(f.admin.get("recovery?contest_id=contest").await).await;
     assert_eq!(listed["jobs"].as_array().unwrap().len(), 4);
+    assert!(listed["jobs"][0]["result"].get("recovery").is_none());
+    assert_eq!(
+        expect_ok(f.admin.get("recovery?contest_id=other").await).await["jobs"],
+        json!([])
+    );
+    let page = expect_ok(
+        f.admin
+            .get(&format!(
+                "recovery/manifest/{archive_id}?contest_id=contest"
+            ))
+            .await,
+    )
+    .await;
+    assert_eq!(page["files"][0]["path"], "main.cpp");
     assert!(
         listed["jobs"]
             .as_array()
@@ -224,6 +238,61 @@ async fn recovery_requires_verified_archive_confirmation_and_frozen_target() {
             .status(),
         409
     );
+    let reboot = listed["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["template"]["options"]["action"] == "reboot")
+        .unwrap()["job_id"]
+        .as_str()
+        .unwrap();
     ws.close(None).await.unwrap();
+    let mut next = socket_for(&f.admin, &f.credential, "device-1").await;
+    let mut obs = observation();
+    obs["instance_id"] = json!("new-host");
+    poll(&mut next, &obs).await.unwrap();
+    f.db.execute(
+        "UPDATE control_devices SET actual=$1 WHERE device_id='device-1'",
+        &[&json!({"state":"desktop","account":{"phase":"teaching","policy":{"state":"ready"}}})],
+    )
+    .await
+    .unwrap();
+    let unknown = json!({"sampled_at":1,"observation":{"status":"unavailable","reason":"unsupported","code":null}});
+    let mut health = json!({"schema_version":1,"device_id":"device-1","instance_id":"new-host","sequence":1,"collection_ms":20,
+        "agent_version":{"sampled_at":1,"observation":{"status":"available","value":"test"}},"deployment_version":unknown,
+        "health":{"uptime_seconds":{"sampled_at":1,"observation":{"status":"available","value":1}},"cpu_percent":unknown,"memory":unknown,"displays":unknown,"keyboards":unknown,"mice":unknown}});
+    let send = |marker: &str, h: &Value| {
+        f.admin
+            .client
+            .post(format!("{}/api/device/health", f.admin.url))
+            .bearer_auth(&f.credential)
+            .header("x-wccs-requested-reboot", marker)
+            .json(h)
+            .send()
+    };
+    assert_eq!(send("unrelated", &health).await.unwrap().status(), 200);
+    assert!(
+        f.db.query_one(
+            "SELECT reboot_observed_at FROM maintenance_jobs WHERE id=$1",
+            &[&reboot]
+        )
+        .await
+        .unwrap()
+        .get::<_, Option<i64>>(0)
+        .is_none()
+    );
+    health["sequence"] = json!(2);
+    assert_eq!(send(reboot, &health).await.unwrap().status(), 200);
+    next.close(None).await.unwrap();
+    assert!(
+        f.db.query_one(
+            "SELECT reboot_observed_at FROM maintenance_jobs WHERE id=$1",
+            &[&reboot]
+        )
+        .await
+        .unwrap()
+        .get::<_, Option<i64>>(0)
+        .is_some()
+    );
     f.finish().await;
 }

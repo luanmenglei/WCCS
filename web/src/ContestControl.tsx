@@ -145,7 +145,7 @@ export function ContestControl({
     seat_ids: selected,
     action,
     execute_at: at ? Math.floor(new Date(at).getTime() / 1000) : 0,
-    duration_seconds: duration,
+    duration_seconds: action === "pause" ? 900 : duration,
   };
   if (!access.allRooms) return <p role="alert">比赛联动需要全场查看权限。</p>;
   return (
@@ -197,19 +197,23 @@ export function ContestControl({
             }}
           />
         </label>
-        <label>
-          桌面等待有效秒数
-          <input
-            type="number"
-            min={30}
-            max={3600}
-            value={duration}
-            onChange={(event) => {
-              setDuration(Number(event.target.value));
-              invalidate();
-            }}
-          />
-        </label>
+        {action === "pause" ? (
+          <p>暂停持续至明确恢复，断线退出控制。</p>
+        ) : (
+          <label>
+            桌面等待有效秒数
+            <input
+              type="number"
+              min={30}
+              max={3600}
+              value={duration}
+              onChange={(event) => {
+                setDuration(Number(event.target.value));
+                invalidate();
+              }}
+            />
+          </label>
+        )}
         <Seats
           contest={snapshot.roster.contests.find(
             (contest) => contest.id === contestId,

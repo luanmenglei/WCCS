@@ -3,7 +3,7 @@
 param(
     [Parameter(Mandatory)][string]$Configuration,
     [Parameter(Mandatory, Position = 0)][string]$Problem,
-    [Parameter(Mandatory, Position = 1)][string[]]$Files,
+    [Parameter(Mandatory, Position = 1, ValueFromRemainingArguments)][string[]]$Files,
     [string]$Language,
     [switch]$Yes,
     [switch]$Resubmit

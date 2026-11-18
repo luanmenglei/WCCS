@@ -62,6 +62,27 @@ fn volume(path: &Path, simulation: bool) -> Result<Volume> {
     }
     Err("recovery_volume_unknown".into())
 }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeploymentVolume {
+    device_id: String,
+    drive: String,
+    guid: String,
+    serial: String,
+}
+
+impl DeploymentVolume {
+    fn permits(&self, device: &str, volume: &Volume) -> bool {
+        !volume.system
+            && self.device_id == device
+            && wccs_protocol::recovery::deployment_volume(&self.drive)
+            && !self.guid.is_empty()
+            && self.guid.eq_ignore_ascii_case(&volume.guid)
+            && !self.serial.is_empty()
+            && self.serial.eq_ignore_ascii_case(&volume.serial)
+    }
+}
+
 fn target(
     identity: &Path,
     command: &Command,
@@ -91,8 +112,20 @@ fn target(
         if target.canonicalize()? != work.canonicalize()? || target.parent().is_none() {
             return Err("recovery_workspace_mismatch".into());
         }
-    } else if target.parent().is_some() || volume(&target, false)?.system {
+    } else if !wccs_protocol::recovery::deployment_volume(&options.target)
+        || target.parent().is_some()
+        || volume(&target, false)?.system
+    {
         return Err("recovery_system_volume_rejected".into());
+    }
+    if options.scope == "volume" && options.action != "inspect" {
+        let policy = fs::read(identity.with_extension("recovery-volume.json"))
+            .map_err(|_| "recovery_volume_not_provisioned")?;
+        let policy: DeploymentVolume =
+            serde_json::from_slice(&policy).map_err(|_| "recovery_volume_policy_invalid")?;
+        if !policy.permits(&command.device_id, &volume(&target, false)?) {
+            return Err("recovery_volume_identity_mismatch".into());
+        }
     }
     let canonical = target.canonicalize()?;
     for protected in [
@@ -231,6 +264,39 @@ fn scan(
     }
     Ok(tree)
 }
+fn archive_request(
+    request: reqwest::blocking::RequestBuilder,
+    authorized: &mut impl FnMut() -> bool,
+) -> Result<serde_json::Value> {
+    let mut delay = std::time::Duration::from_millis(300);
+    loop {
+        if !authorized() {
+            return Err("recovery_authorization_ended".into());
+        }
+        let response = request
+            .try_clone()
+            .ok_or("recovery_request_invalid")?
+            .send()
+            .and_then(|response| response.error_for_status())
+            .and_then(|response| response.json());
+        match response {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error.is_timeout()
+                    || error.is_connect()
+                    || error.is_body()
+                    || error
+                        .status()
+                        .is_some_and(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504)) =>
+            {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_secs(2));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 pub fn execute(
     identity: &Path,
     command: &Command,
@@ -270,6 +336,14 @@ pub fn execute(
         if !authorized() {
             return Err("recovery_authorization_ended".into());
         }
+        if !simulation {
+            reboot_boot_marker(true)?;
+            crate::windows_agent::persist(
+                &identity.with_extension("requested-reboot"),
+                command.job_id.as_bytes(),
+            )
+            .map_err(|_| "recovery_reboot_marker_failed")?;
+        }
         request_reboot(identity, &command.job_id, simulation)?;
         return Ok(("reboot_requested", expected.clone()));
     }
@@ -292,7 +366,7 @@ pub fn execute(
                 }
                 let mut bytes = vec![0; entry.chunk_length(chunk).ok_or("recovery_chunk_invalid")?];
                 file.read_exact(&mut bytes)?;
-                let response: serde_json::Value = transfer
+                let request = transfer
                     .client
                     .post(format!(
                         "{}/api/device/recovery/{}/{index}/{chunk}",
@@ -300,10 +374,9 @@ pub fn execute(
                     ))
                     .bearer_auth(transfer.credential)
                     .header("X-WCCS-Device-ID", &command.device_id)
-                    .body(bytes)
-                    .send()?
-                    .error_for_status()?
-                    .json()?;
+                    .timeout(std::time::Duration::from_secs(30))
+                    .body(bytes);
+                let response = archive_request(request, &mut authorized)?;
                 if response["accepted"] != true
                     || response["file_index"] != index
                     || response["chunk_index"] != chunk
@@ -315,7 +388,7 @@ pub fn execute(
         if !authorized() {
             return Err("recovery_authorization_ended".into());
         }
-        let response: serde_json::Value = transfer
+        let request = transfer
             .client
             .post(format!(
                 "{}/api/device/recovery/{}/finish",
@@ -323,9 +396,8 @@ pub fn execute(
             ))
             .bearer_auth(transfer.credential)
             .header("X-WCCS-Device-ID", &command.device_id)
-            .send()?
-            .error_for_status()?
-            .json()?;
+            .timeout(std::time::Duration::from_secs(120));
+        let response = archive_request(request, &mut authorized)?;
         if response["verified"] != true || response["job_id"] != command.job_id {
             return Err("recovery_archive_ack_mismatch".into());
         }
@@ -385,6 +457,41 @@ pub fn execute(
     }
     Ok(("cleanup_complete", tree.manifest))
 }
+/// A volatile machine key survives service restarts and disappears when the system hive unloads.
+pub fn reboot_boot_marker(create: bool) -> Result<bool> {
+    use windows::{
+        Win32::{Foundation::ERROR_FILE_NOT_FOUND, System::Registry::*},
+        core::w,
+    };
+    let path = w!("SOFTWARE\\WCCS-RequestedRebootThisBoot");
+    let mut key = HKEY::default();
+    // SAFETY: fixed machine subkey, live NUL-terminated name, writable output handle.
+    // On success this function owns and closes the returned handle exactly once.
+    unsafe {
+        let status = if create {
+            RegCreateKeyExW(
+                HKEY_LOCAL_MACHINE,
+                path,
+                None,
+                None,
+                REG_OPTION_VOLATILE,
+                KEY_QUERY_VALUE,
+                None,
+                &mut key,
+                None,
+            )
+        } else {
+            RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, Some(0), KEY_QUERY_VALUE, &mut key)
+        };
+        if !create && status == ERROR_FILE_NOT_FOUND {
+            return Ok(false);
+        }
+        status.ok()?;
+        RegCloseKey(key).ok()?;
+    }
+    Ok(true)
+}
+
 fn request_reboot(identity: &Path, job: &str, simulation: bool) -> Result<()> {
     if simulation {
         crate::windows_agent::persist(
@@ -420,6 +527,31 @@ fn request_reboot(identity: &Path, job: &str, simulation: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deployed_volume_requires_matching_device_mount_and_identity() {
+        let mut policy = DeploymentVolume {
+            device_id: "one".into(),
+            drive: "D:\\".into(),
+            guid: "GUID".into(),
+            serial: "001".into(),
+        };
+        let mut volume = Volume {
+            guid: "guid".into(),
+            serial: "001".into(),
+            label: String::new(),
+            system: false,
+        };
+        assert!(policy.permits("one", &volume));
+        assert!(!policy.permits("two", &volume));
+        volume.serial = "002".into();
+        assert!(!policy.permits("one", &volume));
+        volume.serial = "001".into();
+        policy.drive = "E:\\".into();
+        assert!(!policy.permits("one", &volume));
+        policy.drive = "D:\\".into();
+        volume.system = true;
+        assert!(!policy.permits("one", &volume));
+    }
     #[test]
     fn extended_scan_accepts_large_cleanup_and_more_than_legacy_entries() {
         let root =
@@ -515,7 +647,8 @@ mod tests {
     fn inspection_holds_files_against_changes_and_rejects_modified_scope() {
         let root = std::env::temp_dir().join(format!("wccs-recovery-{}", wccs_protocol::token()));
         fs::create_dir(&root).unwrap();
-        fs::write(root.join("main.cpp"), b"int main(){}").unwrap();
+        let name = format!("{}.cpp", "汉".repeat(62));
+        fs::write(root.join(&name), b"int main(){}").unwrap();
         let options = Options {
             limits: None,
             action: "inspect".into(),
@@ -529,8 +662,14 @@ mod tests {
         };
         let tree = scan(&root, &options, true, false, &mut || true).unwrap();
         assert_eq!(tree.manifest.files.len(), 1);
-        assert!(fs::write(root.join("main.cpp"), b"changed").is_err());
-        assert!(fs::rename(root.join("main.cpp"), root.join("moved.cpp")).is_err());
+        assert!(tree.manifest.valid_for(&options));
+        assert_eq!(tree.manifest.files[0].path, name);
+        assert_eq!(
+            tree.manifest.files[0].hashes,
+            vec![bytes_digest(b"int main(){}")]
+        );
+        assert!(fs::write(root.join(&name), b"changed").is_err());
+        assert!(fs::rename(root.join(&name), root.join("moved.cpp")).is_err());
         drop(tree);
         assert!(scan(&root, &options, true, false, &mut || false).is_err());
         fs::remove_dir_all(&root).unwrap();

@@ -14,6 +14,7 @@ const targetSchema = z
     seat_label: z.string().optional(),
     ip: z.string().nullable().optional(),
     reason: z.string().nullable(),
+    revoke_only: z.boolean().optional(),
     remote_user: z
       .object({ ip: z.string().nullable(), enabled: z.boolean() })
       .passthrough()
@@ -58,6 +59,7 @@ const stateSchema = z.object({
 });
 
 const details: Record<string, string> = {
+  unassigned_account_revoked: "未分配选手的旧账号与 IP 已撤销",
   seat_unassigned: "尚未分配座位",
   seat_not_ready: "座位离线、冲突或尚未绑定",
   device_disabled: "设备已禁用",
@@ -293,7 +295,13 @@ export function Domjudge({
                     <td>{target.seat_label ?? "未分配"}</td>
                     <td>{target.remote_user?.ip ?? "无"}</td>
                     <td>{target.ip ?? "无"}</td>
-                    <td>{target.reason ? detail(target.reason) : "可同步"}</td>
+                    <td>
+                      {target.reason
+                        ? detail(target.reason)
+                        : target.revoke_only
+                          ? "仅撤销旧账号及 IP"
+                          : "可同步"}
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -32,6 +32,10 @@ impl Manifest {
     }
 }
 pub fn filename(name: &str) -> bool {
+    name.len() <= 180 && !name.eq_ignore_ascii_case(".wccs-owner.json") && windows_component(name)
+}
+
+pub(crate) fn windows_component(name: &str) -> bool {
     let stem = name
         .split('.')
         .next()
@@ -39,8 +43,7 @@ pub fn filename(name: &str) -> bool {
         .trim_end()
         .to_ascii_uppercase();
     !name.is_empty()
-        && !name.eq_ignore_ascii_case(".wccs-owner.json")
-        && name.len() <= 180
+        && name.encode_utf16().count() <= 255
         && !name.ends_with(['.', ' '])
         && !name
             .chars()

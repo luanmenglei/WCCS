@@ -44,6 +44,27 @@ pub async fn report(
                 &[&format!("{}-{}-{}",device,input.instance_id,input.sequence),&now(),&device,&vec![device.clone()],&json!({"changes":changes})]).await?;
         }
         tx.execute("INSERT INTO device_health VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id) DO UPDATE SET enrollment_generation=$2,instance_id=$3,sequence=$4,report=$5,received_at=$6",&[&device,&generation,&input.instance_id,&input.sequence,&value,&now()]).await?;
+        if let Some(uptime) = input
+            .health
+            .uptime_seconds
+            .observation
+            .value()
+            .and_then(|u| i64::try_from(*u).ok())
+            && let Some(job) = headers
+                .get("x-wccs-requested-reboot")
+                .and_then(|v| v.to_str().ok())
+                .filter(|job| wccs_protocol::valid_id(job))
+        {
+            let received = now();
+            let boot = received.saturating_sub(uptime);
+            tx.execute("UPDATE maintenance_jobs j SET reboot_observed_at=$2 FROM control_devices c
+            WHERE j.id=$6 AND j.device_id=$1 AND c.device_id=j.device_id AND c.connected AND c.instance_id=$3
+            AND j.reboot_observed_at IS NULL AND j.stage='succeeded' AND j.result->>'detail'='reboot_requested'
+            AND j.command#>>'{template,options,action}'='reboot' AND j.command->>'instance_id'<>c.instance_id
+            AND (j.command->>'generation')::bigint=$4 AND c.actual#>>'{account,phase}'='teaching'
+            AND c.actual#>>'{account,policy,state}'='ready' AND $5::bigint BETWEEN j.reboot_requested_at-2 AND j.reboot_requested_at+120",
+            &[&device,&received,&input.instance_id,&generation,&boot,&job]).await?;
+        }
     }
     tx.commit().await?;
     Ok(Json(

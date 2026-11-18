@@ -41,20 +41,7 @@ impl Write {
 }
 
 async fn desktop_plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value> {
-    let mut result = waiting::plan(tx, app, &input.desktop()?).await?;
-    // Existing leave commands can release an offline device. A coordinated contest
-    // operation requires a fresh connection for every selected desktop.
-    for target in result["targets"]
-        .as_array_mut()
-        .ok_or_else(ApiError::internal)?
-    {
-        let online: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM control_devices WHERE device_id=$1 AND connected AND server_epoch=$2 AND last_seen>$3)",
-            &[&target["device_id"].as_str(),&app.server_epoch,&(now()-wccs_protocol::control::LEASE_SECONDS as i64)]).await?.get(0);
-        if target["status"] == "ready" && !online {
-            target["status"] = json!("offline");
-        }
-    }
-    Ok(result)
+    waiting::desktop_plan(tx, app, &input.desktop()?, true, input.action == "pause").await
 }
 
 fn remote_snapshot(value: &Value) -> ApiResult<Value> {

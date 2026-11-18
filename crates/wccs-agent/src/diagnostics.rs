@@ -91,6 +91,7 @@ fn status(path: &Path) -> Result<Value> {
         "session_binary_present":std::env::current_exe()?.with_file_name("wccs-session.exe").is_file(),
         "installation_service":service,
         "recent_maintenance":crate::maintenance::diagnostic_summary(path,&identity),
+        "quarantined_maintenance_count":crate::maintenance::quarantined_count(path),
         "pending_distribution":crate::distribution::diagnostic_summary(path,&identity),
         "latest_diagnostics":latest,"online_validation_pending":latest.is_none(),
         "presentation_cache":crate::presentation::cached_diagnostic(path).ok().flatten(),
@@ -369,6 +370,7 @@ fn diagnose(path: &Path, service: &str, output: &Path, test_mode: bool) -> Resul
     let package = json!({"schema_version":1,"mode":if test_mode {"local_test"} else {"service"},
         "configuration":saved.configuration,"report":report,"server_context":context,
         "network":wccs_inventory::network(),"server_acknowledged":uploaded,
+        "quarantined_maintenance_count":crate::maintenance::quarantined_count(path),
         "associated_events":sanitized_events(path),"associated_tasks":crate::maintenance::diagnostic_summary(path,&identity),
         "pending_distribution":crate::distribution::diagnostic_summary(path,&identity)});
     let mut file = fs::OpenOptions::new()

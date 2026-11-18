@@ -268,6 +268,9 @@ impl Controller {
         request
             .headers_mut()
             .insert("sec-websocket-protocol", CONTROL_PROTOCOL.parse()?);
+        request
+            .headers_mut()
+            .insert("x-wccs-pause-lease", "1".parse()?);
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_MESSAGE))
             .max_frame_size(Some(MAX_MESSAGE))
@@ -469,6 +472,8 @@ impl Controller {
         lease: u64,
         remaining: u64,
     ) -> Result<()> {
+        let renewable = command.action == "enter"
+            && command.expires_at == wccs_protocol::control::UNTIL_RESUMED;
         if self
             .command
             .as_ref()
@@ -491,12 +496,20 @@ impl Controller {
             }
             self.command = Some(command);
             self.stage_started = Instant::now();
-            self.command_deadline = Instant::now() + Duration::from_secs(remaining.min(3600));
+            self.command_deadline = Instant::now()
+                + Duration::from_secs(if renewable {
+                    lease
+                } else {
+                    remaining.min(3600)
+                });
             self.stage("accepted")?;
             return Ok(());
         }
         if Instant::now() >= self.command_deadline {
             return self.fail("command_expired");
+        }
+        if renewable && self.command.as_ref() == Some(&command) {
+            self.command_deadline = Instant::now() + Duration::from_secs(lease);
         }
         let lease = lease.min(
             self.command_deadline
@@ -753,6 +766,20 @@ mod tests {
         assert_eq!(host.report.as_ref().unwrap().stage, "failed");
         host.apply(command, None, 15, 900).unwrap();
         assert!(host.child.is_none());
+        cleanup(host);
+    }
+    #[test]
+    fn online_pause_renews_only_before_monotonic_expiry() {
+        let (mut host, mut command) = fixture();
+        command.expires_at = wccs_protocol::control::UNTIL_RESUMED;
+        host.apply(command.clone(), None, 15, 900).unwrap();
+        let soon = Instant::now() + Duration::from_secs(2);
+        host.command_deadline = soon;
+        host.apply(command.clone(), None, 15, 900).unwrap();
+        assert!(host.command_deadline > soon);
+        host.command_deadline = Instant::now() - Duration::from_secs(1);
+        host.apply(command, None, 15, 900).unwrap();
+        assert_eq!(host.actual.detail, "command_expired");
         cleanup(host);
     }
     #[test]

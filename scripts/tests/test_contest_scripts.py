@@ -99,6 +99,31 @@ class ContestScriptsTests(unittest.TestCase):
                     self.assertEqual(repeated.returncode, 0 if state == "accepted" else 4)
                     self.assertEqual(len(list((self.root / ".wccs-submissions").glob("*.json"))), len(before) + 1)
 
+    def test_launcher_submits_two_sources_in_order(self):
+        common = self.scripts / "contest-common.ps1"
+        common.write_text(common.read_text(encoding="utf-8") + MOCK_HTTP, encoding="utf-8")
+        helper = self.root / "helper.cpp"
+        helper.write_text("int helper(){return 1;}", encoding="utf-8")
+        launcher = self.root / "contest-launch.ps1"
+        shutil.copy2(SOURCE.parent / launcher.name, launcher)
+        config = self.scripts / "contest.json"
+        shutil.copy2(self.config, config)
+        def digest(path):
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest = self.scripts / "manifest.json"
+        manifest.write_text(json.dumps({"files": [
+            {"path": p.name, "sha256": digest(p)} for p in self.scripts.glob("*.ps1")
+        ]}), encoding="utf-8")
+        (self.root / "active.json").write_text(json.dumps({
+            "directory": str(self.scripts), "manifest_sha256": digest(manifest),
+            "configuration_sha256": digest(config),
+        }), encoding="utf-8")
+        subprocess.run(["pwsh", "-NoProfile", "-File", str(launcher), "submit", "A",
+                        str(self.source), str(helper), "-Language", "cpp", "-Yes"],
+                       cwd=self.root, check=True, capture_output=True, timeout=60)
+        receipt = json.loads(next((self.root / ".wccs-submissions").glob("*.json")).read_text(encoding="utf-8-sig"))
+        self.assertEqual(receipt["files"], [{"name": p.name, "sha256": digest(p)} for p in (self.source, helper)])
+
     def test_submit_checks_domjudge_filename_before_post(self):
         common = self.scripts / "contest-common.ps1"
         common.write_text(common.read_text(encoding="utf-8") + MOCK_HTTP, encoding="utf-8")

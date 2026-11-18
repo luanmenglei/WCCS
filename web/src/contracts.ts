@@ -96,6 +96,7 @@ export const stateSchema = z.object({
         base_version: z.number().int(),
         generation: z.number().int(),
         competing: z.number().int(),
+        review_token: z.string().optional(),
         online: z.boolean(),
         bootstrap_status: z.enum([
           "",

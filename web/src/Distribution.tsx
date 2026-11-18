@@ -51,6 +51,8 @@ const labels: Record<string, string> = {
   queued: "等待客户端下载",
   downloading: "下载中",
   ready: "校验完成，等待发布",
+  publishing: "客户端已领取发布，等待实际结果",
+  publication_unconfirmed: "发布期间授权已变化，需核对本机文件",
   published: "已发布",
   failed: "失败",
   cancelled: "已取消",

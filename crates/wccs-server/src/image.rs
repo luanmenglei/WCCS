@@ -144,11 +144,13 @@ pub async fn register(
 pub async fn snapshot(tx: &Transaction<'_>) -> ApiResult<Value> {
     let rows = tx.query("SELECT a.id,a.device_id,a.machine_name,a.observed_ip,a.created_at,a.expires_at,a.status,a.bootstrap_status,
         d.lifecycle_version,d.observed_ip AS previous_ip,d.last_seen,d.enrollment_generation,
-        (SELECT count(*) FROM image_applications other WHERE other.device_id=a.device_id AND other.status='pending' AND other.expires_at>$1) AS competing
+        (SELECT count(*) FROM image_applications other WHERE other.device_id=a.device_id AND other.status='pending' AND other.expires_at>$1) AS competing,
+        (SELECT array_agg(other.id ORDER BY other.id) FROM image_applications other WHERE other.device_id=a.device_id AND other.status='pending' AND other.expires_at>$1) AS candidates
         FROM image_applications a JOIN devices d ON d.id=a.device_id
         WHERE a.status='pending' ORDER BY a.created_at,a.id LIMIT 1000", &[&now()]).await?;
     Ok(json!(rows.iter().map(|row| json!({
         "id":row.get::<_,String>("id"),"device_id":row.get::<_,String>("device_id"),
+        "review_token":digest(&json!([row.get::<_,String>("id"),row.get::<_,Option<String>>("observed_ip"),row.get::<_,Option<String>>("previous_ip"),row.get::<_,String>("bootstrap_status"),row.get::<_,Option<Vec<String>>>("candidates")]).to_string()),
         "bootstrap_status":row.get::<_,String>("bootstrap_status"),
         "machine_name":row.get::<_,String>("machine_name"),"observed_ip":row.get::<_,Option<String>>("observed_ip"),
         "previous_ip":row.get::<_,Option<String>>("previous_ip"),"created_at":row.get::<_,i64>("created_at"),
@@ -163,6 +165,7 @@ pub async fn snapshot(tx: &Transaction<'_>) -> ApiResult<Value> {
 pub struct Selection {
     application_id: String,
     base_version: i64,
+    review_token: String,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -191,8 +194,26 @@ pub async fn action(
     {
         return Ok(Json(result));
     }
+    let review = snapshot(&tx).await?;
+    let tokens: std::collections::HashMap<_, _> = review
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|application| {
+            (
+                application["id"].as_str().unwrap(),
+                application["review_token"].as_str().unwrap(),
+            )
+        })
+        .collect();
     let mut devices = std::collections::HashSet::new();
     for target in &input.targets {
+        if tokens.get(target.application_id.as_str()).copied() != Some(target.review_token.as_str())
+        {
+            return Err(ApiError::conflict(
+                "申请来源或同名申请已变化，请重新选择并核对",
+            ));
+        }
         let row = tx.query_opt("SELECT a.*,d.lifecycle_version,d.lifecycle,d.last_seen,d.enrollment_generation FROM image_applications a JOIN devices d ON d.id=a.device_id WHERE a.id=$1", &[&target.application_id]).await?.ok_or_else(||ApiError::bad("镜像申请不存在"))?;
         let device: String = row.get("device_id");
         if !devices.insert(device.clone()) {

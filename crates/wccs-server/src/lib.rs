@@ -62,6 +62,8 @@ pub struct AppState {
     pub config: Config,
     pub server_epoch: String,
     pub db: database::Database,
+    pub archive_db: database::Database,
+    pub archive_upload_db: database::Database,
     pub preview_db: database::Database,
     pub sessions: Mutex<auth::Sessions>,
     pub password_slots: Arc<Semaphore>,
@@ -151,7 +153,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=18) {
+    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=19) {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -234,6 +236,10 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         tx.batch_execute(include_str!("../migrations/018_recovery_archives.sql"))
             .await?;
     }
+    if versions[0].get::<_, i32>(0) <= 18 {
+        tx.batch_execute(include_str!("../migrations/019_review.sql"))
+            .await?;
+    }
     tx.execute("UPDATE contest_control_jobs SET stage='interrupted',detail='server_restarted_review_required',updated_at=$1 WHERE stage IN ('scheduled','running')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$1 WHERE stage NOT IN ('failed','cancelled','expired')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE control_devices SET connected=false", &[])
@@ -241,6 +247,8 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     tx.commit().await?;
     drop(db);
     let app = Arc::new(AppState {
+        archive_db: database::Database::new(&config.database_url)?,
+        archive_upload_db: database::Database::new(&config.database_url)?,
         config,
         server_epoch: wccs_protocol::token(),
         db: database,
@@ -323,6 +331,7 @@ pub fn router(app: App) -> Router {
         .route("/api/logout", post(auth::logout))
         .route("/api/operators", get(operators::list).post(operators::save))
         .route("/api/recovery", get(recovery::list))
+        .route("/api/recovery/manifest/{job}", get(recovery::manifest))
         .route("/api/recovery/archives/{job}", get(recovery::download))
         .route("/api/device/recovery/{job}/{file}/{index}", post(recovery::upload))
         .route("/api/device/recovery/{job}/finish", post(recovery::finish))

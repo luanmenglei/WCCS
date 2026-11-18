@@ -24,7 +24,7 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
     let jobs = tx.query("SELECT j.*,d.name FROM distribution_jobs j JOIN devices d ON d.id=j.device_id WHERE $1 OR (cardinality(j.room_ids)>0 AND j.room_ids<@$2) ORDER BY j.updated_at DESC,j.id LIMIT 1000", &[&actor.all_rooms,&actor.room_ids]).await?;
     Ok(Json(
         json!({"artifacts":artifacts.iter().map(|row|json!({"manifest":row.get::<_,Value>(0),"ready":row.get::<_,bool>(1),"uploaded_chunks":row.get::<_,i64>(2)})).collect::<Vec<_>>(),
-        "jobs":jobs.iter().map(|row|json!({"id":row.get::<_,String>("id"),"device_id":row.get::<_,String>("device_id"),"device_name":row.get::<_,String>("name"),"artifact_id":row.get::<_,String>("artifact_id"),"stage":row.get::<_,String>("stage"),"verified_chunks":row.get::<_,i32>("verified_chunks"),"detail":row.get::<_,String>("detail"),"directory":row.get::<_,String>("directory"),"adapter":row.get::<_,String>("adapter"),"publish_at":row.get::<_,i64>("publish_at"),"updated_at":row.get::<_,i64>("updated_at")})).collect::<Vec<_>>() }),
+        "jobs":jobs.iter().map(|row|json!({"id":row.get::<_,String>("id"),"device_id":row.get::<_,String>("device_id"),"device_name":row.get::<_,String>("name"),"artifact_id":row.get::<_,String>("artifact_id"),"stage":if row.get::<_,bool>("publication_claimed") && row.get::<_,String>("stage")=="ready" {"publishing".to_string()} else {row.get::<_,String>("stage")},"verified_chunks":row.get::<_,i32>("verified_chunks"),"detail":row.get::<_,String>("detail"),"directory":row.get::<_,String>("directory"),"adapter":row.get::<_,String>("adapter"),"publish_at":row.get::<_,i64>("publish_at"),"updated_at":row.get::<_,i64>("updated_at")})).collect::<Vec<_>>() }),
     ))
 }
 
@@ -286,7 +286,9 @@ pub async fn cancel(
     {
         return Ok(Json(previous));
     }
-    tx.execute("UPDATE distribution_jobs SET stage='cancelled',detail='cancelled_by_operator',updated_at=$2 WHERE id=$1 AND stage IN ('queued','downloading','ready')", &[&input.job_id,&now()]).await?;
+    if tx.execute("UPDATE distribution_jobs SET stage='cancelled',detail='cancelled_by_operator',updated_at=$2 WHERE id=$1 AND NOT publication_claimed AND stage IN ('queued','downloading','ready')", &[&input.job_id,&now()]).await? != 1 {
+        return Err(ApiError::conflict("任务已进入发布或已经结束，请核对逐机结果"));
+    }
     let response = json!({"job_id":input.job_id});
     management::record(
         &tx,
@@ -301,7 +303,7 @@ pub async fn cancel(
 }
 
 async fn expire(tx: &Transaction<'_>, device: &str) -> ApiResult<()> {
-    tx.execute("UPDATE distribution_jobs j SET stage='cancelled',detail='authorization_changed',updated_at=$2 WHERE j.device_id=$1 AND j.stage IN ('queued','downloading','ready') AND NOT EXISTS(SELECT 1 FROM devices d,operators o WHERE d.id=j.device_id AND d.enrollment_generation=j.generation AND d.lifecycle='enabled' AND NOT d.needs_review AND NOT d.excluded AND o.id=j.actor_id AND o.version=j.actor_version AND o.enabled AND o.role<>'viewer' AND (o.all_rooms OR j.room_ids<@o.room_ids) AND device_room_scope(d.id)=j.room_ids)", &[&device,&now()]).await?;
+    tx.execute("UPDATE distribution_jobs j SET stage=CASE WHEN publication_claimed THEN 'failed' ELSE 'cancelled' END,detail=CASE WHEN publication_claimed THEN 'publication_unconfirmed' ELSE 'authorization_changed' END,updated_at=$2 WHERE j.device_id=$1 AND j.stage IN ('queued','downloading','ready') AND NOT EXISTS(SELECT 1 FROM devices d,operators o WHERE d.id=j.device_id AND d.enrollment_generation=j.generation AND d.lifecycle='enabled' AND NOT d.needs_review AND NOT d.excluded AND o.id=j.actor_id AND o.version=j.actor_version AND o.enabled AND o.role<>'viewer' AND (o.all_rooms OR j.room_ids<@o.room_ids) AND device_room_scope(d.id)=j.room_ids)", &[&device,&now()]).await?;
     Ok(())
 }
 #[derive(Deserialize, Serialize)]
@@ -326,6 +328,18 @@ pub async fn poll(
     let rows=tx.query("SELECT j.*,a.manifest FROM distribution_jobs j JOIN distribution_artifacts a ON a.id=j.artifact_id WHERE j.device_id=$1 AND j.adapter=$2 AND j.stage IN ('queued','downloading','ready') ORDER BY j.updated_at,j.id LIMIT 4", &[&device,&input.adapter]).await?;
     let mut commands = Vec::new();
     for row in rows {
+        let mut publish: bool = row.get("publication_claimed");
+        if !publish
+            && row.get::<_, String>("stage") == "ready"
+            && row.get::<_, i64>("publish_at") <= now()
+        {
+            tx.execute(
+                "UPDATE distribution_jobs SET publication_claimed=true WHERE id=$1",
+                &[&row.get::<_, String>("id")],
+            )
+            .await?;
+            publish = true;
+        }
         commands.push(Command {
             job_id: row.get("id"),
             device_id: device.clone(),
@@ -333,7 +347,7 @@ pub async fn poll(
             manifest: serde_json::from_value(row.get("manifest"))
                 .map_err(|_| ApiError::internal())?,
             directory: row.get("directory"),
-            publish: row.get::<_, i64>("publish_at") <= now(),
+            publish,
             bytes_per_second: row.get::<_, i64>("bytes_per_second") as u64,
             adapter: input.adapter.clone(),
         });
@@ -393,11 +407,20 @@ pub async fn progress(
     let manifest: Manifest =
         serde_json::from_value(row.get("manifest")).map_err(|_| ApiError::internal())?;
     let stage: String = row.get("stage");
-    if !["published", "failed", "cancelled"].contains(&stage.as_str()) {
+    let late_publication = row.get::<_, String>("detail") == "publication_unconfirmed"
+        && input.stage == "published"
+        && tx
+            .query_one(
+                "SELECT enrollment_generation=$2 FROM devices WHERE id=$1",
+                &[&device, &row.get::<_, i64>("generation")],
+            )
+            .await?
+            .get::<_, bool>(0);
+    if late_publication || !["published", "failed", "cancelled"].contains(&stage.as_str()) {
         if input.verified_chunks > manifest.hashes.len()
             || (["ready", "published"].contains(&input.stage.as_str())
                 && input.verified_chunks != manifest.hashes.len())
-            || (input.stage == "published" && row.get::<_, i64>("publish_at") > now())
+            || (input.stage == "published" && !row.get::<_, bool>("publication_claimed"))
         {
             return Err(ApiError::bad("分发进度或发布时间不匹配"));
         }

@@ -87,14 +87,18 @@ pub fn worker(path: &Path, instance: &str, stop: Arc<AtomicBool>) {
             let identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
             let server = connection::server(path, &identity)?;
             let credential = diagnostics::credential(path, &identity)?;
-            let receipt: serde_json::Value = client
+            let mut request = client
                 .post(format!("{server}/api/device/health"))
                 .bearer_auth(credential)
                 .header("X-WCCS-Device-ID", &identity.device_id)
-                .json(&report)
-                .send()?
-                .error_for_status()?
-                .json()?;
+                .json(&report);
+            if let Ok(job) = fs::read_to_string(path.with_extension("requested-reboot"))
+                && wccs_protocol::valid_id(&job)
+                && matches!(crate::recovery::reboot_boot_marker(false), Ok(false))
+            {
+                request = request.header("x-wccs-requested-reboot", job);
+            }
+            let receipt: serde_json::Value = request.send()?.error_for_status()?.json()?;
             if receipt["accepted"] != true
                 || receipt["instance_id"] != instance
                 || receipt["sequence"] != sequence

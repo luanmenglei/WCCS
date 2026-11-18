@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 pub const CONTROL_VERSION: u32 = 1;
 pub const CONTROL_PROTOCOL: &str = "wccs-control-v1";
 pub const MAX_MESSAGE: usize = 65_536;
+// A paused desktop has no scheduled release. Only authenticated replies on the
+// original connection renew its short monotonic lease.
+pub const UNTIL_RESUMED: i64 = 253402300799;
 pub const LEASE_SECONDS: u64 = 15;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

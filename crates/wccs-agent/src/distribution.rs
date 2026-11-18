@@ -191,8 +191,43 @@ fn publish(path: &Path, binding: &str, command: &Command, test_mode: bool) -> Re
     if !verify_file(&temporary, &command.manifest)? {
         return Err("cache_corrupt".into());
     }
+    publish_verified(&temporary, &target, &command.manifest)
+}
+
+fn publish_verified(temporary: &Path, target: &Path, manifest: &Manifest) -> Result<()> {
     // Rename without replacement keeps both existing contestant files and old published versions.
-    fs::rename(&temporary, &target)?;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW},
+        core::PCWSTR,
+    };
+    let wide_path = |p: &Path| {
+        p.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>()
+    };
+    let source = wide_path(temporary);
+    let destination = wide_path(target);
+    // SAFETY: both paths remain terminated and live; omission of REPLACE_EXISTING
+    // makes publication fail atomically if another writer created the destination.
+    if let Err(error) = unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } {
+        if fs::symlink_metadata(target).is_ok() {
+            return if verify_file(target, manifest)? {
+                fs::remove_file(temporary)?;
+                Ok(())
+            } else {
+                Err("file_conflict".into())
+            };
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 fn report(
@@ -470,6 +505,10 @@ mod tests {
             .join("WCCS-resources/artifact/资料.txt");
         assert_eq!(fs::read(&target).unwrap(), content);
         fs::write(&target, b"contestant edit").unwrap();
+        let partial = target.with_extension("partial");
+        fs::write(&partial, content).unwrap();
+        assert!(publish_verified(&partial, &target, &command.manifest).is_err());
+        assert_eq!(fs::read(&partial).unwrap(), content);
         assert!(publish(&identity, "binding", &command, true).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"contestant edit");
         fs::remove_dir_all(root).unwrap();

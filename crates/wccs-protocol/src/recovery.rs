@@ -14,6 +14,10 @@ pub fn volume_root(path: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
+pub fn deployment_volume(path: &str) -> bool {
+    volume_root(path) && path.as_bytes()[0].eq_ignore_ascii_case(&b'D')
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
@@ -48,7 +52,7 @@ impl Options {
         self.limits.as_ref().is_none_or(Limits::valid)
             && ["inspect", "archive", "clean", "reboot"].contains(&self.action.as_str())
             && crate::valid_id(&self.contest_id)
-            && ((self.scope == "volume" && volume_root(&self.target))
+            && ((self.scope == "volume" && deployment_volume(&self.target))
                 || (self.scope == "workspace" && crate::preparation::directory(&self.target)))
             && ["workspace", "volume"].contains(&self.scope.as_str())
             && self.extensions.len() <= 32
@@ -120,10 +124,8 @@ pub struct Manifest {
 }
 pub fn relative(path: &str) -> bool {
     !path.is_empty()
-        && path.len() <= 1024
-        && path
-            .split('/')
-            .all(|part| part == ".wccs-owner.json" || crate::distribution::filename(part))
+        && path.encode_utf16().count() <= 32_767
+        && path.split('/').all(crate::distribution::windows_component)
 }
 fn hash(value: &str) -> bool {
     value.len() == 64
@@ -217,6 +219,11 @@ mod tests {
             assert!(!super::relative(p), "{p}");
         }
         assert!(super::relative("题目 A/main.cpp"));
+        assert!(super::relative(&format!("{}.cpp", "题".repeat(60))));
+        assert!(super::deployment_volume("d:/"));
+        for other in ["C:/", "E:/", "D:/sub"] {
+            assert!(!super::deployment_volume(other));
+        }
     }
 }
 

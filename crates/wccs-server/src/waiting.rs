@@ -31,6 +31,16 @@ fn is_false(value: &bool) -> bool {
 }
 
 pub(crate) async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value> {
+    desktop_plan(tx, app, input, false, false).await
+}
+
+pub(crate) async fn desktop_plan(
+    tx: &Transaction<'_>,
+    app: &App,
+    input: &Write,
+    require_online: bool,
+    renewable: bool,
+) -> ApiResult<Value> {
     if (input.restrictions.is_some() && input.action != "prepare_login")
         || !valid_id(&input.request_id)
         || !valid_id(&input.contest_id)
@@ -192,8 +202,11 @@ pub(crate) async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiR
                 let online = c.get::<_, bool>("connected")
                     && c.get::<_, String>("server_epoch") == app.server_epoch
                     && now() - c.get::<_, i64>("last_seen") < LEASE_SECONDS as i64;
-                if online || input.action == "leave" {
+                if online || (!require_online && input.action == "leave") {
                     target["status"] = json!("ready");
+                }
+                if renewable && !c.get::<_, bool>("pause_lease") {
+                    target["status"] = json!("pause_upgrade_required");
                 }
                 if online && input.action == "enter" && target["session_key"].is_null() {
                     target["status"] = json!("no_session");
@@ -265,6 +278,9 @@ pub(crate) async fn plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiR
         targets.push(target);
     }
     let mut result = json!({"contest_id":input.contest_id,"contest_name":contest.get::<_,String>(0),"contest_version":contest.get::<_,i64>(1),"action":input.action,"duration_seconds":input.duration_seconds,"targets":targets});
+    if renewable {
+        result["until_resumed"] = json!(true);
+    }
     if ["prepare_login", "restore_teaching"].contains(&input.action.as_str()) {
         result["confirm_session_end"] = json!(input.confirm_session_end);
         result["tool_version"] = json!(tool_version);
@@ -374,7 +390,11 @@ pub(crate) async fn issue(
             instance_id: target["instance_id"].as_str().unwrap().into(),
             session_key: target["session_key"].as_str().unwrap_or("none").into(),
             action: input.action.clone(),
-            expires_at: issued_at + input.duration_seconds,
+            expires_at: if planned["until_resumed"] == true {
+                UNTIL_RESUMED
+            } else {
+                issued_at + input.duration_seconds
+            },
             login: if !target["account"].is_null() {
                 Some(wccs_protocol::login::LoginPlan {
                     restrictions: input.restrictions.clone(),

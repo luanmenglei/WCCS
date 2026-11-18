@@ -2,7 +2,7 @@ use crate::{ApiError, ApiResult, App, auth};
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     response::IntoResponse,
 };
@@ -96,18 +96,11 @@ pub(crate) async fn plan(
     }))
 }
 
-async fn active(
-    tx: &Transaction<'_>,
-    headers: &HeaderMap,
-    job: &str,
-) -> ApiResult<(Snapshot, Options)> {
+async fn active(tx: &Transaction<'_>, headers: &HeaderMap, job: &str) -> ApiResult<()> {
     let device = auth::device(tx, headers).await?;
-    let row=tx.query_opt("SELECT a.snapshot,a.options FROM recovery_archives a JOIN maintenance_jobs j ON j.id=a.job_id JOIN devices d ON d.id=j.device_id JOIN operators o ON o.id=j.actor_id JOIN control_devices c ON c.device_id=d.id WHERE a.job_id=$1 AND d.id=$2 AND d.lifecycle='enabled' AND (j.command->>'generation')::bigint=d.enrollment_generation AND (j.command->>'device_version')::bigint=d.lifecycle_version AND (j.command->>'address_version')::bigint=d.address_version AND j.stage IN ('accepted','executing') AND NOT j.cancel_requested AND j.expires_at>$3 AND o.enabled AND o.version=j.actor_version AND o.role<>'viewer' AND (o.all_rooms OR (cardinality(j.room_ids)>0 AND j.room_ids<@o.room_ids AND device_room_scope(d.id)<@o.room_ids)) AND c.connected AND c.last_seen>$3-15 AND c.instance_id=j.command->>'instance_id' AND c.session_key=j.command->>'session_key'", &[&job,&device,&now()]).await?
+    tx.query_opt("SELECT 1 FROM recovery_archives a JOIN maintenance_jobs j ON j.id=a.job_id JOIN devices d ON d.id=j.device_id JOIN operators o ON o.id=j.actor_id JOIN control_devices c ON c.device_id=d.id WHERE a.job_id=$1 AND d.id=$2 AND d.lifecycle='enabled' AND (j.command->>'generation')::bigint=d.enrollment_generation AND (j.command->>'device_version')::bigint=d.lifecycle_version AND (j.command->>'address_version')::bigint=d.address_version AND j.stage IN ('accepted','executing') AND NOT j.cancel_requested AND j.expires_at>$3 AND o.enabled AND o.version=j.actor_version AND o.role<>'viewer' AND (o.all_rooms OR (cardinality(j.room_ids)>0 AND j.room_ids<@o.room_ids AND device_room_scope(d.id)<@o.room_ids)) AND c.connected AND c.last_seen>$3-15 AND c.instance_id=j.command->>'instance_id' AND c.session_key=j.command->>'session_key'", &[&job,&device,&now()]).await?
         .ok_or_else(||ApiError::conflict("归档任务授权已结束，请重新检查并重试"))?;
-    Ok((
-        serde_json::from_value(row.get(0)).map_err(|_| ApiError::internal())?,
-        serde_json::from_value(row.get(1)).map_err(|_| ApiError::internal())?,
-    ))
+    Ok(())
 }
 pub async fn upload(
     State(app): State<App>,
@@ -115,21 +108,23 @@ pub async fn upload(
     Path((job, file, index)): Path<(String, usize, usize)>,
     bytes: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let mut db = app.db.lock().await?;
+    let mut db = app.archive_upload_db.lock().await?;
     let tx = db.transaction().await?;
-    let (snapshot, options) = active(&tx, &headers, &job).await?;
-    let entry = snapshot
-        .manifest
-        .files
-        .get(file)
-        .ok_or_else(|| ApiError::bad("归档文件索引无效"))?;
+    active(&tx, &headers, &job).await?;
+    let file = i32::try_from(file).map_err(|_| ApiError::bad("归档文件索引无效"))?;
+    let row = tx.query_one("SELECT (snapshot#>'{manifest,files}')->$2::integer,options FROM recovery_archives WHERE job_id=$1", &[&job,&file]).await?;
+    let entry: wccs_protocol::recovery::File = serde_json::from_value(
+        row.get::<_, Option<Value>>(0)
+            .ok_or_else(|| ApiError::bad("归档文件索引无效"))?,
+    )
+    .map_err(|_| ApiError::internal())?;
+    let options: Options = serde_json::from_value(row.get(1)).map_err(|_| ApiError::internal())?;
     if !options.collects(&entry.path)
         || entry.chunk_length(index) != Some(bytes.len())
         || entry.hashes[index] != bytes_digest(&bytes)
     {
         return Err(ApiError::bad("归档分块长度或摘要不匹配"));
     }
-    let file = file as i32;
     let index = index as i32;
     tx.execute("INSERT INTO recovery_chunks VALUES($1,$2,$3,$4) ON CONFLICT(job_id,file_index,chunk_index) DO NOTHING", &[&job,&file,&index,&&bytes[..]]).await?;
     tx.commit().await?;
@@ -142,36 +137,66 @@ pub async fn finish(
     headers: HeaderMap,
     Path(job): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let mut db = app.db.lock().await?;
+    let mut db = app.archive_db.lock().await?;
     let tx = db.transaction().await?;
-    let (snapshot, options) = active(&tx, &headers, &job).await?;
-    for (index, file) in snapshot
+    active(&tx, &headers, &job).await?;
+    if tx
+        .query_one(
+            "SELECT verified FROM recovery_archives WHERE job_id=$1",
+            &[&job],
+        )
+        .await?
+        .get::<_, bool>(0)
+    {
+        return Ok(Json(json!({"verified":true,"job_id":job})));
+    }
+    let row = tx
+        .query_one(
+            "SELECT snapshot,options FROM recovery_archives WHERE job_id=$1",
+            &[&job],
+        )
+        .await?;
+    let snapshot: Snapshot =
+        serde_json::from_value(row.get(0)).map_err(|_| ApiError::internal())?;
+    let options: Options = serde_json::from_value(row.get(1)).map_err(|_| ApiError::internal())?;
+    use futures_util::TryStreamExt;
+    use sha2::{Digest, Sha256};
+    let stream = tx.query_raw("SELECT file_index,chunk_index,content FROM recovery_chunks WHERE job_id=$1 ORDER BY file_index,chunk_index", [&job]).await?;
+    tokio::pin!(stream);
+    for (file_index, file) in snapshot
         .manifest
         .files
         .iter()
         .enumerate()
         .filter(|(_, f)| options.collects(&f.path))
     {
-        let chunks=tx.query("SELECT chunk_index,content FROM recovery_chunks WHERE job_id=$1 AND file_index=$2 ORDER BY chunk_index", &[&job,&(index as i32)]).await?;
-        if chunks.len() != file.hashes.len() {
-            return Err(ApiError::conflict("归档分块未齐全"));
-        }
-        use sha2::{Digest, Sha256};
         let mut digest = Sha256::new();
-        for (index, row) in chunks.iter().enumerate() {
-            let bytes: Vec<u8> = row.get(1);
-            if row.get::<_, i32>(0) != index as i32
+        for (index, hash) in file.hashes.iter().enumerate() {
+            let row = stream
+                .try_next()
+                .await?
+                .ok_or_else(|| ApiError::conflict("归档分块未齐全"))?;
+            let bytes: &[u8] = row.get(2);
+            if row.get::<_, i32>(0) != file_index as i32
+                || row.get::<_, i32>(1) != index as i32
                 || file.chunk_length(index) != Some(bytes.len())
-                || bytes_digest(&bytes) != file.hashes[index]
+                || bytes_digest(bytes) != *hash
             {
                 return Err(ApiError::conflict("归档分块核验失败"));
             }
-            digest.update(&bytes);
+            digest.update(bytes);
         }
         if format!("{:x}", digest.finalize()) != file.sha256 {
             return Err(ApiError::conflict("归档文件摘要核验失败"));
         }
     }
+    if stream.try_next().await?.is_some() {
+        return Err(ApiError::conflict("归档含额外分块"));
+    }
+    tx.commit().await?;
+    let tx = db.transaction().await?;
+    crate::seating::lock(&tx).await?;
+    active(&tx, &headers, &job).await?;
     tx.execute(
         "UPDATE recovery_archives SET verified=true WHERE job_id=$1",
         &[&job],
@@ -238,38 +263,61 @@ pub async fn download(
     ))
 }
 
-pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+#[derive(serde::Deserialize)]
+pub struct Filter {
+    contest_id: String,
+    #[serde(default)]
+    offset: i32,
+}
+
+pub async fn list(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Query(filter): Query<Filter>,
+) -> ApiResult<Json<Value>> {
     let session = auth::admin(&app, &headers, false).await?;
     let mut db = app.preview_db.lock().await?;
     let tx = db.transaction().await?;
     let actor = auth::authorize_snapshot(&tx, &session, auth::Permission::Read).await?;
-    let rows=tx.query("SELECT j.*,a.verified,d.name,c.instance_id AS current_instance,c.connected,c.last_seen AS control_seen,c.actual,h.report AS health,h.received_at AS health_seen,h.instance_id AS health_instance FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id LEFT JOIN recovery_archives a ON a.job_id=j.id LEFT JOIN control_devices c ON c.device_id=d.id LEFT JOIN device_health h ON h.device_id=d.id AND h.enrollment_generation=d.enrollment_generation WHERE j.command->'template'->>'operation'='recovery' AND ($1 OR (cardinality(j.room_ids)>0 AND j.room_ids<@$2)) ORDER BY j.created_at DESC,j.id LIMIT 500",&[&actor.all_rooms,&actor.room_ids]).await?;
-    let mut jobs = Vec::new();
-    for row in rows {
-        let command: Command =
-            serde_json::from_value(row.get("command")).map_err(|_| ApiError::internal())?;
-        let health: Option<Value> = row.get("health");
-        let actual: Option<Value> = row.get("actual");
-        let uptime = health
-            .as_ref()
-            .and_then(|h| h["health"]["uptime_seconds"]["observation"]["value"].as_i64());
-        let current: Option<String> = row.get("current_instance");
-        let reboot_observed = row.get::<_, Option<bool>>("connected") == Some(true)
-            && row
-                .get::<_, Option<i64>>("control_seen")
-                .is_some_and(|t| t > now() - 15)
-            && row
-                .get::<_, Option<i64>>("health_seen")
-                .is_some_and(|t| t > now() - 30)
-            && current
-                .as_deref()
-                .is_some_and(|id| id != command.instance_id)
-            && current == row.get::<_, Option<String>>("health_instance")
-            && uptime.is_some_and(|u| u >= 0 && u <= now() - row.get::<_, i64>("created_at") + 5)
-            && actual.as_ref().is_some_and(|a| {
-                a["account"]["phase"] == "teaching" && a["account"]["policy"]["state"] == "ready"
-            });
-        jobs.push(json!({"job_id":command.job_id,"request_id":command.request_id,"device_id":command.device_id,"device_name":row.get::<_,String>("name"),"template":command.template,"stage":row.get::<_,String>("stage"),"result":row.get::<_,Option<Value>>("result"),"updated_at":row.get::<_,i64>("updated_at"),"expired":command.expires_at<=now(),"archive_verified":row.get::<_,Option<bool>>("verified").unwrap_or(false),"reboot_observed":reboot_observed}));
-    }
+    let rows = tx.query("SELECT j.id,j.request_id,j.device_id,d.name,j.recovery_template AS template,j.stage,
+        j.recovery_summary AS result,j.expires_at,j.reboot_requested_at,j.reboot_observed_at,a.verified,
+        j.recovery_files AS file_count, j.recovery_bytes::text AS recovery_bytes,
+        j.recovery_directories AS directory_count
+        FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id LEFT JOIN recovery_archives a ON a.job_id=j.id
+        WHERE j.recovery_contest=$3
+        AND ($1 OR (cardinality(j.room_ids)>0 AND j.room_ids<@$2)) ORDER BY j.created_at DESC,j.id LIMIT 500",
+        &[&actor.all_rooms,&actor.room_ids,&filter.contest_id]).await?;
+    let jobs:Vec<_> = rows.iter().map(|r| json!({"job_id":r.get::<_,String>("id"),"request_id":r.get::<_,String>("request_id"),
+        "device_id":r.get::<_,String>("device_id"),"device_name":r.get::<_,String>("name"),"stage":r.get::<_,String>("stage"),
+        "template":r.get::<_,Value>("template"),"result":r.get::<_,Option<Value>>("result"),"expired":r.get::<_,i64>("expires_at")<=now(),
+        "archive_verified":r.get::<_,Option<bool>>("verified").unwrap_or(false),"reboot_observed":r.get::<_,Option<i64>>("reboot_observed_at").is_some(),
+        "reboot_requested_at":r.get::<_,Option<i64>>("reboot_requested_at"),"reboot_observed_at":r.get::<_,Option<i64>>("reboot_observed_at"),
+        "total_bytes":r.get::<_,Option<String>>("recovery_bytes"),"file_count":r.get::<_,Option<i32>>("file_count"),"directory_count":r.get::<_,Option<i32>>("directory_count")})).collect();
     Ok(Json(json!({"jobs":jobs})))
+}
+
+pub async fn manifest(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(job): Path<String>,
+    Query(filter): Query<Filter>,
+) -> ApiResult<Json<Value>> {
+    if filter.offset < 0 {
+        return Err(ApiError::bad("分页位置无效"));
+    }
+    let session = auth::admin(&app, &headers, false).await?;
+    let mut db = app.preview_db.lock().await?;
+    let tx = db.transaction().await?;
+    let actor = auth::authorize_snapshot(&tx, &session, auth::Permission::Read).await?;
+    let row = tx.query_opt("SELECT j.result#>'{recovery,volume}', j.result#>>'{recovery,target}',
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('path',f->>'path','size',f->'size')) FROM
+            (SELECT f FROM jsonb_array_elements(j.result#>'{recovery,files}') f LIMIT 100 OFFSET $4::integer) page),'[]'::jsonb),
+        COALESCE((SELECT jsonb_agg(d) FROM (SELECT d FROM jsonb_array_elements(j.result#>'{recovery,directories}') d LIMIT 100 OFFSET $4::integer) page),'[]'::jsonb)
+        FROM maintenance_jobs j WHERE j.id=$1 AND j.command#>>'{template,options,contest_id}'=$2 AND j.result ? 'recovery'
+        AND ($3 OR (cardinality(j.room_ids)>0 AND j.room_ids<@$5))",
+        &[&job,&filter.contest_id,&actor.all_rooms,&filter.offset,&actor.room_ids]).await?
+        .ok_or_else(||ApiError::new(404,"清单不存在"))?;
+    Ok(Json(
+        json!({"volume":row.get::<_,Value>(0),"target":row.get::<_,String>(1),"files":row.get::<_,Value>(2),"directories":row.get::<_,Value>(3)}),
+    ))
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { z } from "zod";
 import { api } from "./api";
 import type { Snapshot } from "./contracts";
@@ -46,6 +46,11 @@ const jobSchema = z.object({
   expired: z.boolean(),
   archive_verified: z.boolean(),
   reboot_observed: z.boolean(),
+  reboot_requested_at: z.number().nullable(),
+  reboot_observed_at: z.number().nullable(),
+  file_count: z.number().nullable(),
+  directory_count: z.number().nullable(),
+  total_bytes: z.string().nullable(),
   result: z
     .object({
       detail: z.string(),
@@ -61,6 +66,7 @@ const previewSchema = z.object({
     z.object({
       device_id: z.string(),
       name: z.string(),
+      identity: z.object({ seat_label: z.string() }),
       reason: z.string().nullable(),
       recovery: z.object({ manifest: manifestSchema }).nullable(),
     }),
@@ -79,6 +85,9 @@ const details: Record<string, string> = {
   cleanup_complete: "批准范围已清理",
   reboot_requested: "已请求重启，等待重新上线",
   recovery_started: "正在检查并执行",
+  recovery_volume_not_provisioned: "请现场核对 D 盘，并在客户端设置部署卷身份",
+  recovery_volume_policy_invalid: "请核对客户端部署卷配置格式",
+  recovery_volume_identity_mismatch: "设备或 D 盘身份与部署配置不一致",
   recovery_target_changed: "文件或卷发生变化，请重新检查",
   recovery_authorization_ended: "连接或授权结束，请重新检查",
   target_reparse_point: "范围内存在链接或挂载点，请现场核对",
@@ -91,7 +100,31 @@ const details: Record<string, string> = {
   restart_interrupted: "服务重启中断，请重新检查剩余文件",
 };
 type Job = z.infer<typeof jobSchema>;
-function Scope({ manifest }: { manifest: z.infer<typeof manifestSchema> }) {
+function Scope({
+  manifest,
+  extensions,
+}: {
+  manifest: z.infer<typeof manifestSchema>;
+  extensions: string[];
+}) {
+  const [offset, setOffset] = useState(0);
+  const suffixes = useMemo(
+    () => new Set(extensions.map((ext) => ext.toLowerCase())),
+    [extensions],
+  );
+  function collected(path: string, wanted: Set<string>) {
+    const dot = path.lastIndexOf(".");
+    return dot >= 0 && wanted.has(path.slice(dot + 1).toLowerCase());
+  }
+  const summary = useMemo(() => {
+    let files = 0,
+      bytes = 0;
+    for (const file of manifest.files) {
+      bytes += file.size;
+      if (collected(file.path, suffixes)) files++;
+    }
+    return { files, bytes };
+  }, [manifest.files, suffixes]);
   return (
     <div>
       <code>{manifest.target}</code>
@@ -102,21 +135,99 @@ function Scope({ manifest }: { manifest: z.infer<typeof manifestSchema> }) {
       <small>{manifest.volume.guid}</small>
       <p>
         {manifest.files.length} 个文件，
-        {manifest.files
-          .reduce((sum, f) => sum + f.size, 0)
-          .toLocaleString()}{" "}
-        字节，{manifest.directories.length} 个目录
+        {summary.bytes.toLocaleString()} 字节，{manifest.directories.length}{" "}
+        个目录
       </p>
       <details>
-        <summary>查看实际文件清单</summary>
+        <summary>查看实际文件清单（归档 {summary.files} 个）</summary>
+        <button disabled={!offset} onClick={() => setOffset(offset - 100)}>
+          上一页
+        </button>
+        <button
+          disabled={
+            offset + 100 >=
+            Math.max(manifest.files.length, manifest.directories.length)
+          }
+          onClick={() => setOffset(offset + 100)}
+        >
+          下一页
+        </button>
         <ul>
-          {manifest.files.map((file) => (
+          {manifest.files.slice(offset, offset + 100).map((file) => (
             <li key={file.path}>
-              {file.path} · {file.size} 字节
+              {file.path} · {file.size} 字节 ·{" "}
+              {collected(file.path, suffixes) ? "归档" : "仅清理"}
             </li>
+          ))}
+          {manifest.directories.slice(offset, offset + 100).map((d) => (
+            <li key={d}>{d}/ · 目录</li>
           ))}
         </ul>
       </details>
+    </div>
+  );
+}
+function JobFiles({ job }: { job: Job }) {
+  const [page, setPage] = useState<z.infer<typeof manifestSchema> | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  async function load(start: number) {
+    setLoading(true);
+    try {
+      const data = await api(
+        `recovery/manifest/${encodeURIComponent(job.job_id)}?contest_id=${encodeURIComponent(job.template.options.contest_id)}&offset=${start}`,
+      );
+      setPage(manifestSchema.parse(data));
+      setOffset(start);
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+  const count = Math.max(job.file_count ?? 0, job.directory_count ?? 0);
+  return (
+    <div>
+      <button
+        disabled={loading}
+        onClick={() => (page ? setPage(null) : void load(0))}
+      >
+        {page ? "收起清单" : "查看清单"}（{job.file_count} 个文件，
+        {job.directory_count} 个目录，
+        {BigInt(job.total_bytes ?? "0").toLocaleString()} 字节）
+      </button>
+      {error && <p role="alert">{error}</p>}
+      {page && (
+        <>
+          <p>
+            {page.target} · {page.volume.guid} · {page.volume.serial}
+          </p>
+          <ul>
+            {page.files.map((f) => (
+              <li key={f.path}>
+                {f.path} · {f.size} 字节
+              </li>
+            ))}
+            {page.directories.map((d) => (
+              <li key={d}>{d}/</li>
+            ))}
+          </ul>
+          <button
+            disabled={loading || offset === 0}
+            onClick={() => void load(offset - 100)}
+          >
+            上一页
+          </button>
+          <button
+            disabled={loading || offset + 100 >= count}
+            onClick={() => void load(offset + 100)}
+          >
+            下一页
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -149,7 +260,14 @@ export function Recovery({
     previous_request: null,
     confirm_session_end: false,
   });
+  const [extensionText, setExtensionText] = useState(
+    options.extensions.join(" "),
+  );
   const [skip, setSkip] = useState(false);
+  const extensions = useMemo(
+    () => (skip ? [] : extensionText.trim().split(/\s+/).filter(Boolean)),
+    [skip, extensionText],
+  );
   const [jobs, setJobs] = useState<Job[]>([]);
   const [fresh, setFresh] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -159,16 +277,28 @@ export function Recovery({
     null,
   );
   const [request, setRequest] = useState<Record<string, unknown> | null>(null);
-  const selection = JSON.stringify([selected, options, skip]);
+  const selection = JSON.stringify([
+    contestId,
+    selected,
+    options,
+    skip,
+    extensionText,
+  ]);
   const current = selection === reviewed ? preview : null;
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
-        const value = listSchema.parse(await api("recovery"));
+        const value = listSchema.parse(
+          await api(`recovery?contest_id=${encodeURIComponent(contestId)}`),
+        );
         if (active) {
-          setJobs(value.jobs);
+          setJobs(
+            value.jobs.filter(
+              (j) => j.template.options.contest_id === contestId,
+            ),
+          );
           setFresh(true);
         }
       } catch {
@@ -181,7 +311,7 @@ export function Recovery({
       active = false;
       clearTimeout(timer);
     };
-  }, []);
+  }, [contestId]);
   async function review() {
     setBusy(true);
     setError("");
@@ -194,7 +324,8 @@ export function Recovery({
         operation: "recovery",
         options: {
           ...options,
-          extensions: skip ? [] : options.extensions,
+          contest_id: contestId,
+          extensions,
           skip_reason: skip ? options.skip_reason : "",
         },
       },
@@ -220,7 +351,8 @@ export function Recovery({
         string
       >
     )[previous.action];
-    if (!action) return;
+    if (!action || previous.contest_id !== contestId) return;
+    setExtensionText(previous.extensions.join(" "));
     setOptions({
       ...previous,
       action,
@@ -259,10 +391,16 @@ export function Recovery({
           <select
             value={options.scope}
             disabled={options.action !== "inspect"}
-            onChange={(e) => setOptions({ ...options, scope: e.target.value })}
+            onChange={(e) =>
+              setOptions({
+                ...options,
+                scope: e.target.value,
+                target: e.target.value === "volume" ? "D:\\" : "C:\\WCCS-Work",
+              })
+            }
           >
             <option value="workspace">已配置的比赛工作目录</option>
-            <option value="volume">非系统卷整卷</option>
+            <option value="volume">部署目标 D 盘整卷</option>
           </select>
         </label>
         {options.limits && (
@@ -328,7 +466,9 @@ export function Recovery({
           实际路径
           <input
             value={options.target}
-            disabled={options.action !== "inspect"}
+            disabled={
+              options.action !== "inspect" || options.scope === "volume"
+            }
             onChange={(e) => setOptions({ ...options, target: e.target.value })}
           />
         </label>
@@ -356,14 +496,9 @@ export function Recovery({
           <label>
             收集扩展名，空格分隔
             <input
-              value={options.extensions.join(" ")}
+              value={extensionText}
               disabled={options.action !== "inspect"}
-              onChange={(e) =>
-                setOptions({
-                  ...options,
-                  extensions: e.target.value.split(/\s+/).filter(Boolean),
-                })
-              }
+              onChange={(e) => setExtensionText(e.target.value)}
             />
           </label>
         )}
@@ -433,11 +568,15 @@ export function Recovery({
         )}
         {current && (
           <>
-            <h3>本次目标</h3>
+            <h3>
+              {snapshot.roster.contests.find((c) => c.id === contestId)?.name ??
+                contestId}{" "}
+              · 本次目标 {current.targets.length} 台
+            </h3>
             {current.targets.map((target) => (
               <div key={target.device_id}>
                 <h4>
-                  {target.name} ·{" "}
+                  {target.identity.seat_label} · {target.name} ·{" "}
                   {target.reason
                     ? (maintenanceReasons[target.reason] ??
                       details[target.reason] ??
@@ -445,7 +584,10 @@ export function Recovery({
                     : "可执行"}
                 </h4>
                 {target.recovery && (
-                  <Scope manifest={target.recovery.manifest} />
+                  <Scope
+                    manifest={target.recovery.manifest}
+                    extensions={extensions}
+                  />
                 )}
               </div>
             ))}
@@ -503,17 +645,16 @@ export function Recovery({
             ))}
             {job.template.options.action === "reboot" && (
               <p>
+                {job.reboot_requested_at &&
+                  `请求受理于 ${new Date(job.reboot_requested_at * 1000).toLocaleString()}。`}
+                {job.reboot_observed_at &&
+                  `首次核对于 ${new Date(job.reboot_observed_at * 1000).toLocaleString()}。`}
                 {job.reboot_observed
                   ? "已观察到重启后的教学状态，请再次检查复原后的工作目录。"
                   : "尚未核对重启后的教学状态。"}
               </p>
             )}
-            {job.result?.recovery && (
-              <details>
-                <summary>查看范围与文件</summary>
-                <Scope manifest={job.result.recovery} />
-              </details>
-            )}
+            {job.file_count !== null && <JobFiles job={job} />}
             <div className="actions">
               {job.stage === "succeeded" &&
                 job.template.options.action !== "reboot" && (

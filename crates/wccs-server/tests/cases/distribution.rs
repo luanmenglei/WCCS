@@ -152,6 +152,47 @@ async fn resumable_upload_distribution_scope_publication_and_restart() {
     let preview = expect_ok(f.admin.post("distribution/preview", &request).await).await;
     request["preview_token"] = preview["preview_token"].clone();
     let retry = expect_ok(f.admin.post("distribution/commit", &request).await).await;
+    let publishing_id = retry["jobs"][0].as_str().unwrap();
+    result["job_id"] = json!(publishing_id);
+    expect_ok(
+        f.admin
+            .device("distribution/progress", &f.credential, &result)
+            .await,
+    )
+    .await;
+    let jobs = expect_ok(
+        f.admin
+            .device(
+                "distribution/poll",
+                &f.credential,
+                &json!({"adapter":"simulation"}),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(jobs["jobs"][0]["publish"], true);
+    assert_eq!(
+        f.admin
+            .post(
+                "distribution/cancel",
+                &json!({"request_id":token(),"job_id":publishing_id})
+            )
+            .await
+            .status(),
+        409
+    );
+    result["stage"] = json!("published");
+    result["detail"] = json!("file_published");
+    expect_ok(
+        f.admin
+            .device("distribution/progress", &f.credential, &result)
+            .await,
+    )
+    .await;
+    request["request_id"] = json!(token());
+    let preview = expect_ok(f.admin.post("distribution/preview", &request).await).await;
+    request["preview_token"] = preview["preview_token"].clone();
+    let retry = expect_ok(f.admin.post("distribution/commit", &request).await).await;
     let retry_id = retry["jobs"][0].as_str().unwrap();
     f.db.execute(
         "UPDATE devices SET enrollment_generation=enrollment_generation+1 WHERE id='device-1'",

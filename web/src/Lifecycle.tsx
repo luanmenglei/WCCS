@@ -515,7 +515,10 @@ function ImageApplications({
   onMutate: Mutate;
 }) {
   const [selected, setSelected] = useState<
-    Record<string, { application_id: string; base_version: number }>
+    Record<
+      string,
+      { application_id: string; base_version: number; review_token?: string }
+    >
   >({});
   const [confirmed, setConfirmed] = useState(false);
   const targets = Object.values(selected);
@@ -530,6 +533,7 @@ function ImageApplications({
         next[application.id] = {
           application_id: application.id,
           base_version: application.base_version,
+          review_token: application.review_token,
         };
       else delete next[application.id];
       return next;

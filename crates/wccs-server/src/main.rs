@@ -7,9 +7,9 @@ use wccs_server::Config;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 || !matches!(args[1].as_str(), "--init" | "--config") {
+    if args.len() != 3 || !matches!(args[1].as_str(), "--init" | "--config" | "--check-standby") {
         return Err(
-            "用法 wccs-server --init local/m2/server.json 或 --config local/m2/server.json".into(),
+            "用法 wccs-server (--init | --check-standby | --config) SERVER_CONFIG.json".into(),
         );
     }
     let path = Path::new(&args[2]);
@@ -50,10 +50,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let config: Config = serde_json::from_slice(&fs::read(path)?)?;
+    if args[1] == "--check-standby" {
+        println!("{}", wccs_server::deployment::check_standby(&config).await?);
+        return Ok(());
+    }
     let address = config.bind.clone();
-    let app = wccs_server::connect(config).await?;
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    println!("WCCS listening on {address}");
+    let Some(mut lease) = wccs_server::deployment::ControllerLease::acquire(&config).await? else {
+        eprintln!("此数据库已有活动控制器，请先核对并停止旧实例");
+        std::process::exit(78);
+    };
+    tokio::select! {
+        biased;
+        _ = lease.lost() => Err("控制器数据库会话已中断，本进程停止服务".into()),
+        result = serve(config, listener) => result,
+    }
+}
+
+async fn serve(
+    config: Config,
+    listener: tokio::net::TcpListener,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = wccs_server::connect(config).await?;
+    println!("WCCS listening on {}", listener.local_addr()?);
     axum::serve(
         listener,
         wccs_server::router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),

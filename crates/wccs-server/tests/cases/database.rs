@@ -926,6 +926,69 @@ async fn backend(db: &tokio_postgres::Client) -> i32 {
         .get(0)
 }
 
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn standby_check_and_readiness_do_not_take_control() {
+    use wccs_server::deployment::{ControllerLease, check_standby};
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let mut request = input(1);
+    let preview = expect_ok(f.admin.post("waiting/preview", &request).await).await;
+    request["preview_token"] = preview["preview_token"].clone();
+    expect_ok(f.admin.post("waiting/commit", &request).await).await;
+    let owner = ControllerLease::acquire(&f.app.config)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        ControllerLease::acquire(&f.app.config)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let web = std::env::temp_dir().join(format!("wccs-standby-{}", token()));
+    std::fs::create_dir(&web).unwrap();
+    let mut candidate = f.app.config.clone();
+    candidate.static_dir = web.to_str().unwrap().into();
+    assert!(check_standby(&candidate).await.is_err());
+    std::fs::write(web.join("index.html"), "<title>WCCS</title>").unwrap();
+    let report = check_standby(&candidate).await.unwrap();
+    assert_eq!(report["migration_required"], false);
+    assert_eq!(report["database_read_only"], false);
+    assert_eq!(f.admin.get("ready").await.status(), 200);
+    assert!(poll(&mut ws, &observation()).await.unwrap()["command"].is_object());
+    f.db.batch_execute("UPDATE schema_version SET version=19")
+        .await
+        .unwrap();
+    assert_eq!(
+        check_standby(&candidate).await.unwrap()["migration_required"],
+        true
+    );
+    assert_eq!(f.admin.get("health").await.status(), 200);
+    assert_eq!(f.admin.get("ready").await.status(), 503);
+    f.db.batch_execute("UPDATE schema_version SET version=20")
+        .await
+        .unwrap();
+    assert_eq!(f.admin.get("ready").await.status(), 200);
+    std::fs::remove_file(web.join("index.html")).unwrap();
+    std::fs::remove_dir(web).unwrap();
+    drop(owner);
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while ControllerLease::acquire(&f.app.config)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
 async fn wait_for_recovery(admin: &Harness) {
     let start = Instant::now();
     tokio::time::timeout(Duration::from_secs(5), async {

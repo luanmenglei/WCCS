@@ -146,7 +146,7 @@ pub fn run(
                 eprintln!("control_connection_unavailable");
                 log_error(&host.path, "control_connection_unavailable", error.as_ref());
             }
-            let _ = host.fail("control_disconnected");
+            let _ = host.disconnect();
             // A disconnected completed command cannot silently create another window.
             if start.elapsed() > Duration::from_secs(60) {
                 backoff = 1;
@@ -162,7 +162,7 @@ pub fn run(
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
-        let _ = host.fail("control_disconnected");
+        let _ = host.disconnect();
         host.child = None;
         let _ = log(&host.path, "host_stopped");
     });
@@ -182,6 +182,24 @@ pub fn run(
         .join()
         .map_err(|_| "distribution_worker_panicked")?;
     Ok(())
+}
+
+#[derive(Default)]
+struct ConnectionGrants {
+    observed_first_reply: bool,
+    retired_id: Option<String>,
+}
+
+impl ConnectionGrants {
+    fn current(&mut self, command: Option<Command>) -> Option<Command> {
+        // A grant returned with the initial poll predates this connection. Older
+        // servers may keep sending it until a new management operation replaces it.
+        if !self.observed_first_reply {
+            self.retired_id = command.as_ref().map(|c| c.command_id.clone());
+            self.observed_first_reply = true;
+        }
+        command.filter(|c| self.retired_id.as_ref() != Some(&c.command_id))
+    }
 }
 
 struct Controller {
@@ -289,6 +307,11 @@ impl Controller {
         {
             return Err("control_protocol_mismatch".into());
         }
+        // The disconnect path recorded the last result locally. A restored controller
+        // may have an older sequence head; only compare grants within this connection.
+        self.command = None;
+        self.report = None;
+        let mut grants = ConnectionGrants::default();
         let mut last_sync = crate::service::monotonic_ms();
         while !stop.load(Ordering::Relaxed) {
             if crate::connection::server(&self.path, &typed_identity)
@@ -365,7 +388,7 @@ impl Controller {
             {
                 return Err("control_protocol_mismatch".into());
             }
-            if let Some(command) = reply.command {
+            if let Some(command) = grants.current(reply.command) {
                 if command.device_id != device
                     || command.generation != reply.generation
                     || command.instance_id != self.instance
@@ -437,6 +460,20 @@ impl Controller {
             });
         }
         self.persist()
+    }
+    fn disconnect(&mut self) -> Result<()> {
+        if self.command.is_some() || self.child.is_some() {
+            return self.fail("control_disconnected");
+        }
+        // An offline teaching machine has no command to fail. Still recover any
+        // policy journal left by an earlier service interruption.
+        self.recover_accounts()?;
+        self.actual = Actual {
+            state: "unknown".into(),
+            account: self.actual.account.take(),
+            ..Actual::default()
+        };
+        Ok(())
     }
     fn fail(&mut self, detail: &str) -> Result<()> {
         let stopped = self.stop_child();
@@ -751,6 +788,30 @@ mod tests {
     }
     fn cleanup(host: Controller) {
         fs::remove_file(host.path.with_extension("control.json")).unwrap();
+        fs::remove_dir(host.path.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn legacy_first_poll_grant_stays_retired_after_reconnect() {
+        let (host, old) = fixture();
+        let mut grants = ConnectionGrants::default();
+        assert!(grants.current(Some(old.clone())).is_none());
+        assert!(grants.current(None).is_none());
+        assert!(grants.current(Some(old.clone())).is_none());
+        let fresh = Command {
+            command_id: "new-authority".into(),
+            ..old
+        };
+        assert_eq!(grants.current(Some(fresh.clone())), Some(fresh));
+        fs::remove_dir(host.path.parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn offline_teaching_has_no_failed_command_or_fabricated_desktop() {
+        let (mut host, _) = fixture();
+        host.disconnect().unwrap();
+        assert!(host.report.is_none());
+        assert_eq!(host.actual.state, "unknown");
+        assert_eq!(host.actual.detail, "teaching_standby");
+        assert!(host.actual.valid());
         fs::remove_dir(host.path.parent().unwrap()).unwrap();
     }
     #[test]

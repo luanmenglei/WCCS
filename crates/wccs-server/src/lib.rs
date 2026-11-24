@@ -5,6 +5,7 @@ mod contest_binding;
 mod contest_control;
 mod control;
 mod database;
+pub mod deployment;
 mod device;
 mod diagnostics;
 mod distribution;
@@ -63,6 +64,7 @@ pub struct AppState {
     pub config: Config,
     pub server_epoch: String,
     pub db: database::Database,
+    readiness_db: database::Database,
     pub archive_db: database::Database,
     pub archive_upload_db: database::Database,
     pub preview_db: database::Database,
@@ -126,19 +128,29 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> {
+fn validate_config(
+    config: &Config,
+) -> Result<Option<domjudge::Remote>, Box<dyn std::error::Error>> {
     let address: std::net::SocketAddr = config.bind.parse()?;
+    let origin = url::Url::parse(&config.origin)?;
+    if origin.origin().ascii_serialization() != config.origin {
+        return Err("origin 需与浏览器的协议、主机和端口完全一致".into());
+    }
     let local_origin = config.origin == format!("http://127.0.0.1:{}", address.port())
         || config.origin == format!("http://localhost:{}", address.port());
     if !config.origin.starts_with("https://") && !(address.ip().is_loopback() && local_origin) {
         return Err("HTTP 仅允许本地回环验证，部署请配置 HTTPS 反向代理与 origin".into());
     }
     argon2::PasswordHash::new(&config.admin_password_hash).map_err(|_| "管理员密码摘要无效")?;
-    let domjudge = config
+    config
         .domjudge_config
         .as_deref()
         .map(domjudge::Remote::load)
-        .transpose()?;
+        .transpose()
+}
+
+pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> {
+    let domjudge = validate_config(&config)?;
     let database = database::Database::new(&config.database_url)?;
     let preview_db = database::Database::new(&config.database_url)?;
     let mut db = database.lock().await.map_err(|_| "数据库连接不可用")?;
@@ -154,7 +166,9 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
             .await?;
     }
     let versions = tx.query("SELECT version FROM schema_version", &[]).await?;
-    if versions.len() != 1 || !matches!(versions[0].get::<_, i32>(0), 1..=20) {
+    if versions.len() != 1
+        || !(1..=deployment::SCHEMA_VERSION).contains(&versions[0].get::<_, i32>(0))
+    {
         return Err("数据库版本不受支持".into());
     }
     if versions[0].get::<_, i32>(0) == 1 {
@@ -252,6 +266,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     tx.commit().await?;
     drop(db);
     let app = Arc::new(AppState {
+        readiness_db: database::Database::new(&config.database_url)?,
         archive_db: database::Database::new(&config.database_url)?,
         archive_upload_db: database::Database::new(&config.database_url)?,
         config,
@@ -296,6 +311,7 @@ async fn response_policy(request: Request, next: Next) -> Response {
 pub fn router(app: App) -> Router {
     Router::new()
         .route("/api/health", get(|| async { Json(json!({"service":"wccs","protocol_version":1,"server_time":wccs_protocol::now()})) }))
+        .route("/api/ready", get(deployment::ready))
         .route("/api/waiting/preview", post(waiting::preview))
         .route("/api/waiting/commit", post(waiting::commit))
         .route("/api/waiting", get(waiting::list))

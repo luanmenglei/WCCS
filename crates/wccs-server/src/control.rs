@@ -206,7 +206,8 @@ async fn exchange(
         return Err(ApiError::forbidden("设备控制已禁用"));
     }
     if first {
-        tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$2 WHERE device_id=$1 AND expires_at=$3 AND stage NOT IN ('cancelled','expired','failed')", &[&id,&now(),&UNTIL_RESUMED]).await?;
+        // Every control grant belongs to the connection observed during preview.
+        tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$2 WHERE device_id=$1 AND stage NOT IN ('cancelled','expired','failed')", &[&id,&now()]).await?;
         tx.execute("INSERT INTO control_devices
             VALUES($1,$2,$3,$4,$5,$6,$7,true,$8,$9)
             ON CONFLICT(device_id) DO UPDATE SET connection_id=$2,server_epoch=$3,instance_id=$4,session_key=$5,generation=$6,last_seen=$7,connected=true,actual=$8,pause_lease=$9", &[&id,&connection,&app.server_epoch,&poll.instance_id,&poll.session_key,&generation,&now(),&json!(poll.actual), &headers.get("x-wccs-pause-lease").is_some_and(|v|v=="1")]).await?;
@@ -238,7 +239,8 @@ async fn exchange(
     }
     let command = waiting::current(&tx, id, &poll.instance_id, poll.session_key.as_deref()).await?;
     let mut acknowledged = None;
-    if let Some(report) = &poll.report {
+    // Legacy clients can attach the previous connection's receipt to their first poll.
+    if !first && let Some(report) = &poll.report {
         if !report.actual.valid()
             || !["accepted", "executing", "succeeded", "failed"].contains(&report.stage.as_str())
         {

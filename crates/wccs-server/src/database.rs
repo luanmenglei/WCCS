@@ -18,7 +18,9 @@ struct ConnectionState {
 }
 
 impl Database {
-    pub fn new(connection_string: &str) -> Result<Self, tokio_postgres::Error> {
+    pub(crate) fn connection_config(
+        connection_string: &str,
+    ) -> Result<Config, tokio_postgres::Error> {
         let mut config: Config = connection_string.parse()?;
         config
             .keepalives(true)
@@ -26,8 +28,12 @@ impl Database {
             .keepalives_interval(Duration::from_secs(1))
             .keepalives_retries(3)
             .tcp_user_timeout(Duration::from_secs(8));
+        Ok(config)
+    }
+
+    pub fn new(connection_string: &str) -> Result<Self, tokio_postgres::Error> {
         Ok(Self {
-            config,
+            config: Self::connection_config(connection_string)?,
             state: Mutex::new(ConnectionState {
                 client: None,
                 retry_at: Instant::now(),

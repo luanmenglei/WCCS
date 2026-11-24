@@ -114,14 +114,13 @@ fn run_locked(path: &Path, once: bool) -> Result<()> {
 }
 
 fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -> Result<()> {
-    identity.server = crate::connection::server(path, identity)?;
-    let server = identity.server.trim_end_matches('/');
+    let server = crate::connection::server(path, identity)?;
     let credential = identity.device_token.as_ref().unwrap().clone();
     let heartbeat = Heartbeat {
         protocol_version: PROTOCOL_VERSION,
         boot_id: boot_id.into(),
         agent_version: env!("CARGO_PKG_VERSION").into(),
-        reported_ips: reported_ips(&identity.server),
+        reported_ips: reported_ips(&server),
     };
     let mut response = client
         .post(format!("{server}/api/device/heartbeat"))
@@ -184,11 +183,11 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
         return Err("服务协议版本或设备状态不兼容".into());
     }
     if let Some(rotation_id) = &reply.rotation_id {
-        rotate(client, identity, path, rotation_id)?;
+        rotate(client, identity, path, &server, rotation_id)?;
         return Ok(());
     }
     // Diagnostic retransmission shares HTTP ownership and cannot stall WSS renewals.
-    let _ = crate::diagnostics::flush(client, path, identity, &credential, server);
+    let _ = crate::diagnostics::flush(client, path, identity, &credential, &server);
     // Retry a persisted exact result before executing a newly assigned task.
     let pending = path.with_extension("pending.json");
     if pending.exists() {
@@ -294,7 +293,13 @@ fn promote(identity: &mut Identity, path: &Path, candidate: &Candidate) -> Resul
     Ok(())
 }
 
-fn rotate(client: &Client, identity: &mut Identity, path: &Path, rotation_id: &str) -> Result<()> {
+fn rotate(
+    client: &Client,
+    identity: &mut Identity,
+    path: &Path,
+    server: &str,
+    rotation_id: &str,
+) -> Result<()> {
     let candidate_path = path.with_extension("rotation.json");
     let previous = if candidate_path.exists() {
         Some(serde_json::from_slice::<Candidate>(&fs::read(
@@ -314,7 +319,7 @@ fn rotate(client: &Client, identity: &mut Identity, path: &Path, rotation_id: &s
             candidate
         }
     };
-    client.post(format!("{}/api/device/rotate",identity.server.trim_end_matches('/')))
+    client.post(format!("{server}/api/device/rotate"))
         .bearer_auth(identity.device_token.as_ref().unwrap())
         .json(&serde_json::json!({"device_id":identity.device_id,"request_id":candidate.request_id,"new_token":candidate.new_token}))
         .send()?.error_for_status()?;

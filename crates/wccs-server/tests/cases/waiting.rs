@@ -244,11 +244,15 @@ async fn waiting_authorization_control_and_recovery() {
     assert!(!events.to_string().contains(&credential));
     // A replacement connection atomically fences old connection reports.
     let mut replacement = socket(&admin, &credential).await;
-    assert!(poll(&mut replacement, &observation).await.is_some());
+    let first_reply = poll(&mut replacement, &observation).await.unwrap();
+    assert!(first_reply["command"].is_null());
+    assert!(first_reply["acknowledged"].is_null());
     assert!(poll(&mut ws, &observation).await.is_none());
     ws = replacement;
     observation["report"] = Value::Null;
     // Permission version cancellation remains after restoration.
+    preview(&operator, &mut input).await;
+    expect_ok(operator.post("waiting/commit", &input).await).await;
     db.execute(
         "UPDATE operators SET version=version+1 WHERE id='control-operator'",
         &[],
@@ -295,6 +299,9 @@ async fn waiting_authorization_control_and_recovery() {
     assert!(poll(&mut ws, &observation).await.is_none());
     observation["report"] = Value::Null;
     ws = socket(&admin, &credential).await;
+    assert!(poll(&mut ws, &observation).await.unwrap()["command"].is_null());
+    preview(&operator, &mut input).await;
+    expect_ok(operator.post("waiting/commit", &input).await).await;
     assert!(poll(&mut ws, &observation).await.unwrap()["command"].is_object());
     // Session switch invalidates active enter. New host instances cannot replay it.
     observation["session_key"] = json!("session-two");

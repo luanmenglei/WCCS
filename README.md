@@ -12,7 +12,7 @@ WCCS 用于 Windows 10 多机房单人算法竞赛，目标规模为 200～300 �
 | Windows 客户端 | Rust 系统服务、Rust 原生会话界面及运维采集工具，通过 windows crate 调用 Win32 API |
 | 选手竞赛命令 | 独立版本的脚本包，可复用上游或自行实现，统一分发 Windows 命令入口、依赖和比赛配置 |
 | Web 管理界面 | React + TypeScript + Vite，静态资源随 Linux 服务端交付，管理员从浏览器访问 |
-| 通信 | HTTPS API、WSS 控制与状态推送、分块文件传输及受控 P2P |
+| 通信 | HTTPS API、WSS 控制与状态推送、服务器 HTTPS 分块文件传输 |
 
 当前技术方向记录在 [ADR 0002](docs/decisions/0002-linux-rust-stack.md)。依赖版本、Windows 最低版本和 Linux 发行版在原型及部署环境确认后固定。
 
@@ -117,3 +117,7 @@ M2 名单导入与座位分配已提供 `#/roster` 管理入口。启动、TSV �
 ## 本机诊断与比赛桌面维护
 
 客户端 `wccs-agent --setup IDENTITY` 可离线导入连接配置、查看网卡、执行实际通道诊断并导出脱敏报告，也可主动显示设备识别画面。管理端 `#/devices` 核对诊断与健康，`#/seats` 筛选健康/版本差异，`#/presentation` 配置等待展示，`#/maintenance` 预览并下发固定桌面、目录检查和脚本部署模板。格式、操作及验收限制见 [machine-tools 对齐记录](docs/tasks/machine-tools-alignment.md)。
+
+## 按赛场部署与切换服务器
+
+母机镜像预置程序、赛场 HTTPS 入口与公开 CA，逐机生成身份。Linux 候选主机用 `wccs-server --check-standby /etc/wccs/server.json` 检查部署；活动控制器使用 `--config` 启动。管理员在登录页或后台的“服务入口诊断”核对进程与数据库状态。切换、回退及离线教学处理见[操作说明](docs/tasks/server-cutover.md)和[架构决策](docs/decisions/0017-site-deployment-and-cutover.md)。

@@ -87,7 +87,7 @@ fn status(path: &Path) -> Result<Value> {
     Ok(
         json!({"schema_version":1,"agent_version":env!("CARGO_PKG_VERSION"),
         "device_id":identity.device_id,"configuration_revision":saved.revision,
-        "configuration":saved.configuration,"network":wccs_inventory::network(),
+        "configuration":saved.configuration,"credential_origin":saved.credential_origin(),"network":wccs_inventory::network(),
         "session_binary_present":std::env::current_exe()?.with_file_name("wccs-session.exe").is_file(),
         "installation_service":service,
         "recent_maintenance":crate::maintenance::diagnostic_summary(path,&identity),
@@ -175,6 +175,10 @@ fn preview_import(path: &Path, text: &str, saved: &connection::Saved) -> Result<
         return Err("配置最大 4096 字节".into());
     }
     let config = connection::validate(serde_json::from_str(text)?)?;
+    if let Err(error) = saved.check_destination(&config) {
+        println!("{error}");
+        return Err(error);
+    }
     println!(
         "当前版本 v{}\n{}\n拟保存\n{}",
         saved.revision,

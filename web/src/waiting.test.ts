@@ -8,7 +8,7 @@ import {
   waitingPreviewSchema,
   waitingDetail,
 } from "./waiting-model";
-import { pageFromHash } from "./fleet";
+import { pageFromHash } from "./navigation";
 
 const command = {
   protocol_version: 1,

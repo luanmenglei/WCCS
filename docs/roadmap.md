@@ -1,6 +1,18 @@
 # 路线图与交接
 
-更新日期为 2026-11-18。
+更新日期为 2026-11-25。
+
+## 赛场部署与控制器接管（2026-11-25，本地）
+
+已实现候选机只读预检、同一 PostgreSQL 数据库的单活动控制器、管理台入口诊断、客户端凭据入口绑定，以及控制断线后一律重新授权。部署结构、同库与跨库隔离边界见 [ADR 0017](decisions/0017-site-deployment-and-cutover.md)，现场执行顺序见[服务器切换操作说明](tasks/server-cutover.md)。
+
+Windows 固定工具链 `scripts/check-rust.ps1` 通过，含 104 项常规 Rust 测试。独立回环 PostgreSQL 18 的 HTTP/WSS 集成测试通过 23 项，另跑 300 个模拟客户端、15 秒容量用例通过。Edge 在真实本地服务端验证登录、进程可达但数据库版本不匹配、持锁会话断开后进程退出、离线过期快照及同入口替代进程要求重新登录。候选进程使用另一端口连接同库以 78 退出，只读预检期间活动命令仍可领取。
+
+`npm --prefix web run check` 的 38 项测试、生产构建及 28 项 Python 回归通过。Linux 目标 `cargo check --locked -p wccs-server -p wccs-protocol --target x86_64-unknown-linux-gnu` 使用本机 Clang、llvm-ar 和临时 Debian amd64 头文件通过。两台 Linux 主机的 systemd 行为、实际 DNS 或服务 IP 迁移、故障时隔离旧主机、真实 DOMjudge 状态与代表机教学恢复仍需联演。此次未部署。
+
+## 管理台导航重构（2026-11-25，本地）
+
+17 个页面的侧栏和页头改用同一份[导航定义](../web/src/navigation.ts)，业务页面从应用外壳提取到 [WorkspacePages](../web/src/WorkspacePages.tsx)。`npm --prefix web run check` 通过，含 38 项测试和生产构建。Edge 使用生产构建及本机合成 API 核对了全部页面的分组和标题、切页后机房草稿与座位勾选保留、下拉切换比赛时清空选择，以及只读账号直接访问操作员页时的权限提示。真实服务与现场验收仍按下方管理员操作流程推进。
 
 ## 管理员操作流程（本地，未部署）
 

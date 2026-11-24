@@ -8,7 +8,7 @@ import { deviceSchema, sessionSchema, type Session } from "./contracts";
 import { eventSchema, eventQuery } from "./Events";
 import { operatorSchema } from "./Operators";
 import { advanceSession, api } from "./api";
-import { pageFromHash } from "./fleet";
+import { pageFromHash } from "./navigation";
 
 const account: Session = {
   id: "operator",

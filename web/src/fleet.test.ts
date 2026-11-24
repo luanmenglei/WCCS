@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { stateSchema } from "./contracts";
-import { checkStatus, matchesSearch, pageFromHash, seatRows } from "./fleet";
+import { checkStatus, matchesSearch, seatRows } from "./fleet";
+import { navigation, pages, pageFromHash } from "./navigation";
 import { Seats } from "./Seats";
 import { Devices } from "./Devices";
 
@@ -85,6 +86,20 @@ test("新页面路由兼容原书签，未知路径回到座位页", () => {
   assert.equal(pageFromHash("#/targets"), "targets");
   assert.equal(pageFromHash("#invalid"), "seats");
   assert.equal(pageFromHash("#__proto__"), "seats");
+});
+
+test("值班导航分组按操作顺序排列，书签和页头对应同一页面", () => {
+  assert.deepEqual(
+    navigation.map(({ group }) => group),
+    ["现场巡查", "赛前布置", "比赛与收场", "系统管理"],
+  );
+  for (const { group, routes } of navigation) {
+    for (const route of routes) {
+      assert.equal(pageFromHash(`#/${route}?contest_id=example`), route);
+      assert.equal(pages[route].group, group);
+    }
+  }
+  assert.deepEqual(navigation[0].routes, ["seats", "devices", "events"]);
 });
 
 test("跨机房座位按物理位置展开，搜索支持中文、数字和大小写", () => {

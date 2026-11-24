@@ -1,14 +1,4 @@
-import { Recovery } from "./Recovery";
-import { Presentation } from "./Presentation";
-import { ContestControl } from "./ContestControl";
-import { Domjudge } from "./Domjudge";
-import { Distribution } from "./Distribution";
-import { Maintenance } from "./Maintenance";
-import { Waiting } from "./Waiting";
 import { AccessContext, roleLabels } from "./access";
-import { Operators } from "./Operators";
-import { Events } from "./Events";
-import { Roster } from "./Roster";
 import { ZodError } from "zod";
 import {
   useCallback,
@@ -24,32 +14,9 @@ import {
   type Session,
   type Snapshot,
 } from "./contracts";
-import { ConfigurationEditor } from "./ConfigurationEditor";
-import { Rooms } from "./Rooms";
-import { Seats } from "./Seats";
-import { pages, pageFromHash, type Page } from "./fleet";
-
-const navigation: { group: string; routes: Page[] }[] = [
-  { group: "现场巡查", routes: ["seats", "devices", "events"] },
-  {
-    group: "赛前布置",
-    routes: [
-      "enrollment",
-      "rooms",
-      "roster",
-      "domjudge",
-      "configuration",
-      "targets",
-      "login",
-      "presentation",
-      "distribution",
-    ],
-  },
-  { group: "比赛与收场", routes: ["waiting", "contest-control", "recovery"] },
-  { group: "系统管理", routes: ["maintenance", "operators"] },
-];
-import { Enrollment } from "./Lifecycle";
-import { Devices } from "./Devices";
+import { pages, pageFromHash, navigation } from "./navigation";
+import { WorkspacePages } from "./WorkspacePages";
+import { ServiceStatus } from "./ServiceStatus";
 
 function message(error: unknown): string {
   if (error instanceof ZodError)
@@ -87,7 +54,6 @@ export function App() {
   const [notice, setNotice] = useState("");
   const [receipt, setReceipt] = useState("");
   const [busy, setBusy] = useState(false);
-  const [editorKey, setEditorKey] = useState(0);
   const requestIds = useRef(new Map<string, string>());
   useEffect(() => {
     function expire(event: Event) {
@@ -194,7 +160,8 @@ export function App() {
     body: Record<string, unknown>,
     success: string,
   ) {
-    if (!session) return;
+    if (!session || !connected)
+      throw new Error("管理状态尚未就绪，请先刷新核对。");
     const epoch = sessionEpoch.current;
     setBusy(true);
     setError("");
@@ -292,6 +259,7 @@ export function App() {
           <div className="brand">WCCS</div>
           <h1>赛场管理</h1>
           <p>Windows Contest Control System</p>
+          <ServiceStatus />
         </section>
         <form className="login-form" onSubmit={(event) => void login(event)}>
           <h2>操作员登录</h2>
@@ -430,6 +398,12 @@ export function App() {
               </button>
             </div>
           </header>
+          <ServiceStatus />
+          {!connected && snapshot && (
+            <p role="status" className="banner warning">
+              正在显示最后一次快照。逐机教学恢复情况需在重连后核对。
+            </p>
+          )}
           {(error || connectionError) && (
             <div role="alert" className="banner error">
               {error || connectionError}
@@ -468,208 +442,26 @@ export function App() {
             </label>
           )}
           {snapshot ? (
-            <>
-              {session.role !== "admin" && (
-                <p className="banner">
-                  {session.role === "viewer"
-                    ? "当前身份只读。"
-                    : "可在授权范围启停设备、重查工具及控制等待界面。"}{" "}
-                  注册材料、机房/IP、全局名单和工具发布需要管理员权限。完整名单历史需要全场授权。
-                </p>
-              )}
-              {page === "operators" &&
-                (session.role === "admin" ? (
-                  <Operators
-                    snapshot={snapshot}
-                    session={session}
-                    onMutate={mutate}
-                    disabled={busy || !connected}
-                  />
-                ) : (
-                  <p role="alert">操作员管理需要管理员权限。</p>
-                ))}
-              {page === "events" && (
-                <Events
-                  csrf={session.csrf}
-                  disabled={session.role === "viewer"}
-                />
-              )}
-              {page === "recovery" && (
-                <Recovery
-                  key={contestId}
-                  snapshot={snapshot}
-                  contestId={contestId}
-                  csrf={session.csrf}
-                  disabled={busy || !connected || session.role === "viewer"}
-                  onMutate={mutate}
-                />
-              )}
-              {page === "distribution" && (
-                <Distribution
-                  snapshot={snapshot}
-                  csrf={session.csrf}
-                  disabled={busy || !connected}
-                  onMutate={mutate}
-                />
-              )}
-              {page === "contest-control" && (
-                <ContestControl
-                  key={contestId}
-                  snapshot={snapshot}
-                  contestId={contestId}
-                  csrf={session.csrf}
-                  disabled={busy || !connected}
-                  onMutate={mutate}
-                />
-              )}
-              {page === "domjudge" && (
-                <Domjudge
-                  key={contestId}
-                  snapshot={snapshot}
-                  contestId={contestId}
-                  csrf={session.csrf}
-                  disabled={busy || !connected}
-                  onMutate={mutate}
-                />
-              )}
-              {page === "presentation" && (
-                <Presentation
-                  key={contestId}
-                  contestId={contestId}
-                  csrf={session.csrf}
-                  disabled={
-                    busy ||
-                    !connected ||
-                    session.role !== "admin" ||
-                    !session.all_rooms
-                  }
-                  onMutate={mutate}
-                />
-              )}
-              {page === "maintenance" && (
-                <Maintenance
-                  snapshot={snapshot}
-                  csrf={session.csrf}
-                  disabled={busy || !connected || session.role === "viewer"}
-                  onMutate={mutate}
-                />
-              )}
-              {(page === "waiting" || page === "login") && (
-                <Waiting
-                  mode={page}
-                  key={`${page}:${contestId}`}
-                  snapshot={snapshot}
-                  contestId={contestId}
-                  selected={seatSelection}
-                  onSelect={setSeatSelection}
-                  csrf={session.csrf}
-                  disabled={busy || !connected || session.role === "viewer"}
-                  onMutate={mutate}
-                />
-              )}
-              <div className="page-view" hidden={page !== "roster"}>
-                <Roster
-                  key={contestId}
-                  snapshot={snapshot}
-                  contest={snapshot.roster.contests.find(
-                    (c) => c.id === contestId,
-                  )}
-                  csrf={session.csrf}
-                  disabled={busy || !connected || session.role !== "admin"}
-                  onMutate={mutate}
-                />
-              </div>
-              <div className="page-view" hidden={page !== "seats"}>
-                <Seats
-                  contest={snapshot.roster.contests.find(
-                    (c) => c.id === contestId,
-                  )}
-                  selected={seatSelection}
-                  onSelect={setSeatSelection}
-                  snapshot={snapshot}
-                  csrf={session.csrf}
-                  disabled={busy || !connected || session.role === "viewer"}
-                  onMutate={mutate}
-                />
-              </div>
-              <div className="page-view" hidden={page !== "targets"}>
-                <Seats
-                  contest={snapshot.roster.contests.find(
-                    (c) => c.id === contestId,
-                  )}
-                  selected={seatSelection}
-                  onSelect={setSeatSelection}
-                  snapshot={snapshot}
-                  csrf={session.csrf}
-                  disabled={busy || !connected || session.role === "viewer"}
-                  onMutate={mutate}
-                  targetMode
-                />
-              </div>
-              <div className="page-view" hidden={page !== "rooms"}>
-                <Rooms
-                  contestId={contestId}
-                  snapshot={snapshot}
-                  csrf={session.csrf}
-                  disabled={busy || !connected || session.role !== "admin"}
-                  onMutate={mutate}
-                />
-              </div>
-              <div className="page-view" hidden={page !== "configuration"}>
-                <ConfigurationEditor
-                  key={editorKey}
-                  snapshot={snapshot}
-                  disabled={busy || !connected || session.role !== "admin"}
-                  onReload={() => {
-                    void refresh()
-                      .then(() => {
-                        setEditorKey((key) => key + 1);
-                        setError("");
-                      })
-                      .catch((error) => setError(message(error)));
-                  }}
-                  onPublish={async (body) => {
-                    await mutate(
-                      "configuration",
-                      body,
-                      "配置已发布，等待目标设备回传检查结果。",
-                    );
-                    setEditorKey((key) => key + 1);
-                  }}
-                />
-              </div>
-              <div className="page-view" hidden={page !== "enrollment"}>
-                <Enrollment
-                  snapshot={snapshot}
-                  disabled={busy || !connected || session.role !== "admin"}
-                  onMutate={mutate}
-                />
-              </div>
-              <div className="page-view" hidden={page !== "devices"}>
-                <Devices
-                  contest={snapshot.roster.contests.find(
-                    (c) => c.id === contestId,
-                  )}
-                  onMutate={mutate}
-                  snapshot={snapshot}
-                  disabled={busy || !connected || session.role === "viewer"}
-                  onCreate={async (body) => {
-                    await mutate(
-                      "devices",
-                      body,
-                      "设备已创建，请将注册材料用于 Windows 检查入口。",
-                    );
-                  }}
-                  onRecheck={async (id) => {
-                    await mutate(
-                      "recheck",
-                      { base_version: snapshot.version, targets: [id] },
-                      "重新检查任务已下发。",
-                    );
-                  }}
-                />
-              </div>
-            </>
+            <WorkspacePages
+              page={page}
+              snapshot={snapshot}
+              session={session}
+              contestId={contestId}
+              seatSelection={seatSelection}
+              onSelect={setSeatSelection}
+              disabled={busy || !connected}
+              onMutate={mutate}
+              onReloadConfiguration={async () => {
+                try {
+                  await refresh();
+                  setError("");
+                  return true;
+                } catch (error) {
+                  setError(message(error));
+                  return false;
+                }
+              }}
+            />
           ) : (
             <p role="status">正在读取设备与配置…</p>
           )}

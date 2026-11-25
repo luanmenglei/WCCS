@@ -233,16 +233,46 @@ pub async fn admin(app: &App, headers: &HeaderMap, write: bool) -> ApiResult<Ses
     Ok(session.clone())
 }
 
-pub async fn rate_limit(app: &App, scope: &'static str, maximum: u32) -> ApiResult<()> {
+pub type RateLimits = HashMap<(&'static str, String), (Instant, u32)>;
+
+pub async fn rate_limit(
+    app: &App,
+    scope: &'static str,
+    peer: std::net::SocketAddr,
+    headers: &HeaderMap,
+    maximum: u32,
+    account: Option<&str>,
+) -> ApiResult<()> {
+    let source = crate::device::source_address(peer.ip(), headers, &app.config.trusted_proxies)
+        .0
+        .unwrap_or_else(|| peer.ip().to_string());
     let mut limits = app.auth_limits.lock().await;
-    let window = limits.entry(scope).or_insert((Instant::now(), 0));
-    if window.0.elapsed().as_secs() >= 60 {
-        *window = (Instant::now(), 0);
+    limits.retain(|_, window| window.0.elapsed().as_secs() < 60);
+    if let Some(account) = account {
+        count_attempt(&mut limits, ("login_source", source.clone()), 120)?;
+        count_attempt(
+            &mut limits,
+            (scope, format!("{source}/{}", digest(&login_key(account)))),
+            maximum,
+        )
+    } else {
+        count_attempt(&mut limits, (scope, source), maximum)
     }
-    window.1 += 1;
-    if window.1 > maximum {
+}
+
+fn count_attempt(
+    limits: &mut RateLimits,
+    key: (&'static str, String),
+    maximum: u32,
+) -> ApiResult<()> {
+    if limits.len() >= 4096 && !limits.contains_key(&key) {
         return Err(ApiError::new(429, "认证请求过多，请稍后重试"));
     }
+    let window = limits.entry(key).or_insert((Instant::now(), 0));
+    if window.1 >= maximum {
+        return Err(ApiError::new(429, "认证请求过多，请稍后重试"));
+    }
+    window.1 += 1;
     Ok(())
 }
 
@@ -255,11 +285,12 @@ pub struct Login {
 
 pub async fn login(
     State(app): State<App>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Json(input): Json<Login>,
 ) -> ApiResult<Response> {
     origin(&app, &headers)?;
-    rate_limit(&app, "login", 30).await?;
+    rate_limit(&app, "login", peer, &headers, 30, Some(&input.username)).await?;
     if input.password.len() > 256 {
         return Err(ApiError::unauthorized("用户名或密码错误"));
     }

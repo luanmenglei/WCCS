@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Template {
+    Shutdown {},
     Recovery { options: crate::recovery::Options },
     Identify { duration_seconds: u64 },
     PrepareDesktop { profile_version: i64 },
@@ -12,7 +13,9 @@ pub enum Template {
 }
 impl Template {
     pub fn capability(&self) -> &str {
-        if matches!(self, Self::Recovery { options } if options.limits.is_some()) {
+        if matches!(self, Self::Shutdown {}) {
+            "shutdown-v1"
+        } else if matches!(self, Self::Recovery { options } if options.limits.is_some()) {
             "recovery-v2"
         } else if matches!(self, Self::Recovery { .. }) {
             "recovery-v1"
@@ -24,7 +27,7 @@ impl Template {
     }
     pub fn profile_version(&self) -> Option<i64> {
         match self {
-            Self::Identify { .. } | Self::Recovery { .. } => None,
+            Self::Identify { .. } | Self::Recovery { .. } | Self::Shutdown {} => None,
             Self::PrepareDesktop { profile_version }
             | Self::CheckWorkspace { profile_version }
             | Self::DeployScripts { profile_version } => Some(*profile_version),
@@ -32,6 +35,7 @@ impl Template {
     }
     pub fn valid(&self) -> bool {
         match self {
+            Self::Shutdown {} => true,
             Self::Recovery { options } => options.valid(),
             Self::Identify { duration_seconds } => (5..=120).contains(duration_seconds),
             Self::PrepareDesktop { profile_version }
@@ -112,6 +116,8 @@ impl Result {
                 "archive_skipped",
                 "cleanup_complete",
                 "reboot_requested",
+                "shutdown_requested",
+                "shutdown_started",
                 "recovery_started",
                 "persisted",
                 "display_observed",

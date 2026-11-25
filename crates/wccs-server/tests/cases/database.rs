@@ -132,6 +132,53 @@ fn observation() -> Value {
 
 #[tokio::test]
 #[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+async fn shutdown_uses_live_machine_grant_at_login_screen() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    let mut boot = observation();
+    boot["session_key"] = Value::Null;
+    assert!(poll(&mut ws, &boot).await.unwrap()["command"].is_null());
+    let runtime = json!({"schema_version":1,"instance_id":"host-one","session_key":null,"adapter":"service","capabilities":["identify-v1"]});
+    let machine_poll = || {
+        f.admin
+            .client
+            .post(format!("{}/api/device/maintenance/poll", f.admin.url))
+            .bearer_auth(&f.credential)
+            .header("x-wccs-shutdown", "1")
+            .json(&runtime)
+    };
+    assert!(expect_ok(machine_poll().send().await.unwrap()).await["command"].is_null());
+    let mut input = json!({"request_id":token(),"template_version":1,"targets":["device-1"],"template":{"operation":"shutdown"}});
+    let plan = expect_ok(f.admin.post("maintenance/preview", &input).await).await;
+    assert!(plan["targets"][0]["reason"].is_null());
+    input["preview_token"] = plan["preview_token"].clone();
+    let receipt = expect_ok(f.admin.post("maintenance/commit", &input).await).await;
+    assert_eq!(
+        expect_ok(f.admin.post("maintenance/commit", &input).await).await,
+        receipt
+    );
+    assert!(
+        expect_ok(
+            f.admin
+                .device("maintenance/poll", &f.credential, &runtime)
+                .await
+        )
+        .await["command"]
+            .is_null()
+    );
+    let granted = expect_ok(machine_poll().send().await.unwrap()).await;
+    assert_eq!(granted["command"]["job_id"], receipt["jobs"][0]["job_id"]);
+    assert_eq!(granted["command"]["template"]["operation"], "shutdown");
+    ws.close(None).await.unwrap();
+    ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &boot).await.unwrap();
+    assert!(expect_ok(machine_poll().send().await.unwrap()).await["command"].is_null());
+    ws.close(None).await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires WCCS_TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
 async fn image_registration_window_approval_retry_and_conflict() {
     let f = Fixture::new().await;
     let key = wccs_protocol::image_device_id("503-41").unwrap();
@@ -704,6 +751,50 @@ async fn maintenance_preview_cancel_replay_and_identity_fences() {
     )
     .await;
     let mut request = json!({"request_id":token(),"template_version":1,"targets":["device-1"],"template":{"operation":"identify","duration_seconds":30}});
+    let malformed = f
+        .admin
+        .client
+        .post(format!("{}/api/device/maintenance/result", f.admin.url))
+        .header("content-type", "application/json")
+        .body("{")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), 401);
+    // A preview, an unclaimed grant and a delivered grant have different reconnect behavior.
+    let stale = expect_ok(f.admin.post("maintenance/preview", &request).await).await;
+    let mut queued = request.clone();
+    queued["preview_token"] = stale["preview_token"].clone();
+    let queued_receipt = expect_ok(f.admin.post("maintenance/commit", &queued).await).await;
+    expect_ok(
+        f.admin
+            .post(
+                "maintenance/cancel",
+                &json!({"job_id":queued_receipt["jobs"][0]["job_id"],"request_id":token()}),
+            )
+            .await,
+    )
+    .await;
+    queued["request_id"] = json!(token());
+    expect_ok(f.admin.post("maintenance/commit", &queued).await).await;
+    ws.close(None).await.unwrap();
+    ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    assert!(
+        expect_ok(
+            f.admin
+                .device("maintenance/poll", &f.credential, &runtime)
+                .await
+        )
+        .await["command"]
+            .is_null()
+    );
+    request["request_id"] = json!(token());
+    request["preview_token"] = stale["preview_token"].clone();
+    assert_eq!(
+        f.admin.post("maintenance/commit", &request).await.status(),
+        409
+    );
     let preview = expect_ok(f.admin.post("maintenance/preview", &request).await).await;
     assert!(preview["targets"][0]["reason"].is_null());
     request["preview_token"] = preview["preview_token"].clone();
@@ -759,6 +850,18 @@ async fn maintenance_preview_cancel_replay_and_identity_fences() {
             .await,
     )
     .await;
+    ws.close(None).await.unwrap();
+    ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    assert!(
+        expect_ok(
+            f.admin
+                .device("maintenance/authorize", &f.credential, &runtime)
+                .await
+        )
+        .await["command_digest"]
+            .is_null()
+    );
     let cancel = json!({"request_id":token(),"job_id":job});
     let cancelled = expect_ok(f.admin.post("maintenance/cancel", &cancel).await).await;
     assert_eq!(
@@ -967,7 +1070,7 @@ async fn standby_check_and_readiness_do_not_take_control() {
     );
     assert_eq!(f.admin.get("health").await.status(), 200);
     assert_eq!(f.admin.get("ready").await.status(), 503);
-    f.db.batch_execute("UPDATE schema_version SET version=20")
+    f.db.batch_execute("UPDATE schema_version SET version=21")
         .await
         .unwrap();
     assert_eq!(f.admin.get("ready").await.status(), 200);
@@ -1213,5 +1316,67 @@ async fn blocked_500_seat_preview_keeps_control_heartbeats_running() {
         latencies.last().unwrap()
     );
     drop(ws);
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn pause_tracks_assignment_and_login_limits_track_source() {
+    let f = Fixture::new().await;
+    let mut unsafe_config = f.app.config.clone();
+    unsafe_config.origin = "https://contest.test".into();
+    unsafe_config.bind = "0.0.0.0:8787".into();
+    assert!(wccs_server::listen_address(&unsafe_config).is_err());
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let mut request = input(1);
+    request["preview_token"] =
+        expect_ok(f.admin.post("waiting/preview", &request).await).await["preview_token"].clone();
+    expect_ok(f.admin.post("waiting/commit", &request).await).await;
+    let lease = wccs_protocol::control::UNTIL_RESUMED;
+    f.db.execute("UPDATE waiting_commands SET expires_at=$1,command=jsonb_set(command,'{expires_at}',to_jsonb($1::bigint))",&[&lease]).await.unwrap();
+    f.db.batch_execute("UPDATE participants SET school='Correction' WHERE id='participant-2'; UPDATE contests SET version=version+1").await.unwrap();
+    assert!(poll(&mut ws, &observation()).await.unwrap()["command"].is_object());
+    f.db.batch_execute("DELETE FROM assignments WHERE participant_id IN ('participant-1','participant-2'); INSERT INTO assignments VALUES('contest','participant-2','seat-1'); UPDATE contests SET version=version+1").await.unwrap();
+    assert!(poll(&mut ws, &observation()).await.unwrap()["command"].is_null());
+    let login = format!("{}/api/login", f.admin.url);
+    for _ in 0..30 {
+        f.admin
+            .client
+            .post(&login)
+            .header("origin", &f.admin.url)
+            .json(&json!({"username":"probe","password":"x".repeat(257)}))
+            .send()
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        f.admin
+            .client
+            .post(&login)
+            .header("origin", &f.admin.url)
+            .json(&json!({"username":"probe","password":"x"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        429
+    );
+    let other = reqwest::Client::builder()
+        .local_address(std::net::IpAddr::from([127, 0, 0, 2]))
+        .build()
+        .unwrap();
+    assert_eq!(
+        other
+            .post(login)
+            .header("origin", &f.admin.url)
+            .json(&json!({"username":"test-admin","password":"synthetic-test-password"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    ws.close(None).await.unwrap();
     f.finish().await;
 }

@@ -17,7 +17,7 @@ pub async fn register(
     headers: HeaderMap,
     Json(input): Json<ImageRegistration>,
 ) -> ApiResult<Json<Value>> {
-    auth::rate_limit(&app, "image_registration", 600).await?;
+    auth::rate_limit(&app, "image_registration", peer, &headers, 600, None).await?;
     let key =
         image_device_id(&input.machine_name).ok_or_else(|| ApiError::bad("系统机器名无效"))?;
     let registration = input.registration;

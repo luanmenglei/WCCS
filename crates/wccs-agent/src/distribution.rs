@@ -290,7 +290,9 @@ pub fn worker(path: &Path, test_mode: bool, stop: Arc<AtomicBool>) {
         match cycle(&client, path, test_mode, &stop, &mut cursors) {
             Ok(true) => continue,
             Ok(false) => {}
-            Err(_) => eprintln!("distribution_sync_unavailable"),
+            Err(error) => {
+                crate::host::log_error(path, "distribution_sync_unavailable", error.as_ref())
+            }
         }
         for _ in 0..10 {
             if stop.load(Ordering::Relaxed) {
@@ -329,16 +331,61 @@ fn cycle(
     let binding = format!("{server}:{}", connection::binding(&identity));
     let directory = path.with_extension("distribution");
     let _guards = file_transaction::guard_directory(&directory, true)?;
+    let mut pending = std::collections::HashSet::new();
     for entry in fs::read_dir(&directory)? {
         let receipt_path = entry?.path();
         if receipt_path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let bytes = read_regular(&receipt_path, 16384)?.ok_or("receipt_missing")?;
-        let receipt: Receipt = serde_json::from_slice(&bytes)?;
-        if receipt.binding == binding && receipt.progress.valid() {
-            report(client, &server, &identity, &credential, &receipt)?;
-            fs::remove_file(receipt_path)?;
+        let Some(id) = receipt_path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let bytes = match read_regular(&receipt_path, 16384) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
+            Err(_) => {
+                pending.insert(id.to_owned());
+                eprintln!("distribution_receipt_unreadable");
+                continue;
+            }
+        };
+        let receipt = serde_json::from_slice::<Receipt>(&bytes)
+            .ok()
+            .filter(|r| r.progress.valid() && r.progress.job_id == id);
+        let quarantine = match receipt {
+            Some(receipt) if receipt.binding == binding => {
+                match report(client, &server, &identity, &credential, &receipt) {
+                    Ok(()) => {
+                        if fs::remove_file(&receipt_path).is_err() {
+                            pending.insert(id.to_owned());
+                        }
+                        false
+                    }
+                    Err(error)
+                        if error
+                            .downcast_ref::<reqwest::Error>()
+                            .and_then(|e| e.status())
+                            .is_some_and(|s| {
+                                matches!(s.as_u16(), 400 | 403 | 404 | 409 | 410 | 422)
+                            }) =>
+                    {
+                        true
+                    }
+                    Err(_) => {
+                        pending.insert(id.to_owned());
+                        false
+                    }
+                }
+            }
+            _ => true,
+        };
+        if quarantine {
+            let destination =
+                receipt_path.with_extension(format!("{}.rejected", wccs_protocol::token()));
+            if fs::rename(&receipt_path, destination).is_err() {
+                pending.insert(id.to_owned());
+            }
+            eprintln!("distribution_receipt_rejected");
         }
     }
     let adapter = if test_mode { "simulation" } else { "service" };
@@ -364,6 +411,9 @@ fn cycle(
             || !(65536..=16777216).contains(&command.bytes_per_second)
         {
             return Err("distribution_command_invalid".into());
+        }
+        if pending.contains(&command.job_id) {
+            continue;
         }
         let cache = cache_root(path, &binding, &command.manifest);
         let operation = (|| -> Result<(usize, bool)> {
@@ -440,7 +490,9 @@ fn cycle(
             ("downloading", "chunks_verified")
         };
         let receipt = save_result(path, &binding, &command, stage, verified, detail)?;
-        report(client, &server, &identity, &credential, &receipt)?;
+        if report(client, &server, &identity, &credential, &receipt).is_err() {
+            eprintln!("distribution_receipt_pending");
+        }
     }
     Ok(downloading)
 }
@@ -478,7 +530,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("wccs-distribution-{}", wccs_protocol::token()));
         fs::create_dir(&root).unwrap();
-        let identity = root.join("identity.json");
+        let identity = root.canonicalize().unwrap().join("identity.json");
         let content = b"contest resource";
         let command = Command {
             job_id: "job".into(),

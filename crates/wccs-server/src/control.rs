@@ -208,6 +208,7 @@ async fn exchange(
     if first {
         // Every control grant belongs to the connection observed during preview.
         tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$2 WHERE device_id=$1 AND stage NOT IN ('cancelled','expired','failed')", &[&id,&now()]).await?;
+        tx.execute("UPDATE maintenance_jobs SET cancel_requested=true,stage=CASE WHEN delivered THEN stage ELSE 'cancelled' END WHERE device_id=$1 AND stage IN ('queued','accepted','executing')", &[&id]).await?;
         tx.execute("INSERT INTO control_devices
             VALUES($1,$2,$3,$4,$5,$6,$7,true,$8,$9)
             ON CONFLICT(device_id) DO UPDATE SET connection_id=$2,server_epoch=$3,instance_id=$4,session_key=$5,generation=$6,last_seen=$7,connected=true,actual=$8,pause_lease=$9", &[&id,&connection,&app.server_epoch,&poll.instance_id,&poll.session_key,&generation,&now(),&json!(poll.actual), &headers.get("x-wccs-pause-lease").is_some_and(|v|v=="1")]).await?;
@@ -280,6 +281,11 @@ async fn exchange(
                         && report.actual.command_id.as_deref() == Some(&saved.command_id)
                         && report.actual.session_key.as_deref() == Some(&saved.session_key)
                         && report.actual.monitors > 0
+                } else if saved.desktop_files.is_some() {
+                    report.actual.state == "desktop"
+                        && report.actual.detail == "contest_desktop_ready"
+                        && report.actual.session_key.as_deref() == Some(&saved.session_key)
+                        && report.actual.command_id.as_deref() == Some(&saved.command_id)
                 } else if saved.action == "prepare_login" {
                     saved.login.as_ref().is_some_and(|plan| {
                         report.actual.account.as_ref().is_some_and(|s| {

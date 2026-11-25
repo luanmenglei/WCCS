@@ -52,9 +52,14 @@ async fn query(
         return Err(ApiError::bad("事件筛选或每页数量无效"));
     }
     let fingerprint = digest(&serde_json::to_string(&filter).unwrap());
-    let mut db = app.db.lock().await?;
-    let tx = db.transaction().await?;
-    let identity = auth::authorize(&tx, &session, auth::Permission::Read).await?;
+    let mut db = app.preview_db.lock().await?;
+    let tx = db
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await?;
+    let identity = auth::authorize_snapshot(&tx, &session, auth::Permission::Read).await?;
     let maximum: i64 = tx
         .query_one("SELECT COALESCE(max(id),0) FROM events WHERE ($1 OR (cardinality(room_ids)>0 AND room_ids<@$2)) AND ($3 OR operation<>'operator_save')", &[&identity.all_rooms,&identity.room_ids,&(identity.role=="admin")])
         .await?
@@ -79,7 +84,9 @@ async fn query(
     // Apply authorization before filters and pagination. No unfiltered counts or facets escape.
     let rows = tx
         .query(
-            "SELECT *, (SELECT jsonb_build_object('version',a.version,'status',a.status,'note',a.note,'actor_id',a.actor_id,'updated_at',a.updated_at) FROM event_actions a WHERE a.event_id=events.id) AS handling FROM events WHERE id<=$1 AND (occurred_at,id)<($2,$3)
+            "SELECT id,source,source_id,category,occurred_at,actor_id,actor_name,operation,target,device_ids,room_ids,contest_id,request_id,version,outcome,legacy,
+                CASE WHEN $17::bigint IS NULL THEN '{}'::jsonb WHEN operation='maintenance_result' THEN detail - 'recovery' WHEN operation='maintenance_commit' THEN jsonb_build_object('request_id',request_id) ELSE detail END AS detail,
+                (SELECT jsonb_build_object('version',a.version,'status',a.status,'note',a.note,'actor_id',a.actor_id,'updated_at',a.updated_at) FROM event_actions a WHERE a.event_id=events.id) AS handling FROM events WHERE id<=$1 AND (occurred_at,id)<($2,$3)
         AND ($4 OR (cardinality(room_ids)>0 AND room_ids<@$5))
         AND ($6 OR operation<>'operator_save')
         AND ($7::bigint IS NULL OR occurred_at>=$7) AND ($8::bigint IS NULL OR occurred_at<=$8)

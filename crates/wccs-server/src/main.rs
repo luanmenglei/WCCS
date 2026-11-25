@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", wccs_server::deployment::check_standby(&config).await?);
         return Ok(());
     }
-    let address = config.bind.clone();
+    let address = wccs_server::listen_address(&config)?;
     let listener = tokio::net::TcpListener::bind(&address).await?;
     let Some(mut lease) = wccs_server::deployment::ControllerLease::acquire(&config).await? else {
         eprintln!("此数据库已有活动控制器，请先核对并停止旧实例");

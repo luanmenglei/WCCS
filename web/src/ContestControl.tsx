@@ -7,6 +7,14 @@ import type { Mutation } from "./SeatChecks";
 import { Seats } from "./Seats";
 import { skipLabels } from "./waiting-model";
 
+const desktopCatalog = z.object({
+  artifacts: z.array(
+    z.object({
+      ready: z.boolean(),
+      manifest: z.object({ id: z.string(), name: z.string() }),
+    }),
+  ),
+});
 const previewSchema = z.object({
   preview_token: z.string(),
   remote: z.object({ phase: z.string(), revision: z.number() }),
@@ -36,11 +44,35 @@ const jobsSchema = z.object({
       }),
       results: z
         .object({
+          armed: z.boolean().optional(),
           remote: z
-            .union([z.string(), z.object({ phase: z.string() }).passthrough()])
+            .union([
+              z.string(),
+              z
+                .object({
+                  phase: z.string(),
+                  start_enabled: z.boolean().optional(),
+                  allow_submit: z.boolean().optional(),
+                  held_settings: z
+                    .object({
+                      start_enabled: z.boolean(),
+                      allow_submit: z.boolean(),
+                    })
+                    .nullish(),
+                })
+                .passthrough(),
+            ])
             .optional(),
           reports: z
-            .array(z.object({ device_id: z.string(), stage: z.string() }))
+            .array(
+              z.object({
+                device_id: z.string(),
+                stage: z.string(),
+                report: z
+                  .object({ actual: z.object({ detail: z.string() }) })
+                  .nullish(),
+              }),
+            )
             .optional(),
         })
         .passthrough(),
@@ -71,8 +103,13 @@ const phases: Record<string, string> = {
 const details: Record<string, string> = {
   target_changed_review_required: "目标、连接或身份已变化，请重新预览",
   desktop_failed_review_required: "部分桌面执行失败，请核对逐机结果",
+  contest_desktop_ready: "已核对开赛桌面文件",
+  contest_desktop_failed:
+    "桌面准备失败，请核对镜像文件名、同名项目、资料完整性和文件占用",
   desktop_timeout_review_required: "桌面回执超时，请核对实际状态",
   server_restarted_review_required: "服务重启已中断安排，请重新核对并操作",
+  restore_start_pending: "已停止本地调度，等待恢复评测端原设置",
+  start_settings_restored: "已恢复评测端原开赛和提交设置",
   operator_cancelled: "管理员已取消安排",
   remote_connection_failed: "无法连接 DOMjudge，请核对两端状态后重试",
   remote_timeout: "DOMjudge 超时，请核对实际状态后重试",
@@ -111,6 +148,27 @@ export function ContestControl({
     ),
   );
   const [action, setAction] = useState("pause");
+  const [imageNames, setImageNames] = useState("");
+  const [artifactIds, setArtifactIds] = useState<string[]>([]);
+  const [materials, setMaterials] = useState<{ id: string; name: string }[]>(
+    [],
+  );
+  useEffect(() => {
+    if (action !== "start" || !access.manage) return;
+    let active = true;
+    void api("distribution")
+      .then((value) => {
+        const artifacts = desktopCatalog.parse(value).artifacts;
+        if (active)
+          setMaterials(artifacts.filter((a) => a.ready).map((a) => a.manifest));
+      })
+      .catch((e) => {
+        if (active) setError(String(e));
+      });
+    return () => {
+      active = false;
+    };
+  }, [action, access.manage]);
   const [at, setAt] = useState("");
   const [duration, setDuration] = useState(900);
   const [preview, setPreview] = useState<z.infer<typeof previewSchema> | null>(
@@ -169,6 +227,17 @@ export function ContestControl({
     seat_ids: selected,
     action,
     execute_at: at ? Math.floor(new Date(at).getTime() / 1000) : 0,
+    ...(action === "start"
+      ? {
+          desktop_files: {
+            keep: imageNames
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean),
+            artifact_ids: artifactIds,
+          },
+        }
+      : {}),
     duration_seconds: action === "pause" ? 900 : duration,
   };
   if (!access.allRooms) return <p role="alert">比赛联动需要全场查看权限。</p>;
@@ -217,6 +286,46 @@ export function ContestControl({
             }}
           />
         </label>
+        {action === "start" && (
+          <fieldset>
+            <legend>开赛桌面文件</legend>
+            <label>
+              保留的镜像桌面项目（每行一个完整名称，含扩展名）
+              <textarea
+                value={imageNames}
+                placeholder="例如：Dev-C++.lnk"
+                onChange={(e) => {
+                  setImageNames(e.target.value);
+                  invalidate();
+                }}
+              />
+            </label>
+            <p>
+              在<a href="#/distribution">文件分发</a>
+              中上传资料后，在这里勾选要放到桌面的文件。开赛时客户端会下载并校验所选资料。
+            </p>
+            {materials.map((m) => (
+              <label key={m.id}>
+                <input
+                  type="checkbox"
+                  checked={artifactIds.includes(m.id)}
+                  onChange={(e) => {
+                    setArtifactIds(
+                      e.target.checked
+                        ? [...artifactIds, m.id]
+                        : artifactIds.filter((id) => id !== m.id),
+                    );
+                    invalidate();
+                  }}
+                />
+                {m.name} <small>{m.id.slice(0, 8)}</small>
+              </label>
+            ))}
+            <p>
+              开赛后桌面只显示清单内的文件和入口。留空表示清空桌面上的文件项目。
+            </p>
+          </fieldset>
+        )}
         {action === "pause" ? (
           <p>暂停持续至明确恢复，断线退出控制。</p>
         ) : (
@@ -391,16 +500,37 @@ export function ContestControl({
                   {typeof job.results.remote === "object"
                     ? phases[job.results.remote.phase]
                     : (phases[job.results.remote ?? ""] ?? "尚未执行")}
+                  {typeof job.results.remote === "object" &&
+                    job.results.remote.held_settings && (
+                      <p>
+                        预置回执：自动开赛
+                        {job.results.remote.start_enabled ? "开" : "关"}，提交
+                        {job.results.remote.allow_submit ? "开" : "关"}
+                        。恢复后自动开赛
+                        {job.results.remote.held_settings.start_enabled
+                          ? "开"
+                          : "关"}
+                        ，提交
+                        {job.results.remote.held_settings.allow_submit
+                          ? "开"
+                          : "关"}
+                        ，按评测端原定时间生效。
+                      </p>
+                    )}
                 </td>
                 <td>
                   {job.results.reports?.map((report) => (
                     <div key={report.device_id}>
                       {report.device_id} · {report.stage}
+                      {report.report &&
+                        details[report.report.actual.detail] &&
+                        ` · ${details[report.report.actual.detail]}`}
                     </div>
                   )) ?? "尚无回执"}
                 </td>
                 <td>
-                  {job.stage === "scheduled" && (
+                  {(job.stage === "scheduled" ||
+                    (job.stage === "interrupted" && job.results.armed)) && (
                     <button
                       disabled={disabled || busy || !access.manage}
                       onClick={() =>
@@ -410,13 +540,18 @@ export function ContestControl({
                             {
                               request_id: crypto.randomUUID(),
                               job_id: job.id,
+                              restore_start: job.results.armed === true,
                             },
-                            "比赛安排已取消",
+                            job.results.armed
+                              ? "已取消安排并恢复评测端原开赛和提交设置"
+                              : "比赛安排已取消",
                           );
                         })
                       }
                     >
-                      取消安排
+                      {job.results.armed
+                        ? "取消并恢复评测端原设置"
+                        : "取消安排"}
                     </button>
                   )}
                 </td>

@@ -60,10 +60,11 @@ pub fn run(
     log(&path, "host_started")?;
     let runtime = tokio::runtime::Runtime::new()?;
     let instance = token();
+    let http = crate::windows_agent::initialize_worker(&path).map_err(|e| e.to_string())?;
     let worker_path = path.clone();
     let worker_stop = stop.clone();
     let worker = std::thread::spawn(move || {
-        crate::windows_agent::run_worker(&worker_path, worker_stop);
+        crate::windows_agent::run_worker(&worker_path, http, worker_stop);
     });
     let diagnostic_path = path.clone();
     let diagnostic_executable = executable.clone();
@@ -123,6 +124,8 @@ pub fn run(
             });
         }
         let mut host = Controller {
+            desktop_work: None,
+            held_waiting: None,
             presentation,
             path,
             executable,
@@ -203,6 +206,8 @@ impl ConnectionGrants {
 }
 
 struct Controller {
+    desktop_work: Option<crate::contest_desktop::Worker>,
+    held_waiting: Option<Command>,
     presentation: crate::presentation::Shared,
     path: PathBuf,
     accounts: Option<Box<dyn crate::login::Runtime>>,
@@ -248,6 +253,8 @@ impl Controller {
         result
     }
     fn stop_child(&mut self) -> Result<()> {
+        self.desktop_work = None;
+        self.held_waiting = None;
         if let Some(child) = &mut self.child {
             child.stop()?;
         }
@@ -403,7 +410,7 @@ impl Controller {
                 {
                     return Err("control_command_rejected".into());
                 }
-                let result = if command.action == "enter"
+                let result = if (command.action == "enter" || command.desktop_files.is_some())
                     && session_key.as_deref() != Some(&command.session_key)
                 {
                     self.fail("session_changed")
@@ -502,6 +509,13 @@ impl Controller {
         }
         stopped.and(recovery)
     }
+    fn desktop_evidence(&mut self, command: &Command) {
+        if command.desktop_files.is_some() {
+            self.actual.detail = "contest_desktop_ready".into();
+            self.actual.command_id = Some(command.command_id.clone());
+            self.actual.session_key = Some(command.session_key.clone());
+        }
+    }
     fn apply(
         &mut self,
         command: Command,
@@ -531,6 +545,14 @@ impl Controller {
                     .ok_or("native_login_unavailable")?
                     .accept(&command)?;
             }
+            self.desktop_work = None;
+            self.held_waiting = self
+                .command
+                .as_ref()
+                .filter(|c| {
+                    command.desktop_files.is_some() && c.action == "enter" && self.child.is_some()
+                })
+                .cloned();
             self.command = Some(command);
             self.stage_started = Instant::now();
             self.command_deadline = Instant::now()
@@ -629,12 +651,57 @@ impl Controller {
             }
             return Ok(());
         }
+        if let Some(files) = &command.desktop_files {
+            if self.report.as_ref().is_some_and(|r| r.stage == "succeeded") {
+                return Ok(());
+            }
+            let Some(session) = session else {
+                return self.fail("no_session");
+            };
+            if self.test_mode
+                || command.action != "leave"
+                || !files.valid()
+                || command.session_key != session.key
+            {
+                return self.fail("contest_desktop_failed");
+            }
+            let work = self.desktop_work.get_or_insert_with(|| {
+                crate::contest_desktop::Worker::start(
+                    self.path.clone(),
+                    command.clone(),
+                    session.sid().to_owned(),
+                    lease,
+                )
+            });
+            match work.progress(lease) {
+                Ok(true) => (),
+                Ok(false) => {
+                    if let (Some(child), Some(held)) = (&mut self.child, &self.held_waiting)
+                        && child.ready()?
+                    {
+                        let _ = child.pipe.receive::<Actual>()?;
+                        child.pipe.send(&IpcRequest {
+                            protocol_version: CONTROL_VERSION,
+                            command: held.clone(),
+                            lease_seconds: lease,
+                            presentation: self.presentation.lock().ok().and_then(|s| s.clone()),
+                        })?;
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    log_error(&self.path, "contest_desktop_failed", error.as_ref());
+                    return self.fail("contest_desktop_failed");
+                }
+            }
+        }
         if session.is_none() {
             return self.fail("no_session");
         }
         if command.action == "leave" && self.child.is_none() {
             self.recover_waiting_policy()?;
             self.actual = Actual::default();
+            self.desktop_evidence(&command);
             if self.report.as_ref().is_none_or(|r| r.stage != "succeeded") {
                 self.stage("succeeded")?;
             }
@@ -690,6 +757,7 @@ impl Controller {
                 if command.action == "leave" && complete {
                     self.stop_child()?;
                     self.recover_waiting_policy()?;
+                    self.desktop_evidence(&command);
                 }
                 if complete && self.report.as_ref().is_none_or(|r| r.stage != "succeeded") {
                     self.stage("succeeded")?;
@@ -706,10 +774,19 @@ impl Controller {
     }
 }
 
-fn log_error(path: &std::path::Path, operation: &str, error: &(dyn std::error::Error + 'static)) {
+pub(crate) fn log_error(
+    path: &std::path::Path,
+    operation: &str,
+    error: &(dyn std::error::Error + 'static),
+) {
     let detail = error.to_string();
     if let Some(error) = error.downcast_ref::<windows::core::Error>() {
         let _ = log(path, &format!("{operation} hresult={:08x}", error.code().0));
+    } else if let Some(io) = error.downcast_ref::<std::io::Error>() {
+        let _ = log(
+            path,
+            &format!("{operation} os_error={:?}", io.raw_os_error()),
+        );
     } else if detail.len() <= 80
         && detail
             .bytes()
@@ -753,6 +830,7 @@ mod tests {
             session_key: "session".into(),
             action: "enter".into(),
             expires_at: wccs_protocol::now() + 900,
+            desktop_files: None,
             login: None,
             identity: WaitingIdentity {
                 contest_id: "contest".into(),
@@ -769,6 +847,8 @@ mod tests {
         };
         (
             Controller {
+                desktop_work: None,
+                held_waiting: None,
                 presentation: Default::default(),
                 path: directory.join("device.json"),
                 accounts: None,

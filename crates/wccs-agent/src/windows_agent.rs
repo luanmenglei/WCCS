@@ -95,8 +95,8 @@ fn run_locked(path: &Path, once: bool) -> Result<()> {
     let mut delay = 5u64;
     loop {
         match cycle(&client, &mut identity, &boot_id, path) {
-            Ok(()) => {
-                delay = 5;
+            Ok(seconds) => {
+                delay = seconds;
                 if once {
                     return Ok(());
                 }
@@ -113,7 +113,7 @@ fn run_locked(path: &Path, once: bool) -> Result<()> {
     }
 }
 
-fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -> Result<()> {
+fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -> Result<u64> {
     let server = crate::connection::server(path, identity)?;
     let credential = identity.device_token.as_ref().unwrap().clone();
     let heartbeat = Heartbeat {
@@ -142,7 +142,7 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
             .send()?;
         if probe.status().is_success() {
             promote(identity, path, &candidate)?;
-            return Ok(());
+            return Ok(5);
         }
         return Err("凭据切换未恢复，请管理员核对撤销或重新授权状态".into());
     }
@@ -167,7 +167,7 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
                 "device={} registration_pending application={}",
                 identity.device_id, registered["application_id"]
             );
-            return Ok(());
+            return Ok(60 + rand::random::<u64>() % 31);
         }
         response = client
             .post(format!("{server}/api/device/heartbeat"))
@@ -184,7 +184,7 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
     }
     if let Some(rotation_id) = &reply.rotation_id {
         rotate(client, identity, path, &server, rotation_id)?;
-        return Ok(());
+        return Ok(5);
     }
     // Diagnostic retransmission shares HTTP ownership and cannot stall WSS renewals.
     let _ = crate::diagnostics::flush(client, path, identity, &credential, &server);
@@ -206,11 +206,11 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
     }
     if reply.lifecycle == "disabled" {
         println!("device={} disabled_paused", identity.device_id);
-        return Ok(());
+        return Ok(5);
     }
     let Some(job) = reply.job else {
         println!("device={} heartbeat_ok", identity.device_id);
-        return Ok(());
+        return Ok(5);
     };
     if job.expires_at <= reply.server_time {
         return Err("配置任务已过期".into());
@@ -218,7 +218,7 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
     // A pending result may have completed this job after the heartbeat snapshot.
     let completed = path.with_extension("completed");
     if fs::read_to_string(&completed).ok().as_deref() == Some(&job.job_id) {
-        return Ok(());
+        return Ok(5);
     }
     let (_, reports) = check_configuration(
         Some(&job.configuration),
@@ -259,7 +259,7 @@ fn cycle(client: &Client, identity: &mut Identity, boot_id: &str, path: &Path) -
         "device={} config={} job={} result_accepted",
         identity.device_id, result.config_version, result.job_id
     );
-    Ok(())
+    Ok(5)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -371,28 +371,28 @@ pub fn validate_server(server: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
-pub fn run_worker(path: &Path, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    let initialize = || -> Result<(Identity, Client)> {
-        let mut identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
-        identity.device_token = Some(crate::diagnostics::credential(path, &identity)?);
-        let client = Client::builder()
-            .timeout(Duration::from_secs(12))
-            .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        Ok((identity, client))
-    };
-    let Ok((mut identity, client)) = initialize() else {
-        eprintln!("http_worker_initialization_failed");
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        return;
-    };
+pub fn initialize_worker(path: &Path) -> Result<(Identity, Client)> {
+    let mut identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
+    identity.device_token = Some(crate::diagnostics::credential(path, &identity)?);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(12))
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    Ok((identity, client))
+}
+pub fn run_worker(
+    path: &Path,
+    (mut identity, client): (Identity, Client),
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let boot = token();
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        if cycle(&client, &mut identity, &boot, path).is_err() {
+        let seconds = cycle(&client, &mut identity, &boot, path).unwrap_or_else(|_| {
             eprintln!("device_http_sync_failed");
-        }
-        for _ in 0..25 {
+            5
+        });
+        for _ in 0..seconds * 5 {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }

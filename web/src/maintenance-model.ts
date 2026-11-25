@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const maintenanceTemplates: Record<string, string> = {
   recovery: "赛后恢复",
+  shutdown: "统一关机",
   identify: "设备识别",
   prepare_desktop: "桌面入口",
   check_workspace: "普通账户工作目录检查",
@@ -27,6 +28,8 @@ export const maintenanceStages: Record<string, string> = {
   interrupted: "重启中断",
 };
 export const maintenanceDetails: Record<string, string> = {
+  shutdown_started: "正在请求 Windows 关机",
+  shutdown_requested: "Windows 已接受关机请求",
   desktop_updated: "桌面入口已更新并核验",
   workspace_verified: "普通账户目录与工具访问核验通过",
   scripts_activated: "脚本版本已校验并激活",

@@ -71,9 +71,11 @@ pub struct AppState {
     pub sessions: Mutex<auth::Sessions>,
     pub password_slots: Arc<Semaphore>,
     pub download_slots: Semaphore,
-    pub archive_slots: Semaphore,
+    pub receipt_db: database::Database,
+    pub receipt_slots: Semaphore,
+    pub archive_slots: Arc<Semaphore>,
     pub download_limits: Mutex<HashMap<String, Instant>>,
-    pub auth_limits: Mutex<HashMap<&'static str, (Instant, u32)>>,
+    pub auth_limits: Mutex<auth::RateLimits>,
     pub(crate) domjudge: Option<domjudge::Remote>,
 }
 
@@ -128,10 +130,18 @@ impl IntoResponse for ApiError {
     }
 }
 
+pub fn listen_address(config: &Config) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+    let address: std::net::SocketAddr = config.bind.parse()?;
+    if !address.ip().is_loopback() {
+        return Err("明文后端仅允许监听回环地址，请通过本机 HTTPS 代理访问".into());
+    }
+    Ok(address)
+}
+
 fn validate_config(
     config: &Config,
 ) -> Result<Option<domjudge::Remote>, Box<dyn std::error::Error>> {
-    let address: std::net::SocketAddr = config.bind.parse()?;
+    let address: std::net::SocketAddr = listen_address(config)?;
     let origin = url::Url::parse(&config.origin)?;
     if origin.origin().ascii_serialization() != config.origin {
         return Err("origin 需与浏览器的协议、主机和端口完全一致".into());
@@ -259,6 +269,11 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         tx.batch_execute(include_str!("../migrations/020_operator_workflows.sql"))
             .await?;
     }
+    if versions[0].get::<_, i32>(0) <= 20 {
+        tx.batch_execute(include_str!("../migrations/021_maintenance_grants.sql"))
+            .await?;
+    }
+    tx.execute("UPDATE maintenance_jobs SET cancel_requested=true,stage=CASE WHEN delivered THEN stage ELSE 'cancelled' END WHERE stage IN ('queued','accepted','executing')", &[]).await?;
     tx.execute("UPDATE contest_control_jobs SET stage='interrupted',detail='server_restarted_review_required',updated_at=$1 WHERE stage IN ('scheduled','running')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE waiting_commands SET stage='cancelled',updated_at=$1 WHERE stage NOT IN ('failed','cancelled','expired')", &[&wccs_protocol::now()]).await?;
     tx.execute("UPDATE control_devices SET connected=false", &[])
@@ -266,6 +281,7 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
     tx.commit().await?;
     drop(db);
     let app = Arc::new(AppState {
+        receipt_db: database::Database::new(&config.database_url)?,
         readiness_db: database::Database::new(&config.database_url)?,
         archive_db: database::Database::new(&config.database_url)?,
         archive_upload_db: database::Database::new(&config.database_url)?,
@@ -276,7 +292,8 @@ pub async fn connect(config: Config) -> Result<App, Box<dyn std::error::Error>> 
         sessions: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(2)),
         download_slots: Semaphore::new(16),
-        archive_slots: Semaphore::new(2),
+        receipt_slots: Semaphore::new(2),
+        archive_slots: Arc::new(Semaphore::new(2)),
         download_limits: Mutex::new(HashMap::new()),
         auth_limits: Mutex::new(HashMap::new()),
         domjudge,
@@ -306,6 +323,24 @@ async fn response_policy(request: Request, next: Next) -> Response {
             .insert(name, HeaderValue::from_static(value));
     }
     response
+}
+
+async fn authenticate_receipt(
+    axum::extract::State(app): axum::extract::State<App>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    {
+        let mut db = app.db.lock().await?;
+        let tx = db.transaction().await?;
+        auth::device(&tx, request.headers()).await?;
+        tx.commit().await?;
+    }
+    let _permit = app
+        .receipt_slots
+        .try_acquire()
+        .map_err(|_| ApiError::new(429, "维护回执接收繁忙，请稍后重试"))?;
+    Ok(next.run(request).await)
 }
 
 pub fn router(app: App) -> Router {
@@ -343,12 +378,13 @@ pub fn router(app: App) -> Router {
         .route("/api/distribution/cancel", post(distribution::cancel))
         .route("/api/device/distribution/poll", post(distribution::poll))
         .route("/api/device/distribution/progress", post(distribution::progress))
+        .route("/api/device/desktop-files/{job}/{artifact}/{index}", get(distribution::desktop_chunk))
         .route("/api/device/distribution/{job}/{index}", get(distribution::download))
         .route("/api/maintenance", get(maintenance::list))
         .route("/api/maintenance/cancel", post(maintenance::cancel))
         .route("/api/device/maintenance/poll", post(maintenance::poll))
         .route("/api/device/maintenance/authorize", post(maintenance::authorize))
-        .route("/api/device/maintenance/result", post(maintenance::result).layer(DefaultBodyLimit::max(wccs_protocol::recovery::MAX_MANIFEST_BYTES)))
+        .route("/api/device/maintenance/result", post(maintenance::result).layer(DefaultBodyLimit::max(wccs_protocol::recovery::MAX_MANIFEST_BYTES)).layer(axum::middleware::from_fn_with_state(app.clone(), authenticate_receipt)))
         .route("/api/login", post(auth::login))
         .route("/api/session", get(auth::session))
         .route("/api/logout", post(auth::logout))

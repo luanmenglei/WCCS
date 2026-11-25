@@ -40,13 +40,26 @@ fn client() -> Result<Client> {
 
 pub fn credential(path: &Path, identity: &Identity) -> Result<String> {
     use std::os::windows::fs::OpenOptionsExt;
-    let _lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .share_mode(0)
-        .open(path.with_extension("credential.lock"))?;
+    let started = Instant::now();
+    let _lock = loop {
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(path.with_extension("credential.lock"))
+        {
+            Ok(file) => break file,
+            Err(e)
+                if matches!(e.raw_os_error(), Some(32 | 33))
+                    && started.elapsed() < Duration::from_secs(3) =>
+            {
+                std::thread::sleep(Duration::from_millis(25))
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
     let credential_path = path.with_extension("credential");
     let value = match fs::read_to_string(&credential_path) {
         Ok(value) => value,
@@ -749,6 +762,7 @@ fn ipc_probe(executable: &Path, test_mode: bool, nonce: &str) -> crate::host::Re
             room_id: String::new(),
             room_version: 0,
         },
+        desktop_files: None,
         login: None,
     };
     child.pipe.send(&IpcRequest {

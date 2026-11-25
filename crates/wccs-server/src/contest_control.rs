@@ -11,6 +11,8 @@ use wccs_protocol::{digest, now, valid_id};
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Write {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_files: Option<FileSelection>,
     request_id: String,
     contest_id: String,
     remote_contest_id: String,
@@ -20,6 +22,13 @@ pub struct Write {
     duration_seconds: i64,
     #[serde(default)]
     preview_token: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FileSelection {
+    keep: Vec<String>,
+    artifact_ids: Vec<String>,
 }
 
 impl Write {
@@ -50,7 +59,83 @@ async fn check_scope(tx: &Transaction<'_>, input: &Write) -> ApiResult<()> {
 
 async fn desktop_plan(tx: &Transaction<'_>, app: &App, input: &Write) -> ApiResult<Value> {
     check_scope(tx, input).await?;
-    waiting::desktop_plan(tx, app, &input.desktop()?, true, input.action == "pause").await
+    let mut plan =
+        waiting::desktop_plan(tx, app, &input.desktop()?, true, input.action == "pause").await?;
+    if input.action != "start" {
+        if input.desktop_files.is_some() {
+            return Err(ApiError::bad("桌面文件仅用于开始比赛"));
+        }
+        return Ok(plan);
+    }
+    let selected = input
+        .desktop_files
+        .as_ref()
+        .ok_or_else(|| ApiError::bad("请明确选择开赛桌面文件，空清单表示空桌面"))?;
+    if selected.keep.len() + selected.artifact_ids.len() > 64 {
+        return Err(ApiError::bad("开赛桌面最多选择 64 项"));
+    }
+    use wccs_protocol::control::{DesktopFiles, DesktopMaterial};
+    let mut files = DesktopFiles {
+        keep: selected.keep.clone(),
+        materials: Vec::new(),
+    };
+    let rows = tx
+        .query(
+            "SELECT manifest FROM distribution_artifacts WHERE id=ANY($1) AND ready ORDER BY id",
+            &[&selected.artifact_ids],
+        )
+        .await?;
+    if rows.len() != selected.artifact_ids.len() {
+        return Err(ApiError::bad("桌面资料重复或尚未上传完成"));
+    }
+    for row in rows {
+        let manifest: wccs_protocol::distribution::Manifest =
+            serde_json::from_value(row.get(0)).map_err(|_| ApiError::internal())?;
+        files.materials.push(DesktopMaterial {
+            id: manifest.id,
+            name: manifest.name,
+            size: manifest.size,
+            chunks_digest: digest(&manifest.hashes.concat()),
+        });
+    }
+    if !files.valid() {
+        return Err(ApiError::bad("桌面文件名无效、重复或使用了系统保留名称"));
+    }
+    let devices: Vec<_> = plan["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["device_id"].as_str())
+        .collect();
+    let readiness = tx.query("SELECT m.device_id,m.instance_id,EXISTS(SELECT 1 FROM maintenance_jobs j WHERE j.device_id=m.device_id AND j.stage IN ('queued','accepted','executing') AND j.expires_at>$2::bigint) FROM maintenance_devices m WHERE m.device_id=ANY($1) AND capabilities ? 'desktop-files-v1' AND last_seen>$2::bigint-15", &[&devices,&now()]).await?;
+    for target in plan["targets"].as_array_mut().unwrap() {
+        if target["status"] != "ready" {
+            continue;
+        }
+        let state = readiness.iter().find(|r| {
+            target["device_id"] == r.get::<_, String>(0)
+                && target["instance_id"] == r.get::<_, String>(1)
+        });
+        let account = &target["account"];
+        let Some(state) = state else {
+            target["status"] = json!("desktop_upgrade_required");
+            continue;
+        };
+        if state.get::<_, bool>(2) {
+            target["status"] = json!("maintenance_active");
+            continue;
+        }
+        if target["session_key"].is_null()
+            || account["phase"] != "controlled"
+            || account["target_sid"].is_null()
+            || account["target_sid"] != account["observed_sid"]
+            || account["desktop_confirmed"] != true
+        {
+            target["status"] = json!("desktop_account_required");
+        }
+    }
+    plan["desktop_files"] = json!(files);
+    Ok(plan)
 }
 
 fn remote_snapshot(value: &Value) -> ApiResult<Value> {
@@ -103,6 +188,14 @@ async fn plan(app: &App, session: &auth::Session, input: &Write) -> ApiResult<Va
         .get(&input.endpoint())
         .await
         .map_err(|reason| ApiError::new(502, &reason))?;
+    if input.action == "start"
+        && input.execute_at > now()
+        && state["hold_restore_supported"] != true
+    {
+        return Err(ApiError::conflict(
+            "定时开赛需要支持恢复原设置的 DOMjudge 扩展，请先升级评测端",
+        ));
+    }
     let remote = remote_snapshot(&state)?;
     if !phase_allows(&input.action, remote["phase"].as_str().unwrap_or("")) {
         return Err(ApiError::conflict(
@@ -225,6 +318,8 @@ pub async fn list(
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cancel {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    restore_start: bool,
     request_id: String,
     job_id: String,
 }
@@ -249,9 +344,63 @@ pub async fn cancel(
     {
         return Ok(Json(previous));
     }
-    if tx.execute("UPDATE contest_control_jobs SET stage='cancelled',detail='operator_cancelled',updated_at=$2 WHERE id=$1 AND stage='scheduled'",&[&input.job_id,&now()]).await? != 1 {
-        return Err(ApiError::conflict("任务已执行或结束，请核对实际状态并发起新的操作"));
+    let row = tx.query_opt("SELECT stage,detail,payload,plan,results FROM contest_control_jobs WHERE id=$1 FOR UPDATE", &[&input.job_id]).await?
+        .ok_or_else(|| ApiError::bad("安排不存在"))?;
+    let stage: String = row.get("stage");
+    let pending =
+        stage == "interrupted" && row.get::<_, String>("detail") == "restore_start_pending";
+    let mut results: Value = row.get("results");
+    let armed = results["armed"] == true;
+    if stage != "scheduled" && !(stage == "interrupted" && armed) {
+        return Err(ApiError::conflict("任务已执行或结束，请核对实际状态"));
     }
+    if armed && !input.restore_start {
+        return Err(ApiError::conflict(
+            "评测端已预置，请刷新后明确取消并恢复原开赛设置",
+        ));
+    }
+    if armed {
+        let mut release: Write =
+            serde_json::from_value(row.get("payload")).map_err(|_| ApiError::internal())?;
+        release.request_id = digest(&format!("release_start:{}", release.request_id));
+        release.action = "release_start".into();
+        let planned: Value = row.get("plan");
+        // Disable scheduled dispatch durably before contacting the remote service.
+        // A lost reply is retried with the same remote idempotency key.
+        if !pending {
+            tx.execute("UPDATE contest_control_jobs SET stage='interrupted',detail='restore_start_pending',updated_at=$2 WHERE id=$1", &[&input.job_id,&now()]).await?;
+        }
+        tx.commit().await?;
+        drop(db);
+        remote_action(&app, &release, &planned, &mut results).await.map_err(|error| {
+            if error.message == "remote_http_409" {
+                ApiError::conflict("已停止本地调度。评测端版本或设置已变化，请裁判核对并处理原开赛和提交设置。")
+            } else { error }
+        })?;
+        let mut db = app.db.lock().await?;
+        let tx = db.transaction().await?;
+        auth::authorize(&tx, &session, auth::Permission::Admin)
+            .await?
+            .global()?;
+        if let Some(previous) =
+            management::previous(&tx, &input.request_id, "contest_control_cancel", &payload).await?
+        {
+            return Ok(Json(previous));
+        }
+        tx.execute("UPDATE contest_control_jobs SET stage='cancelled',detail='start_settings_restored',results=$2,updated_at=$3 WHERE id=$1 AND detail='restore_start_pending'", &[&input.job_id,&results,&now()]).await?;
+        let result = json!({"job_id":input.job_id,"stage":"cancelled","remote":results["remote"]});
+        management::record(
+            &tx,
+            &input.request_id,
+            "contest_control_cancel",
+            &payload,
+            &result,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Json(result));
+    }
+    tx.execute("UPDATE contest_control_jobs SET stage='cancelled',detail='operator_cancelled',updated_at=$2 WHERE id=$1", &[&input.job_id,&now()]).await?;
     let result = json!({"job_id":input.job_id,"stage":"cancelled"});
     management::record(
         &tx,
@@ -299,7 +448,14 @@ async fn checked_desktop(
 ) -> ApiResult<(auth::Identity, Value)> {
     let actor = auth::authorize(tx, session, auth::Permission::Admin).await?;
     actor.global()?;
-    let current = desktop_plan(tx, app, input).await?;
+    let current = if issued && input.action == "start" {
+        // The command contains the immutable material digests. After dispatch, fence
+        // the live target and wait for its receipt without reloading every manifest.
+        check_scope(tx, input).await?;
+        waiting::desktop_plan(tx, app, &input.desktop()?, true, false).await?
+    } else {
+        desktop_plan(tx, app, input).await?
+    };
     let changed = if issued {
         current["targets"]
             .as_array()
@@ -392,7 +548,12 @@ async fn execute(
         .await?;
         tx.commit().await?;
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_secs(if input.action == "start" {
+            input.duration_seconds as u64
+        } else {
+            30
+        });
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let mut db = app.db.lock().await?;

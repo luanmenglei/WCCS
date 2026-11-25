@@ -8,6 +8,8 @@
 
 扩展文件采用 AGPL-3.0-or-later，依赖 DOMjudge 9.0.2 的同类许可组件。升级 DOMjudge 前需要重新核对实体、路由、提交限制与计分接口，并重新执行暂停前后提交时间与计分回归。[DOMjudge 源码与许可](https://github.com/DOMjudge/domjudge/tree/9.0.2)
 
-安装入口为 install.py，要求指定 domserver、源码 webapp 和备份目录，并检查固定版本及原始文件摘要。contest_timing.py 修正原生 CLICS 时长对暂停区间的计算。开始安排通过 hold_start 禁止提前自动开赛，WCCS 核对桌面后调用 start。取消安排保持等待开赛，需新的明确操作。
+安装入口为 install.py，要求指定 domserver、源码 webapp 和备份目录，并检查固定版本及原始文件摘要。contest_timing.py 修正原生 CLICS 时长对暂停区间的计算。开始安排通过 hold_start 禁止提前自动开赛，WCCS 核对桌面后调用 start。新版扩展在预置时持久保存原开赛与提交开关。管理员选择“取消并恢复评测端原设置”后，WCCS 先停止本地调度，再用预置回执的版本与摘要执行 release_start。原定时间已过时，恢复原设置可能立即开赛。遇到裁判修改或旧版预置缺少快照时，页面保留待核对状态。
+
+已有安装升级此修订时，备份当前控制器并核对安装记录中的摘要，只更新 WccsControlController.php。执行 PHP 语法检查、刷新生产缓存并重载 PHP-FPM，在测试比赛确认状态接口返回 hold_restore_supported。首次安装仍用 install.py。
 
 暂停时原生 end_time 为内部占位终点，外部系统应读取 wccs-control 的 phase 和 remaining_seconds。恢复时替换成实际时间。完整实现和测试记录见 [M3～M5 开发记录](../../docs/tasks/m3-m5-implementation.md)。

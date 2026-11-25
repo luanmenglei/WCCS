@@ -78,7 +78,7 @@ export const pages = {
   maintenance: {
     label: "批量维护",
     group: "系统管理",
-    description: "预览固定操作模板、显示设备识别并核对逐机执行结果。",
+    description: "选择在线设备统一关机，执行维护模板并核对逐机回执。",
   },
   operators: {
     label: "操作员",

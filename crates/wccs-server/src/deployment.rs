@@ -4,7 +4,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 
-pub(crate) const SCHEMA_VERSION: i32 = 20;
+pub(crate) const SCHEMA_VERSION: i32 = 21;
 
 /// Database-wide ownership for the lifetime of the serving process. Never reconnect
 /// this session: losing it requires a fresh startup and retirement of the old epoch.

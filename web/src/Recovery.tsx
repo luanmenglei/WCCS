@@ -68,7 +68,16 @@ const previewSchema = z.object({
       name: z.string(),
       identity: z.object({ seat_label: z.string() }),
       reason: z.string().nullable(),
-      recovery: z.object({ manifest: manifestSchema }).nullable(),
+      recovery: z
+        .object({
+          job_id: z.string(),
+          volume: manifestSchema.shape.volume,
+          collected_count: z.number(),
+          file_count: z.number(),
+          directory_count: z.number(),
+          total_bytes: z.string(),
+        })
+        .nullable(),
     }),
   ),
 });
@@ -100,74 +109,15 @@ const details: Record<string, string> = {
   restart_interrupted: "服务重启中断，请重新检查剩余文件",
 };
 type Job = z.infer<typeof jobSchema>;
-function Scope({
-  manifest,
+function JobFiles({
+  job,
+  contestId,
   extensions,
 }: {
-  manifest: z.infer<typeof manifestSchema>;
+  job: Pick<Job, "job_id" | "file_count" | "directory_count" | "total_bytes">;
+  contestId: string;
   extensions: string[];
 }) {
-  const [offset, setOffset] = useState(0);
-  const suffixes = useMemo(
-    () => new Set(extensions.map((ext) => ext.toLowerCase())),
-    [extensions],
-  );
-  function collected(path: string, wanted: Set<string>) {
-    const dot = path.lastIndexOf(".");
-    return dot >= 0 && wanted.has(path.slice(dot + 1).toLowerCase());
-  }
-  const summary = useMemo(() => {
-    let files = 0,
-      bytes = 0;
-    for (const file of manifest.files) {
-      bytes += file.size;
-      if (collected(file.path, suffixes)) files++;
-    }
-    return { files, bytes };
-  }, [manifest.files, suffixes]);
-  return (
-    <div>
-      <code>{manifest.target}</code>
-      <p>
-        {manifest.volume.system ? "系统卷内的指定目录" : "非系统卷"} ·{" "}
-        {manifest.volume.label || "无卷标"} · 序列号 {manifest.volume.serial}
-      </p>
-      <small>{manifest.volume.guid}</small>
-      <p>
-        {manifest.files.length} 个文件，
-        {summary.bytes.toLocaleString()} 字节，{manifest.directories.length}{" "}
-        个目录
-      </p>
-      <details>
-        <summary>查看实际文件清单（归档 {summary.files} 个）</summary>
-        <button disabled={!offset} onClick={() => setOffset(offset - 100)}>
-          上一页
-        </button>
-        <button
-          disabled={
-            offset + 100 >=
-            Math.max(manifest.files.length, manifest.directories.length)
-          }
-          onClick={() => setOffset(offset + 100)}
-        >
-          下一页
-        </button>
-        <ul>
-          {manifest.files.slice(offset, offset + 100).map((file) => (
-            <li key={file.path}>
-              {file.path} · {file.size} 字节 ·{" "}
-              {collected(file.path, suffixes) ? "归档" : "仅清理"}
-            </li>
-          ))}
-          {manifest.directories.slice(offset, offset + 100).map((d) => (
-            <li key={d}>{d}/ · 目录</li>
-          ))}
-        </ul>
-      </details>
-    </div>
-  );
-}
-function JobFiles({ job }: { job: Job }) {
   const [page, setPage] = useState<z.infer<typeof manifestSchema> | null>(null);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -176,7 +126,7 @@ function JobFiles({ job }: { job: Job }) {
     setLoading(true);
     try {
       const data = await api(
-        `recovery/manifest/${encodeURIComponent(job.job_id)}?contest_id=${encodeURIComponent(job.template.options.contest_id)}&offset=${start}`,
+        `recovery/manifest/${encodeURIComponent(job.job_id)}?contest_id=${encodeURIComponent(contestId)}&offset=${start}`,
       );
       setPage(manifestSchema.parse(data));
       setOffset(start);
@@ -207,7 +157,12 @@ function JobFiles({ job }: { job: Job }) {
           <ul>
             {page.files.map((f) => (
               <li key={f.path}>
-                {f.path} · {f.size} 字节
+                {f.path} · {f.size} 字节 ·{" "}
+                {extensions.some((ext) =>
+                  f.path.toLowerCase().endsWith("." + ext.toLowerCase()),
+                )
+                  ? "归档"
+                  : "仅清理"}
               </li>
             ))}
             {page.directories.map((d) => (
@@ -278,8 +233,11 @@ export function Recovery({
     [skip, extensionText],
   );
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [batchFilter, setBatchFilter] = useState("");
-  const [batchInput, setBatchInput] = useState("");
+  const [batchFilter, setBatchFilter] = useState(
+    () =>
+      new URLSearchParams(location.hash.split("?")[1]).get("request_id") ?? "",
+  );
+  const [batchInput, setBatchInput] = useState(batchFilter);
   const [fresh, setFresh] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -401,6 +359,11 @@ export function Recovery({
     <>
       <section className="panel operations-panel">
         <h2>赛后归档与恢复</h2>
+        <p>
+          使用重启复原镜像的机房，收场时可直接
+          <a href="#/maintenance?operation=shutdown">统一关机</a>
+          。以下工具供需要归档或清理文件时使用。
+        </p>
         {batchNote && <p role="status">{batchNote}</p>}
         <p>
           检查 → 归档或明确跳过 → 恢复教学 → 清理 → 重启 →
@@ -646,10 +609,27 @@ export function Recovery({
                     : "可执行"}
                 </h4>
                 {target.recovery && (
-                  <Scope
-                    manifest={target.recovery.manifest}
-                    extensions={extensions}
-                  />
+                  <>
+                    <p>
+                      {options.target} ·{" "}
+                      {target.recovery.volume.system
+                        ? "系统卷内的指定目录"
+                        : "非系统卷"}{" "}
+                      · {target.recovery.volume.label || "无卷标"} · 序列号{" "}
+                      {target.recovery.volume.serial} ·{" "}
+                      {target.recovery.volume.guid}
+                    </p>
+                    <p>
+                      所选扩展名匹配 {target.recovery.collected_count}{" "}
+                      个归档文件。
+                    </p>
+                    <JobFiles
+                      key={target.recovery.job_id}
+                      job={target.recovery}
+                      contestId={contestId}
+                      extensions={extensions}
+                    />
+                  </>
                 )}
               </div>
             ))}
@@ -738,7 +718,13 @@ export function Recovery({
                   : "尚未核对重启后的教学状态。"}
               </p>
             )}
-            {job.file_count !== null && <JobFiles job={job} />}
+            {job.file_count !== null && (
+              <JobFiles
+                job={job}
+                contestId={contestId}
+                extensions={job.template.options.extensions}
+              />
+            )}
             <div className="actions">
               {job.stage === "succeeded" &&
                 job.template.options.action !== "reboot" && (

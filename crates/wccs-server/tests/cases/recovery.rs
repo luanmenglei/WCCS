@@ -134,6 +134,12 @@ async fn recovery_requires_verified_archive_confirmation_and_frozen_target() {
         assert!(preview["targets"][0]["reason"].is_null(), "{preview}");
         input["preview_token"] = preview["preview_token"].clone();
         let receipt = expect_ok(f.admin.post("maintenance/commit", &input).await).await;
+        if action != "inspect" {
+            let reference = &receipt["preview"]["targets"][0]["recovery"];
+            assert_eq!(reference["file_count"], 1);
+            assert!(reference["job_id"].is_string());
+            assert!(reference.get("manifest").is_none());
+        }
         assert_eq!(
             expect_ok(f.admin.post("maintenance/commit", &input).await).await,
             receipt
@@ -333,5 +339,118 @@ async fn recovery_requires_verified_archive_confirmation_and_frozen_target() {
         .get::<_, Option<i64>>(0)
         .is_some()
     );
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn recovery_batch_approval_size_is_independent_of_file_lists() {
+    let f = Fixture::new().await;
+    let mut ws = socket_for(&f.admin, &f.credential, "device-1").await;
+    poll(&mut ws, &observation()).await.unwrap();
+    let targets: Vec<_> = (1..=300).map(|n| format!("device-{n}")).collect();
+    let mut options = json!({"action":"inspect","contest_id":"contest","scope":"workspace","target":"C:\\Contest","extensions":["cpp"],"skip_reason":"","previous_request":null,"confirm_session_end":false});
+    let cmd = json!({"instance_id":"host-one","generation":1,"template":{"operation":"recovery","options":options}});
+    let hash = wccs_protocol::bytes_digest(b"");
+    let files: Vec<_> = (0..1000)
+        .map(|n| json!({"path":format!("{n}.cpp"),"size":0,"hashes":[],"sha256":hash}))
+        .collect();
+    let result = json!({"stage":"succeeded","recovery":{"target":"C:\\Contest","volume":{"guid":"test","serial":"1","label":"","system":true},"directories":[],"files":files}});
+    f.db.execute("INSERT INTO maintenance_jobs(id,request_id,device_id,command,command_digest,actor_id,actor_version,room_ids,created_at,expires_at,stage,updated_at,result)
+      SELECT 'inspect-'||device,'previous',device,$2,'synthetic',o.id,1,ARRAY['room'],1,10,'succeeded',1,$3 FROM unnest($1::text[]) device CROSS JOIN operators o WHERE o.role='admin'", &[&targets,&cmd,&result]).await.unwrap();
+    f.db.execute("INSERT INTO maintenance_devices SELECT device,'host-one','session-one','local_test',$2,$3 FROM unnest($1::text[]) device", &[&targets,&json!(["recovery-v1"]),&wccs_protocol::now()]).await.unwrap();
+    f.db.execute(
+        "UPDATE control_devices SET last_seen=$1",
+        &[&wccs_protocol::now()],
+    )
+    .await
+    .unwrap();
+    f.db.execute("INSERT INTO events(source,source_id,category,occurred_at,operation,device_ids,room_ids,outcome,detail)
+        SELECT 'maintenance','large-'||n,'task_result',100,'maintenance_result',ARRAY['device-1'],ARRAY['room'],'succeeded',$1 FROM generate_series(1,50)n", &[&result]).await.unwrap();
+    let event_bytes = f
+        .admin
+        .get("events?operation=maintenance_result")
+        .await
+        .bytes()
+        .await
+        .unwrap();
+    let events: Value = serde_json::from_slice(&event_bytes).unwrap();
+    assert_eq!(events["items"].as_array().unwrap().len(), 50);
+    assert!(event_bytes.len() < 100_000);
+    options["action"] = json!("archive");
+    options["previous_request"] = json!("previous");
+    let mut request = json!({"request_id":token(),"template_version":1,"targets":targets,"template":{"operation":"recovery","options":options}});
+    let started = Instant::now();
+    let approval = async {
+        let preview = expect_ok(f.admin.post("maintenance/preview", &request).await).await;
+        request["preview_token"] = preview["preview_token"].clone();
+        let commit = expect_ok(f.admin.post("maintenance/commit", &request).await).await;
+        (preview, commit)
+    };
+    let heartbeat = async {
+        let mut maximum = Duration::ZERO;
+        for _ in 0..3 {
+            let sample = Instant::now();
+            poll(&mut ws, &observation()).await.unwrap();
+            maximum = maximum.max(sample.elapsed());
+        }
+        maximum
+    };
+    let ((preview, commit), heartbeat_max) = tokio::join!(approval, heartbeat);
+    println!("concurrent heartbeat max={heartbeat_max:?}");
+    assert_eq!(commit["jobs"].as_array().unwrap().len(), 300);
+    assert!(preview.to_string().len() < 500_000 && commit.to_string().len() < 550_000);
+    println!(
+        "300 devices x 1000 files: preview={} commit={} events={} bytes elapsed={:?}",
+        preview.to_string().len(),
+        commit.to_string().len(),
+        event_bytes.len(),
+        started.elapsed()
+    );
+    // Read a mixed archive through a bounded channel while fetching an independent preview.
+    let block = vec![42u8; wccs_protocol::distribution::CHUNK_SIZE];
+    let large = block.repeat(16);
+    let mut manifest = result["recovery"].clone();
+    manifest["files"].as_array_mut().unwrap().push(json!({"path":"large.cpp","size":large.len(),
+        "sha256":wccs_protocol::bytes_digest(&large),"hashes":vec![wccs_protocol::bytes_digest(&block);16]}));
+    let snapshot =
+        json!({"inspection_job":"inspect-device-1","archive_job":null,"manifest":manifest});
+    let archive = "inspect-device-1";
+    f.db.execute(
+        "INSERT INTO recovery_archives VALUES($1,$2,$3,true)",
+        &[&archive, &snapshot, &options],
+    )
+    .await
+    .unwrap();
+    f.db.execute(
+        "INSERT INTO recovery_chunks SELECT $1,1000,n,$2 FROM generate_series(0,15)n",
+        &[&archive, &block],
+    )
+    .await
+    .unwrap();
+    let start = Instant::now();
+    let mut response = f.admin.get(&format!("recovery/archives/{archive}")).await;
+    assert_eq!(response.status(), 200);
+    let mut bytes = response.chunk().await.unwrap().unwrap().to_vec();
+    let first = start.elapsed();
+    let preview_started = Instant::now();
+    assert_eq!(
+        f.admin.post("maintenance/preview", &request).await.status(),
+        200
+    );
+    let preview_elapsed = preview_started.elapsed();
+    while let Some(chunk) = response.chunk().await.unwrap() {
+        bytes.extend_from_slice(&chunk);
+    }
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(zip.len(), 1002);
+    let mut restored = Vec::new();
+    std::io::Read::read_to_end(&mut zip.by_name("files/large.cpp").unwrap(), &mut restored)
+        .unwrap();
+    assert_eq!(restored, large);
+    println!(
+        "1000 empty files + 4 MiB archive: first byte={first:?} simultaneous preview={preview_elapsed:?}"
+    );
+    ws.close(None).await.unwrap();
     f.finish().await;
 }

@@ -193,6 +193,24 @@ fn serve(pipe: HANDLE, shared: &Mutex<Option<String>>, stop: &AtomicBool) -> Res
         result
     }
 }
+pub fn shutdown_machine() -> Result<()> {
+    if !wccs_session::ipc::is_system()? {
+        return Err("shutdown_requires_system".into());
+    }
+    let _privilege = crate::waiting_policy::Privilege::enable(SE_SHUTDOWN_NAME)?;
+    // SAFETY: local machine, static terminated message, no borrowed output or forced app closure.
+    unsafe {
+        InitiateSystemShutdownExW(
+            PCWSTR::null(),
+            w!("机房统一关机，请保存工作"),
+            30,
+            false,
+            false,
+            SHTDN_REASON_FLAG_PLANNED | SHTDN_REASON_MAJOR_APPLICATION,
+        )?;
+    }
+    Ok(())
+}
 pub fn request(action: &str) -> Result<()> {
     let code = match action {
         "shutdown" => 1,

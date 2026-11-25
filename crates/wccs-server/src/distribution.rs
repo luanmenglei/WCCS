@@ -377,19 +377,64 @@ pub async fn download(
         tx.commit().await?;
         (bytes, limit, device)
     };
-    let duration = std::time::Duration::from_secs_f64(bytes.0.len() as f64 / bytes.1 as f64);
+    throttle(&app, bytes.2, bytes.0.len(), bytes.1).await?;
+    Ok(([("Content-Type", "application/octet-stream")], bytes.0))
+}
+
+async fn throttle(app: &App, device: String, size: usize, limit: i64) -> ApiResult<()> {
+    let duration = std::time::Duration::from_secs_f64(size as f64 / limit as f64);
     {
         let mut limits = app.download_limits.lock().await;
         let now = std::time::Instant::now();
         limits.retain(|_, expires| *expires > now);
-        if limits.contains_key(&bytes.2) {
+        if limits.contains_key(&device) {
             return Err(ApiError::new(429, "此设备达到下载限速，请续传重试"));
         }
-        limits.insert(bytes.2, now + duration);
+        limits.insert(device, now + duration);
     }
     tokio::time::sleep(duration).await;
-    Ok(([("Content-Type", "application/octet-stream")], bytes.0))
+    Ok(())
 }
+pub async fn desktop_chunk(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path((job, artifact, index)): Path<(String, String, i32)>,
+) -> ApiResult<impl IntoResponse> {
+    let _slot = app
+        .download_slots
+        .try_acquire()
+        .map_err(|_| ApiError::new(429, "客户端下载繁忙"))?;
+    let (device, bytes) = {
+        let mut db = app.db.lock().await?;
+        let tx = db.transaction().await?;
+        let device = auth::device(&tx, &headers).await?;
+        let denied = || ApiError::forbidden("开赛桌面下载授权已结束");
+        let control = tx.query_opt("SELECT c.instance_id,c.session_key FROM control_devices c JOIN waiting_commands w ON w.device_id=c.device_id WHERE c.device_id=$1 AND c.connected AND c.server_epoch=$2 AND c.last_seen>$3::bigint-15 AND w.id=$4 AND w.stage IN ('accepted','executing')", &[&device,&app.server_epoch,&now(),&job]).await?.ok_or_else(denied)?;
+        let current = crate::waiting::current(&tx, &device, control.get(0), control.get(1))
+            .await?
+            .ok_or_else(denied)?;
+        if current.command_id != job
+            || !current
+                .desktop_files
+                .is_some_and(|files| files.materials.iter().any(|f| f.id == artifact))
+        {
+            return Err(denied());
+        }
+        let bytes: Vec<u8> = tx
+            .query_opt(
+                "SELECT content FROM distribution_chunks WHERE artifact_id=$1 AND chunk_index=$2",
+                &[&artifact, &index],
+            )
+            .await?
+            .ok_or_else(|| ApiError::bad("资料分块不存在"))?
+            .get(0);
+        tx.commit().await?;
+        (device, bytes)
+    };
+    throttle(&app, device, bytes.len(), 4 * 1024 * 1024).await?;
+    Ok(([("Content-Type", "application/octet-stream")], bytes))
+}
+
 pub async fn progress(
     State(app): State<App>,
     headers: HeaderMap,

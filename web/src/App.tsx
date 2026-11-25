@@ -24,8 +24,14 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : "操作失败，请重试";
 }
 
+function linkedContestId() {
+  return (
+    new URLSearchParams(location.hash.split("?")[1]).get("contest_id") ?? ""
+  );
+}
+
 export function App() {
-  const [contestId, setContestId] = useState("");
+  const [requestedContest, setContestId] = useState(linkedContestId);
   const [page, setPage] = useState(() => pageFromHash(location.hash));
   const [seatSelection, setSeatSelection] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -35,9 +41,7 @@ export function App() {
   useEffect(() => {
     function navigate() {
       setPage(pageFromHash(location.hash));
-      const linkedContest = new URLSearchParams(
-        location.hash.split("?")[1],
-      ).get("contest_id");
+      const linkedContest = linkedContestId();
       if (linkedContest) setContestId(linkedContest);
       setMenuOpen(false);
       window.scrollTo({ top: 0 });
@@ -48,6 +52,11 @@ export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [checking, setChecking] = useState(true);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const contestId = snapshot?.roster.contests.some(
+    (c) => c.id === requestedContest,
+  )
+    ? requestedContest
+    : "";
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const [connectionError, setConnectionError] = useState("");
@@ -234,7 +243,7 @@ export function App() {
       advanceSession(authenticated.csrf);
       requestIds.current.clear();
       setSeatSelection([]);
-      setContestId("");
+      setContestId(linkedContestId());
       setMenuOpen(false);
       setNotice("");
       setConnectionError("");
@@ -430,6 +439,17 @@ export function App() {
                 onChange={(event) => {
                   setSeatSelection([]);
                   setContestId(event.target.value);
+                  const [route, search] = location.hash.split("?");
+                  const params = new URLSearchParams(search);
+                  if (event.target.value)
+                    params.set("contest_id", event.target.value);
+                  else params.delete("contest_id");
+                  history.replaceState(
+                    null,
+                    "",
+                    (route || "#/") +
+                      (params.size ? "?" + params.toString() : ""),
+                  );
                 }}
               >
                 <option value="">请选择比赛</option>

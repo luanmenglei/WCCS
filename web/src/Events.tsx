@@ -406,6 +406,15 @@ export function Events({
                     : "查看等待控制"}
                 </a>
               )}
+            {detail.operation === "maintenance_result" &&
+              detail.contest_id &&
+              detail.request_id && (
+                <a
+                  href={`#/recovery?contest_id=${encodeURIComponent(detail.contest_id)}&request_id=${encodeURIComponent(detail.request_id)}`}
+                >
+                  查看该批次的逐机结果与文件清单
+                </a>
+              )}
             {detail.operation === "publish" && (
               <a href="#/configuration">查看当前工具配置</a>
             )}

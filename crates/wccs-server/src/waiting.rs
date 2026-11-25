@@ -380,6 +380,8 @@ pub(crate) async fn issue(
     for (target, sequence) in targets.into_iter().zip(sequences) {
         let device_id = target["device_id"].as_str().unwrap();
         let command = Command {
+            desktop_files: serde_json::from_value(planned["desktop_files"].clone())
+                .map_err(|_| ApiError::internal())?,
             protocol_version: CONTROL_VERSION,
             command_id: token(),
             request_id: input.request_id.clone(),
@@ -575,8 +577,10 @@ pub async fn current(
             valid &= version == login.tool_version;
         }
     }
-    if ["enter", "prepare_login"].contains(&command.action.as_str()) {
-        if command.action == "enter" {
+    if command.desktop_files.is_some()
+        || ["enter", "prepare_login"].contains(&command.action.as_str())
+    {
+        if command.desktop_files.is_some() || command.action == "enter" {
             valid &= session == Some(command.session_key.as_str());
         }
         let unchanged: bool = tx
@@ -584,9 +588,9 @@ pub async fn current(
                 "SELECT EXISTS(SELECT 1
             FROM contests c,rooms r,assignments a
             WHERE c.id=$1
-            AND c.version=$2
+            AND ($7 OR c.version=$2)
             AND r.id=$3
-            AND r.version=$4
+            AND ($7 OR r.version=$4)
             AND a.contest_id=c.id
             AND a.participant_id=$5
             AND a.seat_id=$6)",
@@ -597,6 +601,7 @@ pub async fn current(
                     &command.identity.room_version,
                     &command.identity.participant_id,
                     &command.identity.seat_id,
+                    &(command.expires_at == wccs_protocol::control::UNTIL_RESUMED),
                 ],
             )
             .await?

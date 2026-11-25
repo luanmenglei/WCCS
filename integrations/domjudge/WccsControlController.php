@@ -77,9 +77,13 @@ class WccsControlController extends AbstractController
             : (float)$contest->getEndtime() - $now;
         $phase = $paused ? 'paused' : (!$contest->getStarttimeEnabled() || $now < $contest->getStarttime(false)
             ? 'scheduled' : ($remaining <= 0 ? 'ended' : 'running'));
-        return ['extension_version' => 1, 'contest_id' => $contest->getExternalid(),
+        return ['extension_version' => 1, 'hold_restore_supported' => true, 'contest_id' => $contest->getExternalid(),
             'revision' => (int)($row['revision'] ?? 0), 'phase' => $phase,
             'paused' => $paused, 'server_time' => $now,
+            'start_enabled' => $contest->getStarttimeEnabled(),
+            'held_settings' => ($row['phase'] ?? '') === 'held'
+                ? ['start_enabled' => $checkpoint['start_enabled'], 'allow_submit' => $checkpoint['allow_submit']]
+                : null,
             'remaining_seconds' => max(0, $remaining),
             'elapsed_seconds' => max(0, $contest->getContestTime($now)),
             'allow_submit' => $contest->getAllowSubmit(),
@@ -134,7 +138,7 @@ class WccsControlController extends AbstractController
         $input = $request->toArray();
         if (array_diff(array_keys($input), ['request_id', 'action', 'revision', 'snapshot_hash']) !== []
             || !preg_match('/^[A-Za-z0-9_-]{1,80}$/D', $input['request_id'] ?? '')
-            || !in_array($input['action'] ?? '', ['hold_start', 'start', 'pause', 'resume', 'end'], true)
+            || !in_array($input['action'] ?? '', ['hold_start', 'release_start', 'start', 'pause', 'resume', 'end'], true)
             || !is_int($input['revision'] ?? null)
             || !preg_match('/^[a-f0-9]{64}$/D', $input['snapshot_hash'] ?? '')) {
             throw new BadRequestHttpException('invalid_control_request');
@@ -146,6 +150,7 @@ class WccsControlController extends AbstractController
             $db->executeStatement('INSERT IGNORE INTO wccs_contest_control(cid,revision,phase,checkpoint) VALUES(?,0,?,?)',
                 [$contest->getCid(), 'running', '{}']);
             $db->fetchOne('SELECT cid FROM wccs_contest_control WHERE cid=? FOR UPDATE', [$contest->getCid()]);
+            $db->fetchOne('SELECT cid FROM contest WHERE cid=? FOR UPDATE', [$contest->getCid()]);
             $fingerprint = hash('sha256', json_encode([$contestId, $input], JSON_THROW_ON_ERROR));
             $previous = $db->fetchAssociative('SELECT fingerprint,response FROM wccs_control_requests WHERE request_id=?', [$input['request_id']]);
             if ($previous !== false) {
@@ -164,9 +169,21 @@ class WccsControlController extends AbstractController
             $now = floor(Utils::now() * 1000) / 1000;
             $phase = $before['phase'];
             if ($input['action'] === 'hold_start' && $phase === 'scheduled') {
+                if ($row['phase'] === 'held') {
+                    throw new ConflictHttpException('another_start_already_held');
+                }
+                $db->executeStatement('UPDATE wccs_contest_control SET phase=?,checkpoint=? WHERE cid=?',
+                    ['held', json_encode($this->snapshot($contest), JSON_THROW_ON_ERROR), $contest->getCid()]);
                 $contest->setStarttimeEnabled(false);
                 $contest->setAllowSubmit(false);
+            } elseif ($input['action'] === 'release_start' && $row['phase'] === 'held') {
+                $checkpoint = json_decode($row['checkpoint'], true, flags: JSON_THROW_ON_ERROR);
+                $contest->setStarttimeEnabled($checkpoint['start_enabled']);
+                $contest->setAllowSubmit($checkpoint['allow_submit']);
+                $db->executeStatement('UPDATE wccs_contest_control SET phase=?,checkpoint=? WHERE cid=?',
+                    ['running', '{}', $contest->getCid()]);
             } elseif ($input['action'] === 'start' && $phase === 'scheduled') {
+                $db->executeStatement('UPDATE wccs_contest_control SET phase=? WHERE cid=?', ['running', $contest->getCid()]);
                 if (!$contest->getRemovedIntervals()->isEmpty()) {
                     throw new ConflictHttpException('scheduled_contest_has_removed_intervals');
                 }

@@ -13,9 +13,11 @@ use wccs_protocol::{
 
 pub async fn register(
     State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(input): Json<Registration>,
 ) -> ApiResult<Json<Value>> {
-    auth::rate_limit(&app, "registration", 600).await?;
+    auth::rate_limit(&app, "registration", peer, &headers, 600, None).await?;
     if input.protocol_version != PROTOCOL_VERSION
         || !valid_id(&input.device_id)
         || input.enrollment_token.len() != 64

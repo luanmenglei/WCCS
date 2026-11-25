@@ -15,13 +15,27 @@ use wccs_protocol::{
     recovery::{Options, Snapshot},
 };
 
-pub(crate) async fn plan(
+pub(crate) struct Previous {
+    instance: String,
+    generation: i64,
+    reference: Value,
+}
+
+impl Previous {
+    pub(crate) fn reference(&self, instance: Option<&str>, generation: i64) -> ApiResult<&Value> {
+        if Some(self.instance.as_str()) != instance || self.generation != generation {
+            return Err(ApiError::conflict("设备代次或实例已变化，请重新检查"));
+        }
+        Ok(&self.reference)
+    }
+}
+
+pub(crate) async fn references(
     tx: &Transaction<'_>,
     options: &Options,
-    device: &str,
-    instance: &str,
-    generation: i64,
-) -> ApiResult<Option<Snapshot>> {
+    devices: &[String],
+    actor: &auth::Identity,
+) -> ApiResult<std::collections::HashMap<String, Previous>> {
     if !tx
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM contests WHERE id=$1)",
@@ -32,14 +46,9 @@ pub(crate) async fn plan(
     {
         return Err(ApiError::bad("请选择已创建的比赛"));
     }
+    let mut references = std::collections::HashMap::new();
     let Some(previous) = &options.previous_request else {
-        return Ok(None);
-    };
-    let row=tx.query_opt("SELECT command,result FROM maintenance_jobs WHERE request_id=$1 AND device_id=$2 AND stage='succeeded'", &[previous,&device]).await?
-        .ok_or_else(||ApiError::conflict("前一步尚未成功，请核对逐机结果"))?;
-    let command: Command = serde_json::from_value(row.get(0)).map_err(|_| ApiError::internal())?;
-    let wccs_protocol::maintenance::Template::Recovery { options: old } = &command.template else {
-        return Err(ApiError::bad("引用任务并非赛后恢复任务"));
+        return Ok(references);
     };
     let expected = match options.action.as_str() {
         "archive" => "inspect",
@@ -47,58 +56,86 @@ pub(crate) async fn plan(
         "reboot" => "clean",
         _ => return Err(ApiError::bad("恢复步骤无效")),
     };
-    if old.action != expected
-        || !options.same_scope(old)
-        || command.instance_id != instance
-        || command.generation != generation
-    {
+    let rows = tx.query("SELECT j.device_id,j.id,j.recovery_template->'options' AS options,j.recovery_instance,j.recovery_generation,
+        COALESCE(j.inspection_source,j.id) AS inspection_job,
+        CASE WHEN $3='clean' THEN j.id ELSE j.archive_source END AS archive_job,
+        j.recovery_files,j.recovery_directories,j.recovery_bytes::text,j.recovery_volume,j.recovery_collected,a.verified
+        FROM maintenance_jobs j LEFT JOIN recovery_archives a ON a.job_id=CASE WHEN $3='clean' THEN j.id ELSE j.archive_source END
+        WHERE j.request_id=$1 AND j.device_id=ANY($2) AND j.stage='succeeded' AND j.recovery_files IS NOT NULL AND ($4 OR (cardinality(j.room_ids)>0 AND j.room_ids<@$5))",
+        &[previous,&devices,&options.action,&actor.all_rooms,&actor.room_ids]).await?;
+    if rows.len() != devices.len() {
         return Err(ApiError::conflict(
-            "恢复范围、设备实例或前一步已变化，请重新检查",
+            "前一步尚未成功或缺少清单，请核对逐机结果",
         ));
     }
-    let result: wccs_protocol::maintenance::Result =
-        serde_json::from_value(row.get(1)).map_err(|_| ApiError::internal())?;
-    let manifest = result
-        .recovery
-        .ok_or_else(|| ApiError::conflict("前一步缺少文件清单"))?;
-    if !manifest.valid_for(options)
-        || manifest.target != options.target
-        || (options.scope == "volume" && manifest.volume.system)
-    {
-        return Err(ApiError::conflict("清理范围核验失败"));
+    for row in rows {
+        let old: Options =
+            serde_json::from_value(row.get("options")).map_err(|_| ApiError::internal())?;
+        if old.action != expected || !options.same_scope(&old) {
+            return Err(ApiError::conflict("恢复范围或前一步已变化，请重新检查"));
+        }
+        let archive_job: Option<String> = row.get("archive_job");
+        if archive_job.is_some() && row.get::<_, Option<bool>>("verified") != Some(true) {
+            return Err(ApiError::conflict("归档或跳过回执尚未由服务器核验"));
+        }
+        let reference = json!({"job_id":row.get::<_,String>("id"),"inspection_job":row.get::<_,String>("inspection_job"),
+            "archive_job":archive_job,"volume":row.try_get::<_,Value>("recovery_volume").map_err(|_|ApiError::conflict("前一步缺少卷身份"))?,"collected_count":row.get::<_,i32>("recovery_collected"),"file_count":row.get::<_,i32>("recovery_files"),"directory_count":row.get::<_,i32>("recovery_directories"),"total_bytes":row.get::<_,String>("recovery_bytes")});
+        references.insert(
+            row.get("device_id"),
+            Previous {
+                instance: row
+                    .try_get("recovery_instance")
+                    .map_err(|_| ApiError::conflict("前一步缺少设备实例"))?,
+                generation: row
+                    .try_get("recovery_generation")
+                    .map_err(|_| ApiError::conflict("前一步缺少设备代次"))?,
+                reference,
+            },
+        );
     }
-    let archive_job = if options.action == "clean" {
-        Some(command.job_id.clone())
-    } else {
-        command
-            .recovery
-            .as_ref()
-            .and_then(|s| s.archive_job.clone())
+    Ok(references)
+}
+
+// Load one immutable predecessor off the heartbeat connection. Delivery rechecks the lease afterwards.
+pub(crate) async fn prepare_delivery(app: &App, job: &str) -> ApiResult<()> {
+    let mut db = app.archive_db.lock().await?;
+    let tx = db.transaction().await?;
+    let Some(row) = tx
+        .query_opt(
+            "SELECT j.command,j.recovery_reference,p.result->'recovery'
+        FROM maintenance_jobs j JOIN maintenance_jobs p ON p.id=j.recovery_reference->>'job_id'
+        WHERE j.id=$1 AND j.command_digest='' AND NOT j.cancel_requested AND p.stage='succeeded'
+        FOR UPDATE OF j",
+            &[&job],
+        )
+        .await?
+    else {
+        return Ok(());
     };
-    if let Some(id) = &archive_job
-        && !tx
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM recovery_archives WHERE job_id=$1 AND verified)",
-                &[id],
-            )
-            .await?
-            .get::<_, bool>(0)
-    {
-        return Err(ApiError::conflict("归档或跳过回执尚未由服务器核验"));
+    let mut command: Value = row.get(0);
+    let reference: Value = row.get(1);
+    command["recovery"] = json!({"inspection_job":reference["inspection_job"],"archive_job":reference["archive_job"],"manifest":row.get::<_,Value>(2)});
+    let typed: Command = serde_json::from_value(command).map_err(|_| ApiError::internal())?;
+    let value = json!(typed);
+    tx.execute(
+        "UPDATE maintenance_jobs SET delivery_command=$2,command_digest=$3 WHERE id=$1",
+        &[&job, &value, &wccs_protocol::digest(&value.to_string())],
+    )
+    .await?;
+    if value["template"]["options"]["action"] == "archive" {
+        tx.execute(
+            "INSERT INTO recovery_archives(job_id,snapshot,options) VALUES($1,$2,$3)",
+            &[&job, &value["recovery"], &value["template"]["options"]],
+        )
+        .await?;
     }
-    Ok(Some(Snapshot {
-        inspection_job: command
-            .recovery
-            .map(|s| s.inspection_job)
-            .unwrap_or(command.job_id),
-        archive_job,
-        manifest,
-    }))
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn active(tx: &Transaction<'_>, headers: &HeaderMap, job: &str) -> ApiResult<()> {
     let device = auth::device(tx, headers).await?;
-    tx.query_opt("SELECT 1 FROM recovery_archives a JOIN maintenance_jobs j ON j.id=a.job_id JOIN devices d ON d.id=j.device_id JOIN operators o ON o.id=j.actor_id JOIN control_devices c ON c.device_id=d.id WHERE a.job_id=$1 AND d.id=$2 AND d.lifecycle='enabled' AND (j.command->>'generation')::bigint=d.enrollment_generation AND (j.command->>'device_version')::bigint=d.lifecycle_version AND (j.command->>'address_version')::bigint=d.address_version AND j.stage IN ('accepted','executing') AND NOT j.cancel_requested AND j.expires_at>$3 AND o.enabled AND o.version=j.actor_version AND o.role<>'viewer' AND (o.all_rooms OR (cardinality(j.room_ids)>0 AND j.room_ids<@o.room_ids AND device_room_scope(d.id)<@o.room_ids)) AND c.connected AND c.last_seen>$3-15 AND c.instance_id=j.command->>'instance_id' AND c.session_key=j.command->>'session_key'", &[&job,&device,&now()]).await?
+    tx.query_opt("SELECT 1 FROM recovery_archives a JOIN maintenance_jobs j ON j.id=a.job_id JOIN devices d ON d.id=j.device_id JOIN operators o ON o.id=j.actor_id JOIN control_devices c ON c.device_id=d.id WHERE a.job_id=$1 AND d.id=$2 AND d.lifecycle='enabled' AND (j.command->>'generation')::bigint=d.enrollment_generation AND (j.command->>'device_version')::bigint=d.lifecycle_version AND (j.command->>'address_version')::bigint=d.address_version AND j.stage IN ('accepted','executing') AND NOT j.cancel_requested AND j.expires_at>$3 AND o.enabled AND o.version=j.actor_version AND o.role<>'viewer' AND (o.all_rooms OR (cardinality(j.room_ids)>0 AND j.room_ids<@o.room_ids AND device_room_scope(d.id)<@o.room_ids)) AND j.grant_connection=c.connection_id AND j.grant_epoch=c.server_epoch AND c.connected AND c.last_seen>$3-15 AND c.instance_id=j.command->>'instance_id' AND c.session_key=j.command->>'session_key'", &[&job,&device,&now()]).await?
         .ok_or_else(||ApiError::conflict("归档任务授权已结束，请重新检查并重试"))?;
     Ok(())
 }
@@ -211,46 +248,31 @@ pub async fn download(
     Path(job): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let session = auth::admin(&app, &headers, false).await?;
-    let _slot = app
+    let slot = app
         .archive_slots
-        .try_acquire()
+        .clone()
+        .try_acquire_owned()
         .map_err(|_| ApiError::new(429, "归档下载繁忙，请稍后重试"))?;
-    let mut db = app.preview_db.lock().await?;
-    let tx = db.transaction().await?;
-    let actor = auth::authorize_snapshot(&tx, &session, auth::Permission::Read).await?;
-    let row=tx.query_opt("SELECT a.snapshot,a.options,j.room_ids FROM recovery_archives a JOIN maintenance_jobs j ON j.id=a.job_id WHERE a.job_id=$1 AND a.verified",&[&job]).await?.ok_or_else(||ApiError::new(404,"归档尚未核验"))?;
-    actor.rooms(row.get::<_, Option<Vec<String>>>(2).as_deref())?;
-    let snapshot: Snapshot =
-        serde_json::from_value(row.get(0)).map_err(|_| ApiError::internal())?;
-    let options: Options = serde_json::from_value(row.get(1)).map_err(|_| ApiError::internal())?;
-    use std::io::{Cursor, Write};
-    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let file_options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    zip.start_file("wccs-manifest.json", file_options)
-        .map_err(|_| ApiError::internal())?;
-    zip.write_all(
-        json!({"snapshot":snapshot,"policy":options})
-            .to_string()
-            .as_bytes(),
-    )
-    .map_err(|_| ApiError::internal())?;
-    for (index, file) in snapshot
-        .manifest
-        .files
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| options.collects(&f.path))
+    let database = crate::database::Database::new(&app.config.database_url)?;
     {
-        zip.start_file(format!("files/{}", file.path), file_options)
-            .map_err(|_| ApiError::internal())?;
-        let rows=tx.query("SELECT content FROM recovery_chunks WHERE job_id=$1 AND file_index=$2 ORDER BY chunk_index",&[&job,&(index as i32)]).await?;
-        for row in rows {
-            zip.write_all(&row.get::<_, Vec<u8>>(0))
-                .map_err(|_| ApiError::internal())?;
-        }
+        let mut db = database.lock().await?;
+        let tx = db.transaction().await?;
+        let actor = auth::authorize_snapshot(&tx, &session, auth::Permission::Read).await?;
+        let row=tx.query_opt("SELECT j.room_ids FROM recovery_archives a JOIN maintenance_jobs j ON j.id=a.job_id WHERE a.job_id=$1 AND a.verified",&[&job]).await?.ok_or_else(||ApiError::new(404,"归档尚未核验"))?;
+        actor.rooms(row.get::<_, Option<Vec<String>>>(0).as_deref())?;
     }
-    let bytes = zip.finish().map_err(|_| ApiError::internal())?.into_inner();
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let archive_id = job.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = slot;
+        if write_archive(database, &archive_id, sender.clone()).is_err() {
+            let _ = sender.blocking_send(Err(std::io::Error::other("归档传输未完成")));
+        }
+    });
+    let stream = futures_util::stream::unfold(receiver, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let bytes = axum::body::Body::from_stream(stream);
     Ok((
         [
             ("content-type", "application/zip".to_string()),
@@ -261,6 +283,89 @@ pub async fn download(
         ],
         bytes,
     ))
+}
+
+type ArchiveSender = tokio::sync::mpsc::Sender<std::io::Result<Bytes>>;
+
+struct ArchiveOutput(ArchiveSender);
+impl std::io::Write for ArchiveOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let size = bytes.len().min(64 * 1024);
+        self.0
+            .blocking_send(Ok(Bytes::copy_from_slice(&bytes[..size])))
+            .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+        Ok(size)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_archive(
+    database: crate::database::Database,
+    job: &str,
+    sender: ArchiveSender,
+) -> ApiResult<()> {
+    use std::io::{BufWriter, Write};
+    let runtime = tokio::runtime::Handle::current();
+    let mut db = runtime.block_on(database.lock())?;
+    let tx = runtime.block_on(db.transaction())?;
+    let row = runtime.block_on(tx.query_one(
+        "SELECT snapshot,options FROM recovery_archives WHERE job_id=$1 AND verified",
+        &[&job],
+    ))?;
+    let snapshot: Snapshot =
+        serde_json::from_value(row.get(0)).map_err(|_| ApiError::internal())?;
+    let policy: Options = serde_json::from_value(row.get(1)).map_err(|_| ApiError::internal())?;
+    let file_options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut sink = BufWriter::with_capacity(64 * 1024, ArchiveOutput(sender));
+    let mut zip = zip::ZipWriter::new_stream(&mut sink);
+    zip.start_file("wccs-manifest.json", file_options)
+        .map_err(|_| ApiError::internal())?;
+    #[derive(serde::Serialize)]
+    struct ArchiveManifest<'a> {
+        snapshot: &'a Snapshot,
+        policy: &'a Options,
+    }
+    serde_json::to_writer(
+        &mut zip,
+        &ArchiveManifest {
+            snapshot: &snapshot,
+            policy: &policy,
+        },
+    )
+    .map_err(|_| ApiError::internal())?;
+    let statement = runtime.block_on(tx.prepare("SELECT file_index,chunk_index,content FROM recovery_chunks WHERE job_id=$1 ORDER BY file_index,chunk_index"))?;
+    let portal = runtime.block_on(tx.bind(&statement, &[&job]))?;
+    let mut rows = Vec::new().into_iter();
+    for (index, file) in snapshot
+        .manifest
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| policy.collects(&f.path))
+    {
+        zip.start_file(format!("files/{}", file.path), file_options)
+            .map_err(|_| ApiError::internal())?;
+        for chunk in 0..file.hashes.len() {
+            if rows.len() == 0 {
+                rows = runtime.block_on(tx.query_portal(&portal, 4))?.into_iter();
+            }
+            let row = rows.next().ok_or_else(ApiError::internal)?;
+            let bytes: &[u8] = row.get(2);
+            if row.get::<_, i32>(0) != index as i32
+                || row.get::<_, i32>(1) != chunk as i32
+                || file.chunk_length(chunk) != Some(bytes.len())
+            {
+                return Err(ApiError::internal());
+            }
+            zip.write_all(bytes).map_err(|_| ApiError::internal())?;
+        }
+    }
+    zip.finish().map_err(|_| ApiError::internal())?;
+    sink.flush().map_err(|_| ApiError::internal())?;
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]

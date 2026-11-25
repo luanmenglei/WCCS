@@ -26,7 +26,47 @@ pub struct WaitingIdentity {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct DesktopFiles {
+    pub keep: Vec<String>,
+    pub materials: Vec<DesktopMaterial>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopMaterial {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    pub chunks_digest: String,
+}
+
+impl DesktopFiles {
+    pub fn valid(&self) -> bool {
+        let mut names = std::collections::HashSet::new();
+        self.keep.len() + self.materials.len() <= 64
+            && self
+                .keep
+                .iter()
+                .chain(self.materials.iter().map(|f| &f.name))
+                .all(|name| {
+                    crate::distribution::filename(name)
+                        && !name.eq_ignore_ascii_case("desktop.ini")
+                        && names.insert(name.to_lowercase())
+                })
+            && self.materials.iter().all(|f| {
+                crate::valid_id(&f.id)
+                    && (1..=crate::distribution::MAX_SIZE).contains(&f.size)
+                    && f.chunks_digest.len() == 64
+                    && f.chunks_digest.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Command {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_files: Option<DesktopFiles>,
     pub protocol_version: u32,
     pub command_id: String,
     pub request_id: String,
@@ -72,6 +112,8 @@ impl Actual {
             && ["desktop", "waiting", "unknown", "failed", "no_session"]
                 .contains(&self.state.as_str())
             && [
+                "contest_desktop_ready",
+                "contest_desktop_failed",
                 "teaching_standby",
                 "ui_observed",
                 "waiting_focus_lost",

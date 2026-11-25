@@ -183,6 +183,11 @@ fn poll(
         client
             .post(format!("{server}/api/device/maintenance/poll"))
             .header("x-wccs-volume-policy", "1")
+            .header(
+                "x-wccs-shutdown",
+                if !test_mode || simulation { "1" } else { "0" },
+            )
+            .header("x-wccs-desktop-files", if !test_mode { "1" } else { "0" })
             .bearer_auth(credential)
             .header("X-WCCS-Device-ID", &identity.device_id)
             .json(input)
@@ -386,7 +391,7 @@ fn cycle(
         return Err("maintenance_command_rejected".into());
     }
     // Historical binaries only read .maintenance. Extended records survive downgrade untouched.
-    let directory = if command.template.capability() == "recovery-v2" {
+    let directory = if matches!(command.template.capability(), "recovery-v2" | "shutdown-v1") {
         path.with_extension("maintenance-v2")
     } else {
         directory
@@ -444,7 +449,32 @@ fn cycle(
     save(&record_path, &record)?;
     post_result(client, &identity, &credential, &record)?;
     let command = record.command.clone();
-    if let Template::Recovery { options } = &command.template {
+    if matches!(command.template, Template::Shutdown {}) {
+        record.result = result(&command, "executing", "shutdown_started");
+        save(&record_path, &record)?;
+        post_result(client, &identity, &credential, &record)?;
+        let authorized = !stop.load(Ordering::Relaxed)
+            && connection::server(path, &identity).ok().as_deref() == Some(&server)
+            && poll(
+                client,
+                &server,
+                &identity,
+                &credential,
+                instance,
+                test_mode,
+                simulation,
+            )?
+            .command
+            .as_ref()
+                == Some(&command);
+        record.result = if !authorized {
+            result(&command, "cancelled", "connection_lost")
+        } else if simulation || (!test_mode && crate::power::shutdown_machine().is_ok()) {
+            result(&command, "succeeded", "shutdown_requested")
+        } else {
+            result(&command, "failed", "execution_failed")
+        };
+    } else if let Template::Recovery { options } = &command.template {
         record.result = result(&command, "executing", "recovery_started");
         save(&record_path, &record)?;
         post_result(client, &identity, &credential, &record)?;
@@ -724,6 +754,7 @@ fn display(
             action: "identify".into(),
             expires_at: command.expires_at,
             identity: command.identity.clone(),
+            desktop_files: None,
             login: None,
         },
     };

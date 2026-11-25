@@ -1,3 +1,4 @@
+import { useAccess } from "./access";
 import { Preparation } from "./Preparation";
 import { useEffect, useState } from "react";
 import type { z } from "zod";
@@ -24,6 +25,7 @@ export function Maintenance({
   disabled: boolean;
   onMutate: Mutation;
 }) {
+  const access = useAccess();
   const [selected, setSelected] = useState<string[]>(() => {
     const id = new URLSearchParams(location.hash.split("?")[1]).get(
       "device_id",
@@ -31,7 +33,13 @@ export function Maintenance({
     return id ? [id] : [];
   });
   const [profileVersion, setProfileVersion] = useState(0);
-  const [operation, setOperation] = useState("identify");
+  const [operation, setOperation] = useState(() =>
+    access.manage &&
+    new URLSearchParams(location.hash.split("?")[1]).get("operation") ===
+      "shutdown"
+      ? "shutdown"
+      : "identify",
+  );
   const [duration, setDuration] = useState(30);
   const [preview, setPreview] = useState<z.infer<
     typeof maintenancePreviewSchema
@@ -83,7 +91,9 @@ export function Maintenance({
       template:
         operation === "identify"
           ? { operation, duration_seconds: duration }
-          : { operation, profile_version: profileVersion },
+          : operation === "shutdown"
+            ? { operation }
+            : { operation, profile_version: profileVersion },
     };
     try {
       const value = maintenancePreviewSchema.parse(
@@ -114,6 +124,7 @@ export function Maintenance({
             value={operation}
             onChange={(e) => setOperation(e.target.value)}
           >
+            {access.manage && <option value="shutdown">统一关机</option>}
             <option value="identify">设备识别</option>
             <option value="prepare_desktop">创建或更新桌面入口</option>
             <option value="check_workspace">检查普通账户工作目录</option>
@@ -140,6 +151,24 @@ export function Maintenance({
         )}
         <fieldset className="maintenance-targets" disabled={disabled || busy}>
           <legend>目标设备</legend>
+          {operation === "shutdown" && (
+            <>
+              <p>
+                Windows 接受请求后将于 30
+                秒后开始关机。请先让选手保存文件，并在收到逐机回执后关闭服务器。
+              </p>
+              <button
+                onClick={() =>
+                  setSelected(
+                    snapshot.devices.filter((d) => d.online).map((d) => d.id),
+                  )
+                }
+              >
+                选择全部在线设备
+              </button>
+              <button onClick={() => setSelected([])}>清空选择</button>
+            </>
+          )}
           {snapshot.devices.map((device) => (
             <label key={device.id}>
               <input
@@ -247,7 +276,9 @@ export function Maintenance({
                   .finally(() => setBusy(false));
               }}
             >
-              执行所选模板
+              {operation === "shutdown"
+                ? `确认关闭 ${current.targets.filter((t) => !t.reason).length} 台电脑`
+                : "执行所选模板"}
             </button>
           </>
         )}

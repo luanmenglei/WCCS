@@ -32,9 +32,12 @@ pub fn journal_path(identity: &Path, job: &str) -> PathBuf {
         .join(format!("{job}.json"))
 }
 fn desktop(token: HANDLE) -> Result<PathBuf> {
+    known_folder(&FOLDERID_Desktop, Some(token))
+}
+pub(crate) fn known_folder(id: &windows::core::GUID, token: Option<HANDLE>) -> Result<PathBuf> {
     // SAFETY: borrowed logon token is live. Shell allocates the returned string with CoTaskMemAlloc.
     unsafe {
-        let text = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, Some(token))?;
+        let text = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, token)?;
         let result = text.to_string().map(PathBuf::from);
         CoTaskMemFree(Some(text.0.cast()));
         Ok(result?)
@@ -66,15 +69,95 @@ fn secure_directory(path: &Path, token: HANDLE) -> Result<()> {
         }
     }
     let _guards = files::guard_directory(path, false)?;
-    let writable = login_windows::as_user(token, || {
-        use std::os::windows::fs::OpenOptionsExt;
-        Ok(fs::OpenOptions::new()
-            .access_mode(FILE_ADD_FILE.0)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
-            .open(path)
-            .is_ok())
-    })?;
-    if writable {
+    audit_script_tree(path, token)
+}
+
+fn audit_script_tree(root: &Path, token: HANDLE) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    let mut duplicate = HANDLE::default();
+    // SAFETY: the logon token is borrowed for this call; Handle owns the duplicate.
+    unsafe {
+        DuplicateToken(token, SecurityImpersonation, &mut duplicate)?;
+    }
+    let token = login_windows::Handle(duplicate);
+    for ancestor in root.ancestors().skip(1) {
+        check_script_acl(ancestor, token.0, false)?;
+    }
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err("target_reparse_point".into());
+        }
+        check_script_acl(&path, token.0, true)?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_script_acl(path: &Path, token: HANDLE, inside: bool) -> Result<()> {
+    let name = wccs_session::ipc::wide(path);
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the terminated path, impersonation token and output buffers live through both calls.
+    // LocalFree releases the security descriptor even when AccessCheck returns an error.
+    unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(name.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            &mut descriptor,
+        )
+        .ok()?;
+        let result = check_script_descriptor(descriptor, token, inside);
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        result
+    }
+}
+
+fn check_script_descriptor(
+    descriptor: PSECURITY_DESCRIPTOR,
+    token: HANDLE,
+    inside: bool,
+) -> Result<()> {
+    let mapping = GENERIC_MAPPING {
+        GenericRead: FILE_GENERIC_READ.0,
+        GenericWrite: FILE_GENERIC_WRITE.0,
+        GenericExecute: FILE_GENERIC_EXECUTE.0,
+        GenericAll: FILE_ALL_ACCESS.0,
+    };
+    let mut privileges = PRIVILEGE_SET::default();
+    let mut length = size_of::<PRIVILEGE_SET>() as u32;
+    let mut granted = 0;
+    let mut allowed = windows::core::BOOL::default();
+    const MAXIMUM_ALLOWED: u32 = 0x02000000;
+    // SAFETY: the caller owns the live descriptor and impersonation token.
+    // All result buffers are initialized, and an undersized privilege buffer fails closed.
+    unsafe {
+        AccessCheck(
+            descriptor,
+            token,
+            MAXIMUM_ALLOWED,
+            &mapping,
+            Some(&mut privileges),
+            &mut length,
+            &mut granted,
+            &mut allowed,
+        )?;
+    }
+    let mut unsafe_rights =
+        DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | FILE_WRITE_ATTRIBUTES;
+    if inside {
+        unsafe_rights |= FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA;
+    }
+    if allowed.as_bool() && granted & unsafe_rights.0 != 0 {
         return Err("script_directory_writable_by_contest_account".into());
     }
     Ok(())
@@ -330,6 +413,9 @@ pub fn execute(
         updates,
         authorized,
         |updates| {
+            if matches!(command.template, Template::DeployScripts { .. }) {
+                audit_script_tree(Path::new(&profile.script_directory), account.0)?;
+            }
             login_windows::as_user(account.0, || {
                 for update in updates {
                     if fs::read(&update.path)? != update.content {
@@ -344,4 +430,50 @@ pub fn execute(
         steps.push(step("verification", &file.path, "content_verified"));
     }
     Ok(steps)
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use super::*;
+    #[test]
+    fn read_only_root_does_not_imply_read_only_children() -> Result<()> {
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        // SAFETY: process pseudo-handle is borrowed; the two returned handles are uniquely owned.
+        let account = unsafe {
+            let mut process_token = HANDLE::default();
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_DUPLICATE,
+                &mut process_token,
+            )?;
+            let process_token = login_windows::Handle(process_token);
+            let mut account = HANDLE::default();
+            DuplicateToken(process_token.0, SecurityImpersonation, &mut account)?;
+            login_windows::Handle(account)
+        };
+        for (access, inside, expected) in [
+            ("FR", true, true),
+            ("0x12008b", true, false),
+            ("0x1200c9", false, false),
+            ("0x160089", true, false),
+        ] {
+            let sddl =
+                wccs_session::ipc::wide(format!("O:S-1-5-21-1-2-3-456G:SYD:(A;;{access};;;WD)"));
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            // SAFETY: SDDL is terminated. LocalFree owns the allocated descriptor after success.
+            let result = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    PCWSTR(sddl.as_ptr()),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    None,
+                )?;
+                let result = check_script_descriptor(descriptor, account.0, inside);
+                let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+                result
+            };
+            assert_eq!(result.is_ok(), expected, "{access}: {result:?}");
+        }
+        Ok(())
+    }
 }

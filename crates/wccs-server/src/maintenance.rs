@@ -6,7 +6,7 @@ use tokio_postgres::Transaction;
 use wccs_protocol::{
     control::WaitingIdentity,
     digest,
-    maintenance::{Command, Poll, Reply, Result as TaskResult, Template},
+    maintenance::{Command, Poll, Result as TaskResult, Template},
     now, token, valid_id,
 };
 
@@ -21,7 +21,8 @@ pub struct Write {
     preview_token: Option<String>,
 }
 
-async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
+async fn plan(tx: &Transaction<'_>, input: &Write, actor: &auth::Identity) -> ApiResult<Value> {
+    let shutdown = matches!(input.template, Template::Shutdown {});
     let unique: std::collections::HashSet<_> = input.targets.iter().collect();
     if !valid_id(&input.request_id)
         || input.template_version != 1
@@ -35,8 +36,8 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
     }
     let rows = tx.query("SELECT d.id,d.name,d.lifecycle,d.lifecycle_version,d.enrollment_generation,d.address_version,d.observed_ip,
         m.instance_id,m.session_key,m.adapter,m.capabilities,m.last_seen,
-        c.connected,c.last_seen AS control_seen,c.instance_id AS control_instance,c.actual,
-        EXISTS(SELECT 1 FROM waiting_commands w WHERE w.device_id=d.id AND w.stage NOT IN ('failed','cancelled','expired') AND w.expires_at>$2 AND (w.command->>'action'='enter' OR (w.command->>'action'='prepare_login' AND w.stage<>'succeeded'))) AS waiting,
+        c.connection_id,c.server_epoch,c.connected,c.last_seen AS control_seen,c.instance_id AS control_instance,c.actual,
+        EXISTS(SELECT 1 FROM waiting_commands w WHERE w.device_id=d.id AND w.stage NOT IN ('failed','cancelled','expired') AND w.expires_at>$2 AND (w.command->>'action'='enter' OR (w.command ? 'desktop_files' AND w.stage<>'succeeded') OR (w.command->>'action'='prepare_login' AND w.stage<>'succeeded'))) AS waiting,
         EXISTS(SELECT 1 FROM maintenance_jobs j WHERE j.device_id=d.id AND j.stage IN ('queued','accepted','executing') AND j.expires_at>$2) AS busy
         FROM devices d LEFT JOIN maintenance_devices m ON m.device_id=d.id LEFT JOIN control_devices c ON c.device_id=d.id
         WHERE d.id=ANY($1)", &[&input.targets,&now()]).await?;
@@ -46,6 +47,12 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
     let preparation = match input.template.profile_version() {
         Some(version) => Some(crate::preparation::resolve(tx, version).await?),
         None => None,
+    };
+    let references = match &input.template {
+        Template::Recovery { options } => {
+            crate::recovery::references(tx, options, &input.targets, actor).await?
+        }
+        _ => Default::default(),
     };
     let seating = crate::seating::snapshot(tx).await?;
     let mut targets = Vec::new();
@@ -57,18 +64,10 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
         let instance: Option<String> = row.get("instance_id");
         let session: Option<String> = row.get("session_key");
         let capabilities: Option<Value> = row.get("capabilities");
-        let recovery = if let Template::Recovery { options } = &input.template {
-            crate::recovery::plan(
-                tx,
-                options,
-                id,
-                instance.as_deref().unwrap_or(""),
-                row.get("enrollment_generation"),
-            )
-            .await?
-        } else {
-            None
-        };
+        let recovery = references
+            .get(id)
+            .map(|r| r.reference(instance.as_deref(), row.get("enrollment_generation")))
+            .transpose()?;
         let reason = if matches!(&input.template,Template::Recovery {options} if ["clean","reboot"].contains(&options.action.as_str()))
             && row.get::<_, Option<Value>>("actual").is_none_or(|a| {
                 a["account"]["phase"] != "teaching" || a["account"]["policy"]["state"] != "ready"
@@ -86,7 +85,7 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
             || instance != row.get::<_, Option<String>>("control_instance")
         {
             Some("offline")
-        } else if session.is_none() {
+        } else if !shutdown && session.is_none() {
             Some("no_session")
         } else if capabilities.as_ref().is_none_or(|v| {
             !v.as_array().is_some_and(|caps| {
@@ -114,7 +113,7 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
                 })
         {
             Some("ordinary_account_unavailable")
-        } else if row.get::<_, bool>("waiting") {
+        } else if !shutdown && row.get::<_, bool>("waiting") {
             Some("waiting_active")
         } else if row.get::<_, bool>("busy") {
             Some("maintenance_active")
@@ -158,13 +157,21 @@ async fn plan(tx: &Transaction<'_>, input: &Write) -> ApiResult<Value> {
             }
         }
         targets.push(json!({"recovery":recovery,"device_id":id,"name":row.get::<_,String>("name"),"reason":reason,
-            "generation":row.get::<_,i64>("enrollment_generation"),"device_version":row.get::<_,i64>("lifecycle_version"),
+            "connection_id":row.get::<_,Option<String>>("connection_id"),"server_epoch":row.get::<_,Option<String>>("server_epoch"),"generation":row.get::<_,i64>("enrollment_generation"),"device_version":row.get::<_,i64>("lifecycle_version"),
             "address_version":row.get::<_,i64>("address_version"),"instance_id":instance,"session_key":session,
             "adapter":row.get::<_,Option<String>>("adapter"),"identity":identity}));
     }
     let mut result = json!({"template_version":1,"template":input.template,"preparation":preparation,"targets":targets});
     result["preview_token"] = json!(digest(&result.to_string()));
     Ok(result)
+}
+
+fn permission(template: &Template) -> auth::Permission {
+    if matches!(template, Template::Shutdown {}) {
+        auth::Permission::Admin
+    } else {
+        auth::Permission::Operate
+    }
 }
 
 pub async fn preview(
@@ -180,11 +187,11 @@ pub async fn preview(
         .read_only(true)
         .start()
         .await?;
-    let identity = auth::authorize_snapshot(&tx, &session, auth::Permission::Operate).await?;
+    let identity = auth::authorize_snapshot(&tx, &session, permission(&input.template)).await?;
     identity
         .devices(&tx, &input.targets, &input.request_id)
         .await?;
-    Ok(Json(plan(&tx, &input).await?))
+    Ok(Json(plan(&tx, &input, &identity).await?))
 }
 
 pub async fn commit(
@@ -197,7 +204,7 @@ pub async fn commit(
     let payload = serde_json::to_value(&input).map_err(|_| ApiError::internal())?;
     let mut db = app.db.lock().await?;
     let tx = db.transaction().await?;
-    let identity = auth::authorize(&tx, &session, auth::Permission::Operate).await?;
+    let identity = auth::authorize(&tx, &session, permission(&input.template)).await?;
     identity
         .devices(&tx, &input.targets, &input.request_id)
         .await?;
@@ -206,11 +213,12 @@ pub async fn commit(
     {
         return Ok(Json(receipt));
     }
-    let plan = plan(&tx, &input).await?;
+    let plan = plan(&tx, &input, &identity).await?;
     if preview.as_deref() != plan["preview_token"].as_str() {
         return Err(ApiError::conflict("设备或维护配置已变化，请重新预览"));
     }
     let mut jobs = Vec::new();
+    let mut records = Vec::new();
     for target in plan["targets"]
         .as_array()
         .unwrap()
@@ -218,8 +226,7 @@ pub async fn commit(
         .filter(|t| t["reason"].is_null())
     {
         let command = Command {
-            recovery: serde_json::from_value(target["recovery"].clone())
-                .map_err(|_| ApiError::internal())?,
+            recovery: None,
             preparation: serde_json::from_value(plan["preparation"].clone())
                 .map_err(|_| ApiError::internal())?,
             schema_version: 1,
@@ -229,7 +236,7 @@ pub async fn commit(
             generation: target["generation"].as_i64().unwrap(),
             device_version: target["device_version"].as_i64().unwrap(),
             address_version: target["address_version"].as_i64().unwrap(),
-            session_key: target["session_key"].as_str().unwrap().into(),
+            session_key: target["session_key"].as_str().unwrap_or_default().into(),
             instance_id: target["instance_id"].as_str().unwrap().into(),
             identity: serde_json::from_value(target["identity"].clone())
                 .map_err(|_| ApiError::internal())?,
@@ -245,20 +252,18 @@ pub async fn commit(
             template: input.template.clone(),
         };
         let value = serde_json::to_value(&command).unwrap();
-        tx.execute("INSERT INTO maintenance_jobs(id,request_id,device_id,command,command_digest,actor_id,actor_version,room_ids,created_at,expires_at,updated_at)
-            VALUES($1,$2,$3,$4,$5,$6,$7,device_room_scope($3),$8,$9,$8)",
-            &[&command.job_id,&command.request_id,&command.device_id,&value,&digest(&value.to_string()),&identity.id,&identity.version,&now(),&command.expires_at]).await?;
-        if let Template::Recovery { options } = &command.template
-            && options.action == "archive"
-        {
-            tx.execute(
-                "INSERT INTO recovery_archives(job_id,snapshot,options) VALUES($1,$2,$3)",
-                &[&command.job_id, &json!(command.recovery), &json!(options)],
-            )
-            .await?;
-        }
+        let command_digest = if target["recovery"].is_null() {
+            digest(&value.to_string())
+        } else {
+            String::new()
+        };
+        records.push(json!({"command":value,"command_digest":command_digest,"grant_connection":target["connection_id"],"grant_epoch":target["server_epoch"],"recovery_reference":target["recovery"]}));
         jobs.push(json!({"job_id":command.job_id,"device_id":command.device_id}));
     }
+    tx.execute("INSERT INTO maintenance_jobs(id,request_id,device_id,command,command_digest,actor_id,actor_version,room_ids,created_at,expires_at,updated_at,grant_connection,grant_epoch,recovery_reference)
+        SELECT command->>'job_id',$2,command->>'device_id',command,command_digest,$3,$4,device_room_scope(command->>'device_id'),$5,(command->>'expires_at')::bigint,$5,grant_connection,grant_epoch,recovery_reference
+        FROM jsonb_to_recordset($1) AS batch(command jsonb,command_digest text,grant_connection text,grant_epoch text,recovery_reference jsonb)",
+        &[&Value::Array(records),&input.request_id,&identity.id,&identity.version,&now()]).await?;
     let receipt = json!({"request_id":input.request_id,"jobs":jobs,"preview":plan});
     management::record(
         &tx,
@@ -323,52 +328,85 @@ async fn poll_response(
     {
         return Err(ApiError::bad("维护能力或会话格式无效"));
     }
-    let mut db = app.db.lock().await?;
-    let tx = db.transaction().await?;
-    crate::seating::lock(&tx).await?;
-    let device = auth::device(&tx, &headers).await?;
     let volume_policy = headers
         .get("x-wccs-volume-policy")
         .is_some_and(|v| v == "1");
     let mut capabilities = input.capabilities;
+    let shutdown = headers.get("x-wccs-shutdown").is_some_and(|v| v == "1");
+    if shutdown {
+        capabilities.push("shutdown-v1".into());
+    }
+    if headers
+        .get("x-wccs-desktop-files")
+        .is_some_and(|v| v == "1")
+    {
+        capabilities.push("desktop-files-v1".into());
+    }
     if volume_policy {
         capabilities.push("deployment-volume-v1".into());
     }
-    tx.execute("INSERT INTO maintenance_devices VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id) DO UPDATE SET
+    for attempt in 0..2 {
+        let mut db = app.db.lock().await?;
+        let tx = db.transaction().await?;
+        crate::seating::lock(&tx).await?;
+        let device = auth::device(&tx, &headers).await?;
+        tx.execute("INSERT INTO maintenance_devices VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id) DO UPDATE SET
         instance_id=$2,session_key=$3,adapter=$4,capabilities=$5,last_seen=$6",
         &[&device,&input.instance_id,&input.session_key,&input.adapter,&json!(capabilities),&now()]).await?;
-    // Recheck credentials, actor authority, connection and identity on every active lease.
-    let row=tx.query_opt("SELECT CASE WHEN $5 THEN to_jsonb(j.command_digest) ELSE j.command END FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id
+        // Recheck credentials, actor authority, connection and identity on every active lease.
+        let row=tx.query_opt("SELECT CASE WHEN $5 THEN to_jsonb(j.command_digest) ELSE COALESCE(j.delivery_command,j.command) END,j.id,j.command_digest='' FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id
         JOIN operators o ON o.id=j.actor_id JOIN control_devices c ON c.device_id=d.id
         WHERE d.id=$1 AND d.lifecycle='enabled' AND j.stage IN ('queued','accepted','executing') AND j.expires_at>$2 AND NOT j.cancel_requested
         AND o.enabled AND o.version=j.actor_version AND o.role<>'viewer'
         AND (o.all_rooms OR (cardinality(j.room_ids)>0 AND j.room_ids<@o.room_ids AND device_room_scope(d.id)<@o.room_ids))
-        AND c.connected AND c.last_seen>$2-15 AND c.instance_id=$3 AND c.session_key=$4
+        AND j.grant_connection=c.connection_id AND j.grant_epoch=c.server_epoch AND c.connected AND c.last_seen>$2-15 AND c.instance_id=$3 AND (c.session_key=$4 OR (j.command#>>'{template,operation}'='shutdown' AND c.session_key IS NULL AND $4::text IS NULL))
+        AND (j.command#>>'{template,operation}'<>'shutdown' OR ($7 AND o.role='admin'))
         AND ($6 OR j.command#>>'{template,options,scope}' IS DISTINCT FROM 'volume')
-        AND j.command->>'instance_id'=$3 AND j.command->>'session_key'=$4
+        AND j.command->>'instance_id'=$3 AND j.command->>'session_key'=COALESCE($4,'')
         AND (j.command->>'generation')::bigint=d.enrollment_generation
         AND (j.command->>'device_version')::bigint=d.lifecycle_version
         AND (j.command->>'address_version')::bigint=d.address_version
         AND (j.command->'preparation' IS NULL OR (c.actual->'account'->>'adapter'='windows_test' AND c.actual->'account'->>'phase'='controlled' AND c.actual->'account'->>'account'='owned' AND c.actual->'account'->>'desktop_confirmed'='true' AND c.actual->'account'->>'target_sid'=c.actual->'account'->>'observed_sid'))
         AND (j.command->'preparation' IS NULL OR ((j.command->'preparation'->>'version')::bigint=(SELECT max(version) FROM preparation_profiles) AND (j.command->'preparation'->'profile'->>'tool_version')::bigint=(SELECT version FROM configuration_head WHERE id=1)))
         AND (j.command->'identity'->>'room_id'='' OR EXISTS(SELECT 1 FROM rooms r JOIN seats s ON s.room_id=r.id WHERE r.id=j.command->'identity'->>'room_id' AND r.version=(j.command->'identity'->>'room_version')::bigint AND s.id=j.command->'identity'->>'seat_id' AND s.expected_ip=d.observed_ip))
-        ORDER BY j.created_at,j.id LIMIT 1",&[&device,&now(),&input.instance_id,&input.session_key,&compact,&volume_policy]).await?;
-    let value: Option<Value> = row.map(|row| row.get(0));
-    tx.commit().await?;
-    if compact {
+        ORDER BY j.created_at,j.id LIMIT 1",&[&device,&now(),&input.instance_id,&input.session_key,&compact,&volume_policy,&shutdown]).await?;
+        if let Some(row) = &row
+            && row.get::<_, bool>(2)
+        {
+            let job: String = row.get(1);
+            tx.commit().await?;
+            drop(db);
+            if compact {
+                return Ok(Json(
+                    json!({"schema_version":1,"server_time":now(),"command_digest":null}),
+                ));
+            }
+            if attempt == 0 {
+                crate::recovery::prepare_delivery(&app, &job).await?;
+                continue;
+            }
+            return Err(ApiError::conflict("恢复清单引用已变化，请核对任务"));
+        }
+        if !compact && let Some(row) = &row {
+            tx.execute(
+                "UPDATE maintenance_jobs SET delivered=true WHERE id=$1 AND NOT delivered",
+                &[&row.get::<_, String>(1)],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        drop(db);
+        let value: Option<Value> = row.map(|row| row.get(0));
+        if compact {
+            return Ok(Json(
+                json!({"schema_version":1,"server_time":now(),"command_digest":value}),
+            ));
+        }
         return Ok(Json(
-            json!({"schema_version":1,"server_time":now(),"command_digest":value}),
+            json!({"schema_version":1,"server_time":now(),"command":value}),
         ));
     }
-    let command: Option<Command> = value
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| ApiError::internal())?;
-    Ok(Json(json!(Reply {
-        schema_version: 1,
-        server_time: now(),
-        command
-    })))
+    Err(ApiError::internal())
 }
 
 pub async fn result(
@@ -379,16 +417,22 @@ pub async fn result(
     if !input.valid() {
         return Err(ApiError::bad("维护结果格式无效"));
     }
-    let mut db = app.db.lock().await?;
+    let mut db = app.receipt_db.lock().await?;
     let tx = db.transaction().await?;
-    crate::seating::lock(&tx).await?;
+    // Fence credential rotation and terminal transitions with row locks on the device and job.
     let device = auth::device(&tx, &headers).await?;
-    let row=tx.query_opt("SELECT j.result,j.command_digest,j.stage,j.request_id,j.room_ids,j.command FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id WHERE j.id=$1 AND j.device_id=$2 AND (j.command->>'generation')::bigint=d.enrollment_generation",&[&input.job_id,&device]).await?
+    let row=tx.query_opt("SELECT j.result,j.command_digest,j.stage,j.request_id,j.room_ids,COALESCE(j.delivery_command,j.command) FROM maintenance_jobs j JOIN devices d ON d.id=j.device_id WHERE j.id=$1 AND j.device_id=$2 AND j.delivered AND d.credential_hash=$3 AND (j.command->>'generation')::bigint=d.enrollment_generation FOR UPDATE OF j FOR SHARE OF d",&[&input.job_id,&device,&auth::credential_hash(&headers)?]).await?
         .ok_or_else(||ApiError::forbidden("维护任务不属于此设备"))?;
     if row.get::<_, String>(1) != input.command_digest {
         return Err(ApiError::conflict("维护内容摘要不匹配"));
     }
     let command: Command = serde_json::from_value(row.get(5)).map_err(|_| ApiError::internal())?;
+    if matches!(command.template, Template::Shutdown {})
+        && input.stage == "succeeded"
+        && input.detail != "shutdown_requested"
+    {
+        return Err(ApiError::bad("缺少 Windows 已接受关机的回执"));
+    }
     if let Template::Recovery { options } = &command.template {
         if input.stage == "succeeded" {
             let manifest = input
@@ -429,9 +473,14 @@ pub async fn result(
             &[&input.job_id, &value, &input.stage, &now()],
         )
         .await?;
-        tx.execute("INSERT INTO events(source,source_id,category,occurred_at,operation,target,device_ids,room_ids,request_id,outcome,detail)
-            VALUES('maintenance',$1,'task_result',$2,'maintenance_result',$3,$4,$5,$6,$7,$8)",
-            &[&format!("{}-{}",input.job_id,input.stage),&now(),&input.job_id,&vec![device.clone()],&row.get::<_,Option<Vec<String>>>(4),&row.get::<_,String>(3),&input.stage,&value]).await?;
+        let contest = match &command.template {
+            Template::Recovery { options } => Some(&options.contest_id),
+            _ => None,
+        };
+        let event_detail = json!({"job_id":input.job_id,"stage":input.stage,"detail":input.detail,"steps":input.steps});
+        tx.execute("INSERT INTO events(source,source_id,category,occurred_at,operation,target,device_ids,room_ids,request_id,outcome,detail,contest_id)
+            VALUES('maintenance',$1,'task_result',$2,'maintenance_result',$3,$4,$5,$6,$7,$8,$9)",
+            &[&format!("{}-{}",input.job_id,input.stage),&now(),&input.job_id,&vec![device.clone()],&row.get::<_,Option<Vec<String>>>(4),&row.get::<_,String>(3),&input.stage,&event_detail,&contest]).await?;
     }
     tx.commit().await?;
     Ok(Json(
@@ -472,7 +521,7 @@ pub async fn cancel(
     {
         return Ok(Json(previous));
     }
-    tx.execute("UPDATE maintenance_jobs SET cancel_requested=true,updated_at=$2 WHERE id=$1 AND stage IN ('queued','accepted','executing')",&[&input.job_id,&now()]).await?;
+    tx.execute("UPDATE maintenance_jobs SET cancel_requested=true,stage=CASE WHEN delivered THEN stage ELSE 'cancelled' END,updated_at=$2 WHERE id=$1 AND stage IN ('queued','accepted','executing')",&[&input.job_id,&now()]).await?;
     let receipt = json!({"job_id":input.job_id,"request_id":input.request_id});
     management::record(
         &tx,

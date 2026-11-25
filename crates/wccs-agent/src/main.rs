@@ -3,6 +3,8 @@
 #[cfg(windows)]
 mod connection;
 #[cfg(windows)]
+mod contest_desktop;
+#[cfg(windows)]
 mod contest_policy;
 #[cfg(windows)]
 mod diagnostics;

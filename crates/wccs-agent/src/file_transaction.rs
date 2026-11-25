@@ -32,15 +32,19 @@ pub fn bytes_digest(bytes: &[u8]) -> String {
 }
 pub fn guard_directory(path: &Path, create: bool) -> Result<Vec<fs::File>> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    if !path.to_str().is_some_and(|value| {
-        wccs_protocol::preparation::directory(value)
-            || (!create
-                && (wccs_protocol::recovery::volume_root(value)
-                    || (value.len() > 3
-                        && value.is_char_boundary(3)
-                        && wccs_protocol::recovery::volume_root(&value[..3])
-                        && wccs_protocol::recovery::relative(&value[3..].replace('\\', "/")))))
-    }) {
+    // Windows canonicalize() returns verbatim drive paths. Use the validated drive
+    // form for component traversal too, so the bare prefix is never opened as a directory.
+    let value = path.to_str().ok_or("target_path_invalid")?;
+    let value = value.strip_prefix(r"\\?\").unwrap_or(value);
+    let path = Path::new(value);
+    if !(wccs_protocol::preparation::directory(value)
+        || (!create
+            && (wccs_protocol::recovery::volume_root(value)
+                || (value.len() > 3
+                    && value.is_char_boundary(3)
+                    && wccs_protocol::recovery::volume_root(&value[..3])
+                    && wccs_protocol::recovery::relative(&value[3..].replace('\\', "/"))))))
+    {
         return Err("target_path_invalid".into());
     }
     let mut current = PathBuf::new();

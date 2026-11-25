@@ -2,6 +2,8 @@
 
 本说明随离线客户端包交付。适用 Windows 10 x64 1703+，既有原生证据来自 22H2。首次采集记录实际版本、更新修订和复原软件，较早镜像上的运行时及 API 兼容性逐机验收。包内固定 PowerShell 7.6.9 x64 与自包含 .NET 运行时，Rust 客户端和 Credential Provider 静态链接 CRT。运行机器无需 Rust、Python、Node.js 或 Visual Studio。PowerShell ZIP 部署方式及依赖来源见微软文档，运行时许可随 `runtime/LICENSE.txt`、`runtime/ThirdPartyNotices.txt` 交付。[PowerShell 安装文档](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows) [.NET 支持系统](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.json)
 
+本轮 Windows 部署流程和目标机器待定，503-41 已排除。以下为选用单机安装方式时的参考。
+
 ## 赴现场前
 
 准备完整 ZIP、同名 `.sha256`、`.manifest.json`，独立核对传输后的 ZIP SHA-256。摘要覆盖包内每个文件，`manifest.json` 由外部 ZIP 摘要覆盖。包未做代码签名，现场以交付渠道记录的 ZIP 摘要核对来源。解包到本地普通目录，保留原包供恢复。示例统一在解包目录执行，路径按实际移动介质和机器填写。
@@ -156,9 +158,9 @@ reg unload HKLM\WccsOffline
 
 ## 统一镜像接续（2026-11-16）
 
-503-41 后续统一镜像准备使用新的四入口材料包，先升级并完成普通账户桌面准备，再封装捕获。旧单机材料和原始诊断的外部副本由工作人员在母机统一清理。详见 [镜像记录](image-deployment.md) 和 [现场说明](image-deployment-field-guide.md)。
+如选用统一镜像，需为选定母机制作匹配的材料包。旧单机材料和原始诊断的外部副本由工作人员在母机统一清理。详见 [镜像记录](image-deployment.md) 和 [现场说明](image-deployment-field-guide.md)。
 
 
 ## 更新后的单机测试
 
-M3～M5 客户端、运行时、公开 CA、镜像入口、比赛脚本清单和现场说明合并交付。先在 503-41 更新并诊断，随后完成比赛脚本、策略及恢复矩阵，具体见 [单机现场说明](m3-m5-field-guide.md)。
+M3～M5 客户端、运行时、公开 CA、镜像入口、比赛脚本清单和现场说明合并交付。目标确定后，在选定代表机核对比赛脚本、策略及恢复矩阵，具体见 [单机现场说明](m3-m5-field-guide.md)。

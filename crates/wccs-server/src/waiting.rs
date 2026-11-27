@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use tokio_postgres::{IsolationLevel, Transaction};
+use tokio_postgres::{Client, IsolationLevel, Statement, Transaction};
 use wccs_protocol::{control::*, digest, now, token, valid_id};
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -470,51 +470,93 @@ pub async fn list(
     Ok(Json(json!({"items":items,"server_time":now()})))
 }
 
+const CANCEL_REVOKED: &str = "
+    UPDATE waiting_commands w SET stage='cancelled',updated_at=$1
+    WHERE stage NOT IN ('failed','cancelled','expired')
+      AND NOT EXISTS (
+        SELECT 1 FROM devices d, operators o
+        WHERE d.id=w.device_id AND d.lifecycle='enabled'
+          AND d.enrollment_generation=w.generation
+          AND d.lifecycle_version=(w.command->>'device_version')::bigint
+          AND o.id=w.actor_id AND o.version=w.actor_version AND o.enabled
+          AND o.role<>'viewer' AND (o.all_rooms OR w.room_ids<@o.room_ids)
+      )";
+const EXPIRE_COMMANDS: &str = "
+    UPDATE waiting_commands SET stage='expired',updated_at=$1
+    WHERE expires_at<=$1 AND stage NOT IN ('failed','cancelled','expired')";
+
 pub async fn expire(tx: &Transaction<'_>) -> ApiResult<()> {
-    expire_for(tx, None).await
+    // Management retires grants for the whole fleet, including offline devices.
+    tx.execute(CANCEL_REVOKED, &[&now()]).await?;
+    tx.execute(EXPIRE_COMMANDS, &[&now()]).await?;
+    Ok(())
 }
 
-async fn expire_for(tx: &Transaction<'_>, device: Option<&str>) -> ApiResult<()> {
-    // Persist authority loss even when the device can no longer authenticate a socket.
-    // A control poll checks its own device. Management queries still retire all
-    // devices, including offline ones, without repeating a full scan per heartbeat.
-    tx.execute(
-        "UPDATE waiting_commands w SET stage='cancelled',updated_at=$1
-            WHERE stage NOT IN ('failed','cancelled','expired')
-            AND ($2::text IS NULL OR w.device_id=$2)
-            AND NOT EXISTS(SELECT 1
-            FROM devices d,operators o
-            WHERE d.id=w.device_id
-            AND d.lifecycle='enabled'
-            AND d.enrollment_generation=w.generation
-            AND d.lifecycle_version=(w.command->>'device_version')::bigint
-            AND o.id=w.actor_id
-            AND o.version=w.actor_version
-            AND o.enabled
-            AND o.role<>'viewer'
-            AND (o.all_rooms OR w.room_ids<@o.room_ids))",
-        &[&now(), &device],
-    )
-    .await?;
+pub(crate) struct WaitingQueries {
+    cancel_revoked: Statement,
+    expire: Statement,
+    latest: Statement,
+    authority: Statement,
+    assignment: Statement,
+}
 
-    tx.execute("UPDATE waiting_commands SET stage='expired',updated_at=$1 WHERE expires_at<=$1 AND stage NOT IN ('failed','cancelled','expired') AND ($2::text IS NULL OR device_id=$2)", &[&now(), &device]).await?;
-    Ok(())
+impl WaitingQueries {
+    pub(crate) async fn prepare(client: &Client) -> Result<Self, tokio_postgres::Error> {
+        Ok(Self {
+            cancel_revoked: client
+                .prepare(&format!("{CANCEL_REVOKED} AND w.device_id=$2"))
+                .await?,
+            expire: client
+                .prepare(&format!("{EXPIRE_COMMANDS} AND device_id=$2"))
+                .await?,
+            latest: client
+                .prepare(
+                    "SELECT command,stage,actor_id,actor_version FROM waiting_commands
+                          WHERE device_id=$1 ORDER BY sequence DESC LIMIT 1",
+                )
+                .await?,
+            authority: client
+                .prepare(
+                    "SELECT EXISTS (
+                    SELECT 1 FROM operators o, devices d
+                    WHERE o.id=$1 AND o.version=$2 AND o.enabled AND o.role<>'viewer'
+                      AND (o.all_rooms OR $3=ANY(o.room_ids))
+                      AND d.id=$4 AND d.lifecycle='enabled'
+                      AND d.enrollment_generation=$5 AND d.lifecycle_version=$6
+                      AND NOT d.needs_review AND NOT d.excluded
+                      AND EXISTS (
+                        SELECT 1 FROM seats s WHERE s.id=$7 AND s.expected_ip=d.observed_ip
+                          AND (SELECT count(*) FROM devices x WHERE x.observed_ip=s.expected_ip
+                               AND x.credential_hash IS NOT NULL AND NOT x.excluded)=1
+                      )
+                      AND device_room_scope(d.id)=ARRAY[$3]
+                )",
+                )
+                .await?,
+            assignment: client
+                .prepare(
+                    "SELECT EXISTS (
+                    SELECT 1 FROM contests c, rooms r, assignments a
+                    WHERE c.id=$1 AND ($7 OR c.version=$2)
+                      AND r.id=$3 AND ($7 OR r.version=$4)
+                      AND a.contest_id=c.id AND a.participant_id=$5 AND a.seat_id=$6
+                )",
+                )
+                .await?,
+        })
+    }
 }
 
 pub async fn current(
     tx: &Transaction<'_>,
+    queries: &WaitingQueries,
     id: &str,
     instance: &str,
     session: Option<&str>,
 ) -> ApiResult<Option<Command>> {
-    expire_for(tx, Some(id)).await?;
-    let Some(row) = tx
-        .query_opt(
-            "SELECT * FROM waiting_commands WHERE device_id=$1 ORDER BY sequence DESC LIMIT 1",
-            &[&id],
-        )
-        .await?
-    else {
+    tx.execute(&queries.cancel_revoked, &[&now(), &id]).await?;
+    tx.execute(&queries.expire, &[&now(), &id]).await?;
+    let Some(row) = tx.query_opt(&queries.latest, &[&id]).await? else {
         return Ok(None);
     };
     if ["failed", "expired", "cancelled"].contains(&row.get::<_, String>("stage").as_str()) {
@@ -524,29 +566,7 @@ pub async fn current(
         serde_json::from_value(row.get("command")).map_err(|_| ApiError::internal())?;
     let valid: bool = tx
         .query_one(
-            "SELECT EXISTS(SELECT 1
-            FROM operators o,devices d
-            WHERE o.id=$1
-            AND o.version=$2
-            AND o.enabled
-            AND o.role<>'viewer'
-            AND (o.all_rooms OR $3=ANY(o.room_ids))
-            AND d.id=$4
-            AND d.lifecycle='enabled'
-            AND d.enrollment_generation=$5
-            AND d.lifecycle_version=$6
-            AND NOT d.needs_review
-            AND NOT d.excluded
-            AND EXISTS(SELECT 1
-            FROM seats s
-            WHERE s.id=$7
-            AND s.expected_ip=d.observed_ip
-            AND (SELECT count(*)
-            FROM devices x
-            WHERE x.observed_ip=s.expected_ip
-            AND x.credential_hash IS NOT NULL
-            AND NOT x.excluded)=1)
-            AND device_room_scope(d.id)=ARRAY[$3])",
+            &queries.authority,
             &[
                 &row.get::<_, String>("actor_id"),
                 &row.get::<_, i64>("actor_version"),
@@ -585,15 +605,7 @@ pub async fn current(
         }
         let unchanged: bool = tx
             .query_one(
-                "SELECT EXISTS(SELECT 1
-            FROM contests c,rooms r,assignments a
-            WHERE c.id=$1
-            AND ($7 OR c.version=$2)
-            AND r.id=$3
-            AND ($7 OR r.version=$4)
-            AND a.contest_id=c.id
-            AND a.participant_id=$5
-            AND a.seat_id=$6)",
+                &queries.assignment,
                 &[
                     &command.identity.contest_id,
                     &command.identity.contest_version,

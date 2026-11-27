@@ -360,10 +360,7 @@ pub async fn download(
     headers: HeaderMap,
     Path((job, index)): Path<(String, i32)>,
 ) -> ApiResult<impl IntoResponse> {
-    let _slot = app
-        .download_slots
-        .try_acquire()
-        .map_err(|_| ApiError::new(429, "下载并发繁忙，请续传重试"))?;
+    let _slot = download_slot(&app, &headers).await?;
     let bytes = {
         let mut db = app.db.lock().await?;
         let tx = db.transaction().await?;
@@ -379,6 +376,32 @@ pub async fn download(
     };
     throttle(&app, bytes.2, bytes.0.len(), bytes.1).await?;
     Ok(([("Content-Type", "application/octet-stream")], bytes.0))
+}
+
+async fn download_slot<'a>(
+    app: &'a App,
+    headers: &HeaderMap,
+) -> ApiResult<tokio::sync::SemaphorePermit<'a>> {
+    if let Ok(slot) = app.download_slots.try_acquire() {
+        return Ok(slot);
+    }
+    let busy = || ApiError::new(429, "下载并发繁忙，请续传重试");
+    let _waiting = app.download_waiters.try_acquire().map_err(|_| busy())?;
+    // The agent allows eight seconds per request. A 256 KiB block at the
+    // minimum configured rate already uses four of those seconds.
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        // Only authenticated devices join the FIFO. Release the database before
+        // waiting. Both download routes recheck credentials and grants at read time.
+        {
+            let mut db = app.db.lock().await?;
+            let tx = db.transaction().await?;
+            auth::device(&tx, headers).await?;
+            tx.commit().await?;
+        }
+        app.download_slots.acquire().await.map_err(|_| busy())
+    })
+    .await
+    .map_err(|_| busy())?
 }
 
 async fn throttle(app: &App, device: String, size: usize, limit: i64) -> ApiResult<()> {
@@ -400,19 +423,17 @@ pub async fn desktop_chunk(
     headers: HeaderMap,
     Path((job, artifact, index)): Path<(String, String, i32)>,
 ) -> ApiResult<impl IntoResponse> {
-    let _slot = app
-        .download_slots
-        .try_acquire()
-        .map_err(|_| ApiError::new(429, "客户端下载繁忙"))?;
+    let _slot = download_slot(&app, &headers).await?;
     let (device, bytes) = {
-        let mut db = app.db.lock().await?;
-        let tx = db.transaction().await?;
+        let mut db = app.db.connection().await?;
+        let (tx, queries) = db.waiting_transaction().await?;
         let device = auth::device(&tx, &headers).await?;
         let denied = || ApiError::forbidden("开赛桌面下载授权已结束");
         let control = tx.query_opt("SELECT c.instance_id,c.session_key FROM control_devices c JOIN waiting_commands w ON w.device_id=c.device_id WHERE c.device_id=$1 AND c.connected AND c.server_epoch=$2 AND c.last_seen>$3::bigint-15 AND w.id=$4 AND w.stage IN ('accepted','executing')", &[&device,&app.server_epoch,&now(),&job]).await?.ok_or_else(denied)?;
-        let current = crate::waiting::current(&tx, &device, control.get(0), control.get(1))
-            .await?
-            .ok_or_else(denied)?;
+        let current =
+            crate::waiting::current(&tx, queries, &device, control.get(0), control.get(1))
+                .await?
+                .ok_or_else(denied)?;
         if current.command_id != job
             || !current
                 .desktop_files

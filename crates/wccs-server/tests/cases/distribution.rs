@@ -121,12 +121,33 @@ async fn resumable_upload_distribution_scope_publication_and_restart() {
         "ready"
     );
     drop(restarted);
+    // A busy server still authenticates queue admission and bounds the wait.
+    let slots = f.app.download_slots.acquire_many(16).await.unwrap();
+    let chunk_url = format!("{}/api/device/distribution/{id}/0", f.admin.url);
+    let download = |credential: &str| {
+        f.admin
+            .client
+            .get(&chunk_url)
+            .bearer_auth(credential)
+            .send()
+    };
+    assert_eq!(download(&token()).await.unwrap().status(), 401);
+    assert_eq!(download(&f.credential).await.unwrap().status(), 429);
+    let pending = download(&f.credential);
+    tokio::pin!(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut pending)
+            .await
+            .is_err()
+    );
     let cancel = json!({"request_id":token(),"job_id":id});
     let cancelled = expect_ok(f.admin.post("distribution/cancel", &cancel).await).await;
     assert_eq!(
         expect_ok(f.admin.post("distribution/cancel", &cancel).await).await,
         cancelled
     );
+    drop(slots);
+    assert_eq!(pending.await.unwrap().status(), 409);
     assert_eq!(
         f.admin
             .client

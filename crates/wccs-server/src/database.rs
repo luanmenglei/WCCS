@@ -1,4 +1,4 @@
-use crate::{ApiError, ApiResult};
+use crate::{ApiError, ApiResult, waiting::WaitingQueries};
 use std::time::{Duration, Instant};
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard};
 use tokio_postgres::{Client, Config, NoTls};
@@ -13,8 +13,27 @@ pub struct Database {
 }
 
 struct ConnectionState {
-    client: Option<Client>,
+    connection: Option<Connection>,
     retry_at: Instant,
+}
+
+pub(crate) struct Connection {
+    client: Client,
+    waiting_queries: Option<WaitingQueries>,
+}
+
+impl Connection {
+    pub(crate) async fn waiting_transaction(
+        &mut self,
+    ) -> ApiResult<(tokio_postgres::Transaction<'_>, &WaitingQueries)> {
+        // Statement handles belong to this PostgreSQL session. Prepare after migration,
+        // and publish the set only after every statement prepared successfully.
+        let queries = match &mut self.waiting_queries {
+            Some(queries) => queries,
+            slot @ None => slot.insert(WaitingQueries::prepare(&self.client).await?),
+        };
+        Ok((self.client.transaction().await?, queries))
+    }
 }
 
 impl Database {
@@ -35,15 +54,25 @@ impl Database {
         Ok(Self {
             config: Self::connection_config(connection_string)?,
             state: Mutex::new(ConnectionState {
-                client: None,
+                connection: None,
                 retry_at: Instant::now(),
             }),
         })
     }
 
     pub async fn lock(&self) -> ApiResult<MappedMutexGuard<'_, Client>> {
+        Ok(MappedMutexGuard::map(self.connection().await?, |c| {
+            &mut c.client
+        }))
+    }
+
+    pub(crate) async fn connection(&self) -> ApiResult<MappedMutexGuard<'_, Connection>> {
         let mut state = self.state.lock().await;
-        if state.client.as_ref().is_none_or(Client::is_closed) {
+        if state
+            .connection
+            .as_ref()
+            .is_none_or(|c| c.client.is_closed())
+        {
             if Instant::now() < state.retry_at {
                 return Err(ApiError::unavailable());
             }
@@ -67,11 +96,14 @@ impl Database {
                     eprintln!("database_connection_closed code={:?}", error.code());
                 }
             });
-            state.client = Some(client);
+            state.connection = Some(Connection {
+                client,
+                waiting_queries: None,
+            });
             state.retry_at = Instant::now();
         }
         Ok(MutexGuard::map(state, |state| {
-            state.client.as_mut().expect("connected client")
+            state.connection.as_mut().expect("connected client")
         }))
     }
 }

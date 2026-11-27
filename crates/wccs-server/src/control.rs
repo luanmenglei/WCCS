@@ -189,8 +189,8 @@ async fn exchange(
     first: bool,
     poll: &ControlPoll,
 ) -> ApiResult<ControlReply> {
-    let mut db = app.db.lock().await?;
-    let tx = db.transaction().await?;
+    let mut db = app.db.connection().await?;
+    let (tx, queries) = db.waiting_transaction().await?;
     seating::lock(&tx).await?;
     if auth::device(&tx, headers).await? != id {
         return Err(ApiError::forbidden("设备身份变化"));
@@ -238,7 +238,14 @@ async fn exchange(
             return Err(ApiError::conflict("控制连接已被替换"));
         }
     }
-    let command = waiting::current(&tx, id, &poll.instance_id, poll.session_key.as_deref()).await?;
+    let command = waiting::current(
+        &tx,
+        queries,
+        id,
+        &poll.instance_id,
+        poll.session_key.as_deref(),
+    )
+    .await?;
     let mut acknowledged = None;
     // Legacy clients can attach the previous connection's receipt to their first poll.
     if !first && let Some(report) = &poll.report {

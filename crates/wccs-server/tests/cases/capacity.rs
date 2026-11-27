@@ -1,9 +1,13 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU8, Ordering},
 };
 use tokio::{sync::mpsc, task::JoinSet};
+
+#[path = "capacity_transfer.rs"]
+mod transfer;
 
 enum Event {
     Ready,
@@ -43,6 +47,10 @@ async fn concurrent_control_preview_commit_and_reconnect() {
         .unwrap_or(15);
     assert!((1..=500).contains(&count));
     assert!((5..=3600).contains(&seconds));
+    let downloaders = std::env::var("WCCS_LOAD_DOWNLOADERS")
+        .map(|value| value.parse::<usize>().expect("integer downloader count"))
+        .unwrap_or(0);
+    assert!(downloaders <= count);
     #[cfg(target_os = "linux")]
     {
         // This process owns both ends of every test connection, plus management
@@ -54,7 +62,7 @@ async fn concurrent_control_preview_commit_and_reconnect() {
             .and_then(|line| line.split_whitespace().nth(3))
             .and_then(|value| value.parse::<usize>().ok());
         assert!(
-            soft_limit.is_none_or(|limit| limit >= count * 2 + 128),
+            soft_limit.is_none_or(|limit| limit >= (count + downloaders) * 2 + 128),
             "load test owns client and server sockets; run with ulimit -n 4096"
         );
     }
@@ -74,12 +82,17 @@ async fn concurrent_control_preview_commit_and_reconnect() {
         credentials.push(credential);
     }
     let phase = Arc::new(AtomicU8::new(0));
+    let download_credentials = credentials[..downloaders].to_vec();
+    // Keep one counter per observed millisecond across the fleet so the load
+    // generator's sample storage doesn't grow with every poll in an hour-long run.
+    let poll_times = Arc::new(Mutex::new(BTreeMap::<u128, usize>::new()));
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let mut clients = JoinSet::new();
     let started = Instant::now();
     for (index, credential) in credentials.into_iter().enumerate() {
         let admin = f.admin.clone();
         let phase = phase.clone();
+        let poll_times = poll_times.clone();
         let sender = sender.clone();
         clients.spawn(async move {
             let device = format!("device-{}", index + 1);
@@ -88,12 +101,11 @@ async fn concurrent_control_preview_commit_and_reconnect() {
             let mut last_command = Value::Null;
             let mut connected = false;
             let mut reconnected = false;
-            let mut latencies = Vec::new();
             loop {
                 let current_phase = phase.load(Ordering::Relaxed);
                 if current_phase == 3 {
                     socket.close(None).await.unwrap();
-                    return latencies;
+                    return;
                 }
                 if current_phase == 2 && !reconnected {
                     socket.close(None).await.unwrap();
@@ -107,7 +119,8 @@ async fn concurrent_control_preview_commit_and_reconnect() {
                 }
                 let begin = Instant::now();
                 let reply = poll(&mut socket, &state).await.expect("control channel closed under load");
-                latencies.push(begin.elapsed().as_millis());
+                let elapsed = begin.elapsed().as_millis();
+                *poll_times.lock().unwrap().entry(elapsed).or_default() += 1;
                 if !connected {
                     connected = true;
                     sender.send(Event::Ready).unwrap();
@@ -121,6 +134,9 @@ async fn concurrent_control_preview_commit_and_reconnect() {
                         "session_key":"session-one","monitors":1,"detail":"ui_observed"});
                     state["report"] = json!({"command_id":last_command,"sequence":command["sequence"],
                         "stage":"succeeded","actual":state["actual"]});
+                } else if command.is_null() && state["actual"]["state"] == "waiting" {
+                    state["actual"] = observation()["actual"].take();
+                    state["report"] = Value::Null;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -134,7 +150,16 @@ async fn concurrent_control_preview_commit_and_reconnect() {
             .all(|event| matches!(event, Event::Ready))
     );
     let startup_ms = started.elapsed().as_millis();
+    let transfers = transfer::start(&f, download_credentials, phase.clone()).await;
     let mut request = input(count);
+    // In a long run exercise expiry before the reconnect. In a short run
+    // retain a live grant so reconnect itself must cancel the command.
+    let test_expiry = seconds >= 900;
+    request["duration_seconds"] = json!(if test_expiry {
+        seconds - 30
+    } else {
+        900.max(seconds + 60)
+    });
     let preview_start = Instant::now();
     let preview = expect_ok(f.admin.post("waiting/preview", &request).await).await;
     let preview_ms = preview_start.elapsed().as_millis();
@@ -175,12 +200,14 @@ async fn concurrent_control_preview_commit_and_reconnect() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     let rows = expect_ok(f.admin.get("waiting").await).await;
+    let expected_stage = if test_expiry { "expired" } else { "succeeded" };
     assert_eq!(
         rows["items"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|row| row["stage"] == "succeeded")
+            .filter(|row| row["stage"] == expected_stage
+                && (!test_expiry || row["actual"]["state"] == "desktop"))
             .count(),
         count
     );
@@ -199,6 +226,9 @@ async fn concurrent_control_preview_commit_and_reconnect() {
         );
     }
     phase.store(2, Ordering::Relaxed);
+    if let Some(transfers) = transfers {
+        transfers.finish().await;
+    }
     assert!(
         receive_events(&mut receiver, count)
             .await
@@ -206,9 +236,8 @@ async fn concurrent_control_preview_commit_and_reconnect() {
             .all(|event| matches!(event, Event::Reconnected))
     );
     phase.store(3, Ordering::Relaxed);
-    let mut latencies = Vec::new();
     while let Some(result) = clients.join_next().await {
-        latencies.extend(result.expect("client task failed"));
+        result.expect("client task failed");
     }
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -225,16 +254,25 @@ async fn concurrent_control_preview_commit_and_reconnect() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|row| row["stage"] == "cancelled")
+            .all(|row| row["stage"] == if test_expiry { "expired" } else { "cancelled" })
     );
     f.finish().await;
-    latencies.sort_unstable();
+    let poll_times = poll_times.lock().unwrap();
+    let polls: usize = poll_times.values().sum();
+    let mut cumulative = 0;
+    let (&poll_p95, _) = poll_times
+        .iter()
+        .find(|(_, n)| {
+            cumulative += **n;
+            cumulative >= (polls * 95).div_ceil(100)
+        })
+        .unwrap();
     received_ms.sort_unstable();
     println!(
         "control_load clients={count} seconds={seconds} management_cycles={reads} startup_ms={startup_ms} preview_ms={preview_ms} polls={} poll_p95_ms={} poll_max_ms={} receive_p95_ms={} receive_max_ms={}",
-        latencies.len(),
-        percentile(&latencies, 95),
-        latencies.last().unwrap(),
+        polls,
+        poll_p95,
+        poll_times.last_key_value().unwrap().0,
         percentile(&received_ms, 95),
         received_ms.last().unwrap()
     );

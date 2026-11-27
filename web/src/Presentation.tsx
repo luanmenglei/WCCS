@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
-import type { Mutation } from "./SeatChecks";
+import { api, type Mutation } from "./api";
 
 const logoSchema = z.object({
   school: z.string(),

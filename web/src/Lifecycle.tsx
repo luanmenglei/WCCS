@@ -1,15 +1,10 @@
 import { useAccess } from "./access";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import { type Device, type Snapshot, resultSchema } from "./contracts";
 import { DetailsDialog } from "./DetailsDialog";
 
-export type Mutate = (
-  path: string,
-  body: Record<string, unknown>,
-  success: string,
-) => Promise<void>;
 export const lifecycleLabels: Record<string, string> = {
   pending: "待审核",
   enabled: "已启用",
@@ -122,7 +117,7 @@ export function LifecycleControls({
 }: {
   device: Device;
   disabled: boolean;
-  onMutate: Mutate;
+  onMutate: Mutation;
 }) {
   const access = useAccess();
   const [confirmation, setConfirmation] = useState<Record<
@@ -387,7 +382,7 @@ export function Enrollment({
 }: {
   snapshot: Snapshot;
   disabled: boolean;
-  onMutate: Mutate;
+  onMutate: Mutation;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [filter, setFilter] = useState("pending");
@@ -512,7 +507,7 @@ function ImageApplications({
 }: {
   applications: NonNullable<Snapshot["image_applications"]>;
   disabled: boolean;
-  onMutate: Mutate;
+  onMutate: Mutation;
 }) {
   const [selected, setSelected] = useState<
     Record<

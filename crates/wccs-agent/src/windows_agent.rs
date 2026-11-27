@@ -1,3 +1,5 @@
+//! 负责设备注册、凭据轮换、HTTP 心跳和工具检查任务。
+use crate::{AgentResult as Result, identity::Identity, local_state::persist};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path, time::Duration};
@@ -8,53 +10,6 @@ use wccs_inventory::{
 use wccs_protocol::{
     CheckResult, Heartbeat, HeartbeatReply, PROTOCOL_VERSION, Registration, token, valid_id,
 };
-
-pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Identity {
-    #[serde(default)]
-    pub image_enrollment: bool,
-    pub server: String,
-    pub device_id: String,
-    pub enrollment_token: String,
-    #[serde(default)]
-    pub device_token: Option<String>,
-}
-
-impl Identity {
-    pub fn registration_body(
-        &self,
-        registration: Registration,
-        path: &Path,
-    ) -> Result<serde_json::Value> {
-        if self.image_enrollment {
-            let machine_name = wccs_inventory::host_name()?;
-            if wccs_protocol::image_device_id(&machine_name).as_deref() != Some(&self.device_id) {
-                return Err("image_machine_name_changed_requires_review".into());
-            }
-            Ok(serde_json::to_value(wccs_protocol::ImageRegistration {
-                registration,
-                machine_name,
-                bootstrap_status: fs::read(path.with_extension("image-status.json"))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .and_then(|value| value["code"].as_str().map(str::to_owned))
-                    .unwrap_or_default(),
-            })?)
-        } else {
-            Ok(serde_json::to_value(registration)?)
-        }
-    }
-    pub fn registration_path(&self) -> &'static str {
-        if self.image_enrollment {
-            "image-register"
-        } else {
-            "register"
-        }
-    }
-}
 
 pub fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -84,7 +39,7 @@ fn run_locked(path: &Path, once: bool) -> Result<()> {
     if !valid_id(&identity.device_id) {
         return Err("设备 ID 无效".into());
     }
-    let credential = crate::diagnostics::credential(path, &identity)?;
+    let credential = crate::identity::credential(path, &identity)?;
     identity.device_token = Some(credential.clone());
     let client = Client::builder()
         .timeout(Duration::from_secs(12))
@@ -268,17 +223,6 @@ struct Candidate {
     new_token: String,
 }
 
-pub(crate) fn persist(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let temporary = path.with_extension("durable.tmp");
-    let mut file = fs::File::create(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(temporary, path)?;
-    Ok(())
-}
-
 fn promote(identity: &mut Identity, path: &Path, candidate: &Candidate) -> Result<()> {
     persist(
         &path.with_extension("credential"),
@@ -354,26 +298,9 @@ fn reported_ips(server: &str) -> Vec<String> {
     vec![]
 }
 
-pub fn validate_server(server: &str) -> Result<reqwest::Url> {
-    let url = reqwest::Url::parse(server)?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path() != "/"
-    {
-        return Err("服务地址需要纯 origin".into());
-    }
-    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        return Err("服务地址需要 HTTPS，本地回环支持 HTTP 验证".into());
-    }
-    Ok(url)
-}
-
 pub fn initialize_worker(path: &Path) -> Result<(Identity, Client)> {
     let mut identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
-    identity.device_token = Some(crate::diagnostics::credential(path, &identity)?);
+    identity.device_token = Some(crate::identity::credential(path, &identity)?);
     let client = Client::builder()
         .timeout(Duration::from_secs(12))
         .connect_timeout(Duration::from_secs(5))
@@ -398,25 +325,5 @@ pub fn run_worker(
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-    }
-}
-
-#[cfg(test)]
-mod endpoint_tests {
-    use super::*;
-    #[test]
-    fn accepted_origins_normalize_case_and_keep_tls_requirements() {
-        assert_eq!(
-            validate_server("HTTPS://EXAMPLE.COM/").unwrap().as_str(),
-            "https://example.com/"
-        );
-        assert_eq!(
-            validate_server("HTTP://LOCALHOST:8788").unwrap().as_str(),
-            "http://localhost:8788/"
-        );
-        assert!(validate_server("http://10.0.0.1").is_err());
-        assert!(validate_server("https://user:password@example.com").is_err());
-        assert!(validate_server("https://example.com/path").is_err());
-        assert!(validate_server("https://example.com/?token=value").is_err());
     }
 }

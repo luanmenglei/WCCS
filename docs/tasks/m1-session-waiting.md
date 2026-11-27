@@ -73,7 +73,7 @@ pwsh -NoProfile -File scripts/check-rust.ps1
 
 ## FFI 与自审
 
-所有 Windows 调用集中在 `crates/wccs-session/src/platform.rs`。纯业务模块禁止 unsafe。平台模块启用 `unsafe_op_in_unsafe_fn`，每处 unsafe 注释说明调用前提及所有权。
+原型窗口的 Win32 调用集中在 [platform](../../crates/wccs-session/src/platform.rs) 及其子模块。纯业务模块禁止 unsafe。平台模块启用 `unsafe_op_in_unsafe_fn`，每处 unsafe 注释说明调用前提及所有权。
 
 - UI 线程独占窗口、字体、定时器和互斥量。父窗口销毁其子控件，随后释放字体。WTS 注销先于窗口销毁，类注销后于全部窗口销毁。
 - 窗口回调使用静态函数，只向主循环发送标量消息。显示器枚举回调同步借用独占向量，两类回调均拦截 Rust unwind。消息指针仅在对应同步回调期间读取。

@@ -1,9 +1,8 @@
 import { useAccess } from "./access";
 import { useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import type { Snapshot } from "./contracts";
-import type { Mutate } from "./Lifecycle";
 import { DetailsDialog } from "./DetailsDialog";
 import { seatStatusLabels, matchesSearch } from "./fleet";
 import {
@@ -35,7 +34,7 @@ export function Roster({
   contest?: Contest;
   csrf: string;
   disabled: boolean;
-  onMutate: Mutate;
+  onMutate: Mutation;
 }) {
   const access = useAccess();
   const [text, setText] = useState("");

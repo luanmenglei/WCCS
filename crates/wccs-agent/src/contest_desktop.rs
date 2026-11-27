@@ -108,8 +108,7 @@ impl Download {
                 .timeout(std::time::Duration::from_secs(6))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-            credential: crate::diagnostics::credential(path, &identity)
-                .map_err(|e| e.to_string())?,
+            credential: crate::identity::credential(path, &identity).map_err(|e| e.to_string())?,
             url: format!("{server}/api/device/desktop-files/{}", command.command_id),
             device: command.device_id.clone(),
         })

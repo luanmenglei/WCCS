@@ -1,7 +1,4 @@
-use crate::{
-    connection,
-    windows_agent::{Identity, Result, persist},
-};
+use crate::{AgentResult as Result, connection, identity::Identity, local_state::persist};
 use futures_util::StreamExt;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -36,44 +33,6 @@ fn client() -> Result<Client> {
         .connect_timeout(Duration::from_secs(3))
         .redirect(reqwest::redirect::Policy::none())
         .build()?)
-}
-
-pub fn credential(path: &Path, identity: &Identity) -> Result<String> {
-    use std::os::windows::fs::OpenOptionsExt;
-    let started = Instant::now();
-    let _lock = loop {
-        match fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .share_mode(0)
-            .open(path.with_extension("credential.lock"))
-        {
-            Ok(file) => break file,
-            Err(e)
-                if matches!(e.raw_os_error(), Some(32 | 33))
-                    && started.elapsed() < Duration::from_secs(3) =>
-            {
-                std::thread::sleep(Duration::from_millis(25))
-            }
-            Err(e) => return Err(e.into()),
-        }
-    };
-    let credential_path = path.with_extension("credential");
-    let value = match fs::read_to_string(&credential_path) {
-        Ok(value) => value,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let value = identity.device_token.clone().unwrap_or_else(token);
-            persist(&credential_path, value.as_bytes())?;
-            value
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if value.len() != 64 {
-        return Err("设备凭据格式错误".into());
-    }
-    Ok(value)
 }
 
 fn status(path: &Path) -> Result<Value> {
@@ -326,7 +285,7 @@ fn diagnose(path: &Path, service: &str, output: &Path, test_mode: bool) -> Resul
             Code::SessionUnavailable
         },
     );
-    let credential = credential(path, &identity)?;
+    let credential = crate::identity::credential(path, &identity)?;
     let client = client()?;
     let context = if let Some(server) = &saved.configuration.server {
         network_checks(
@@ -637,7 +596,7 @@ fn websocket_probe(server: &str, device: &str, credential: &str, nonce: &str) ->
         connect_async_with_config,
         tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
     };
-    let mut url = crate::windows_agent::validate_server(server)?;
+    let mut url = crate::connection::validate_server(server)?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme).map_err(|_| "websocket_scheme")?;
     url.set_path("/api/device/diagnostics/probe");

@@ -1,3 +1,4 @@
+import type { Mutation } from "./api";
 import { Health } from "./Health";
 import { healthAbnormal, healthStale, versionMismatch } from "./health-model";
 import { participantLabel, type Contest } from "./roster-model";
@@ -10,7 +11,7 @@ import {
   seatStatusLabels,
 } from "./fleet";
 import { DetailsDialog } from "./DetailsDialog";
-import { SeatChecks, type Mutation } from "./SeatChecks";
+import { SeatChecks } from "./SeatChecks";
 
 type Props = {
   contest?: Contest;

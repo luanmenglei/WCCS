@@ -338,7 +338,7 @@ pub fn execute(
         }
         if !simulation {
             reboot_boot_marker(true)?;
-            crate::windows_agent::persist(
+            crate::local_state::persist(
                 &identity.with_extension("requested-reboot"),
                 command.job_id.as_bytes(),
             )
@@ -494,7 +494,7 @@ pub fn reboot_boot_marker(create: bool) -> Result<bool> {
 
 fn request_reboot(identity: &Path, job: &str, simulation: bool) -> Result<()> {
     if simulation {
-        crate::windows_agent::persist(
+        crate::local_state::persist(
             &identity.with_extension("reboot-simulation.json"),
             serde_json::json!({"job_id":job,"reboot_requested":true})
                 .to_string()

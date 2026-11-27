@@ -1,10 +1,8 @@
 //! Inspect a restored deployment without running startup migrations or contest workers.
-use crate::{App, Config, database::Database, validate_config};
+use crate::{App, Config, app::validate_config, database::Database, migrations::SCHEMA_VERSION};
 use axum::{Json, extract::State, http::StatusCode};
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
-
-pub(crate) const SCHEMA_VERSION: i32 = 21;
 
 /// Database-wide ownership for the lifetime of the serving process. Never reconnect
 /// this session: losing it requires a fresh startup and retirement of the old epoch.

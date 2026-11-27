@@ -2,9 +2,8 @@ import { useAccess } from "./access";
 import { Preparation } from "./Preparation";
 import { useEffect, useState } from "react";
 import type { z } from "zod";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import type { Snapshot } from "./contracts";
-import type { Mutation } from "./SeatChecks";
 import {
   maintenancePreviewSchema,
   maintenanceListSchema,

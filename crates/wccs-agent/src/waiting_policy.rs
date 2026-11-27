@@ -327,7 +327,7 @@ pub fn apply(path: &Path, sid: &str) -> Result<()> {
         original: read(policy(&root, false)?.as_ref())?,
     };
     // The service's identity lock serializes all owners. Persist before first mutation.
-    crate::windows_agent::persist(path, &serde_json::to_vec(&journal)?)
+    crate::local_state::persist(path, &serde_json::to_vec(&journal)?)
         .map_err(|_| "waiting_policy_persist_failed")?;
     let key = policy(&root, true)?.ok_or("waiting_policy_key_missing")?;
     write(&key, &applied())?;

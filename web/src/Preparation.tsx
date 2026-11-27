@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import { useAccess } from "./access";
-import type { Mutation } from "./SeatChecks";
 const responseSchema = z.object({
   version: z.number(),
   profile: z.record(z.string(), z.unknown()).nullable(),

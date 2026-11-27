@@ -62,7 +62,7 @@ fn image_identity_lock(identity: &Path) -> Result<fs::File> {
 
 pub fn export_image(identity: &Path, executable: PathBuf, output: &Path) -> Result<()> {
     let _lock = image_identity_lock(identity)?;
-    let device: crate::windows_agent::Identity = serde_json::from_slice(&fs::read(identity)?)?;
+    let device: crate::identity::Identity = serde_json::from_slice(&fs::read(identity)?)?;
     let mut native = Native::open(
         &identity.with_extension("login-native.json"),
         &device.device_id,
@@ -91,7 +91,7 @@ pub fn export_image(identity: &Path, executable: PathBuf, output: &Path) -> Resu
         }
     }
     for name in ["contest.dpapi", "recovery.dpapi"] {
-        crate::windows_agent::persist(&output.join(name), &fs::read(native.directory.join(name))?)
+        crate::local_state::persist(&output.join(name), &fs::read(native.directory.join(name))?)
             .map_err(|_| "image_secret_copy_failed")?;
     }
     native.config.machine_name.clear();
@@ -122,7 +122,7 @@ pub fn import_image(template: &Path, identity: &Path) -> Result<()> {
     let mut source: ImageTemplate =
         serde_json::from_slice(&fs::read(template.join("template.json"))?)?;
     validate_image_template(&source)?;
-    let device: crate::windows_agent::Identity = serde_json::from_slice(&fs::read(identity)?)?;
+    let device: crate::identity::Identity = serde_json::from_slice(&fs::read(identity)?)?;
     if !device.image_enrollment {
         return Err("image_identity_required".into());
     }
@@ -225,7 +225,7 @@ pub struct Native {
     tools_ready: bool,
 }
 fn persist(path: &Path, value: &impl Serialize) -> Result<()> {
-    crate::windows_agent::persist(path, &serde_json::to_vec_pretty(value)?)
+    crate::local_state::persist(path, &serde_json::to_vec_pretty(value)?)
         .map_err(|_| "native_journal_failed".into())
 }
 fn config(path: &Path) -> Result<Config> {

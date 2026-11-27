@@ -299,7 +299,7 @@ pub fn protect(path: &Path, secret: &Secret) -> Result<()> {
             CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN,
             &mut output,
         )?;
-        let result = crate::windows_agent::persist(
+        let result = crate::local_state::persist(
             path,
             std::slice::from_raw_parts(output.pbData, output.cbData as usize),
         )

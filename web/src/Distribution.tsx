@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import { useAccess } from "./access";
 import type { Snapshot } from "./contracts";
-import type { Mutation } from "./SeatChecks";
 
 const manifestSchema = z.object({
   id: z.string(),

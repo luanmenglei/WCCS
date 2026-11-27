@@ -12,7 +12,8 @@ package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
 
 
-def build(client, ca, target, output):
+def read_verified_client(client):
+    """验证内层包的文件清单，保留已发布的字节供镜像再次封装。"""
     with zipfile.ZipFile(client) as archive:
         names = archive.namelist()
         if len(names) != len(set(names)):
@@ -21,8 +22,10 @@ def build(client, ca, target, output):
     manifest = json.loads(files["manifest.json"])
     if manifest.get("schema_version") != 1 or manifest.get("state_schema") != 1 or manifest.get("target") != "x86_64-pc-windows-msvc":
         raise ValueError("unsupported client package")
-    required_files = {"bin/wccs-agent.exe", "bin/wccs-session.exe", "bin/wccs-inventory.exe",
-                      "bin/wccs-login-provider.dll", "runtime/pwsh.exe"} | {"scripts/" + name for name in package.SCRIPTS}
+    required_files = {
+        "bin/wccs-agent.exe", "bin/wccs-session.exe", "bin/wccs-inventory.exe",
+        "bin/wccs-login-provider.dll", "runtime/pwsh.exe",
+    } | {"scripts/" + name for name in package.SCRIPTS}
     if not required_files.issubset(files):
         raise ValueError("incomplete client package")
     expected = {item["path"] for item in manifest["files"]} | {"manifest.json"}
@@ -32,14 +35,25 @@ def build(client, ca, target, output):
         data = files[item["path"]]
         if len(data) != item["size"] or package.digest(data) != item["sha256"]:
             raise ValueError("client checksum mismatch")
+    return manifest["version"], files
+
+
+def image_configuration(target, certificate, version):
+    """母机绑定信息只进入现场目标文件，随镜像分发的配置只含公共字段。"""
     required = {"machine_name", "machine_guid", "install_directory", "service_name", "server", "ca_sha256"}
     if set(target) != required:
         raise ValueError("mother target must contain only public target fields")
-    certificate = Path(ca).read_bytes()
     if package.digest(certificate).lower() != target["ca_sha256"].lower():
         raise ValueError("CA checksum mismatch")
     configuration = {key: target[key] for key in ("server", "ca_sha256", "install_directory", "service_name")}
-    configuration.update(schema_version=1, image_version=manifest["version"])
+    configuration.update(schema_version=1, image_version=version)
+    return configuration
+
+
+def build(client, ca, target, output):
+    version, files = read_verified_client(client)
+    certificate = Path(ca).read_bytes()
+    configuration = image_configuration(target, certificate, version)
     payload = {"image/package/" + name: data for name, data in files.items()}
     payload["image/image.json"] = (json.dumps(configuration, indent=2) + "\n").encode()
     payload["image/ca.crt"] = certificate
@@ -59,7 +73,7 @@ def build(client, ca, target, output):
             f'-File "%~dp0image-mother.ps1" -Action {action}\r\n'
             'if errorlevel 1 pause\r\nexit /b %errorlevel%\r\n'
         ).encode()
-    package.write_archive(Path(output), payload, {"schema_version": 1, "version": manifest["version"], "purpose": "image-preparation"})
+    package.write_archive(Path(output), payload, {"schema_version": 1, "version": version, "purpose": "image-preparation"})
     checksum = hashlib.sha256(Path(output).read_bytes()).hexdigest()
     Path(str(output) + ".sha256").write_text(checksum + "  " + Path(output).name + "\n", encoding="utf-8")
 

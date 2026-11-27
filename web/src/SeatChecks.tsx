@@ -1,14 +1,9 @@
 import { useState } from "react";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import type { Snapshot } from "./contracts";
 import { targetPreviewSchema } from "./seating";
 import type { z } from "zod";
 
-export type Mutation = (
-  path: string,
-  body: Record<string, unknown>,
-  message: string,
-) => Promise<void>;
 const labels = {
   disabled: "设备已禁用",
   ready: "可检查",

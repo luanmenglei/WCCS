@@ -1,5 +1,5 @@
 //! Site configuration is separate from per-device credentials and can be saved offline.
-use crate::windows_agent::{Identity, Result, persist, validate_server};
+use crate::{AgentResult as Result, identity::Identity, local_state::persist};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use wccs_protocol::{diagnostics::SeatClaim, digest};
@@ -51,6 +51,23 @@ impl Saved {
         }
         Ok(())
     }
+}
+
+pub fn validate_server(server: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(server)?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err("服务地址需要纯 origin".into());
+    }
+    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err("服务地址需要 HTTPS，本地回环支持 HTTP 验证".into());
+    }
+    Ok(url)
 }
 
 fn canonical_origin(server: &str) -> Result<String> {
@@ -257,5 +274,25 @@ mod tests {
         identity.device_id = "replacement".into();
         assert!(load(&path, &identity).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    #[test]
+    fn accepted_origins_normalize_case_and_keep_tls_requirements() {
+        assert_eq!(
+            validate_server("HTTPS://EXAMPLE.COM/").unwrap().as_str(),
+            "https://example.com/"
+        );
+        assert_eq!(
+            validate_server("HTTP://LOCALHOST:8788").unwrap().as_str(),
+            "http://localhost:8788/"
+        );
+        assert!(validate_server("http://10.0.0.1").is_err());
+        assert!(validate_server("https://user:password@example.com").is_err());
+        assert!(validate_server("https://example.com/path").is_err());
+        assert!(validate_server("https://example.com/?token=value").is_err());
     }
 }

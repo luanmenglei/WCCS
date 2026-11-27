@@ -1,3 +1,9 @@
+export type Mutation = (
+  path: string,
+  body: Record<string, unknown>,
+  message: string,
+) => Promise<void>;
+
 export class ApiError extends Error {
   constructor(
     message: string,

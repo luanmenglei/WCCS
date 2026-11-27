@@ -38,6 +38,18 @@ flowchart TB
 
 控制路径和文件传输分别设置队列及资源限制。控制命令采用已定义的操作类型和参数校验，操作结果可追踪。应用开发时按这些职责创建目录，当前文档描述的是目标结构。
 
+## 按维护任务定位代码
+
+| 要修改的行为 | 从哪里开始读 | 修改时一起核对 |
+| --- | --- | --- |
+| 增加管理或设备 HTTP 接口 | [服务端路由](../crates/wccs-server/src/routes.rs) | 在对应业务处理函数核对调用者权限。大维护回执另有读取请求体前的鉴权和并发配额 |
+| 升级数据库、处理重启前的任务 | [迁移清单](../crates/wccs-server/src/migrations.rs) · [启动事务](../crates/wccs-server/src/app.rs) | 迁移按已安装版本续跑。每次启动都退役旧控制器的授权，再启动后台任务 |
+| 改设备注册、服务地址或工具回执 | [本机身份](../crates/wccs-agent/src/identity.rs) · [连接配置](../crates/wccs-agent/src/connection.rs) · [注册与心跳消息](../crates/wccs-protocol/src/device.rs) · [工具检查契约](../crates/wccs-protocol/src/tool_checks.rs) | 镜像与逐机注册使用各自的注册消息。已有 JSON 样例和旧服务器轮询回退覆盖兼容行为 |
+| 改 Windows 维护任务 | [轮询与执行顺序](../crates/wccs-agent/src/maintenance.rs) · [本机日志](../crates/wccs-agent/src/maintenance/journal.rs) | 副作用前持久化，执行中复核授权，回执丢失后补报。已确认和隔离的任务再次收到时只提供可证明的结果 |
+| 改等待窗口文字、控件或租约 | [单屏窗口](../crates/wccs-session/src/platform/window.rs) · [宿主 IPC 与续租](../crates/wccs-session/src/platform/control.rs) | UI 线程拥有窗口和字体。定时刷新展示，控制到期依据单调时钟 |
+| 改管理台会话、轮询或写请求重试 | [管理会话](../web/src/useAdminSession.ts) · [HTTP 客户端](../web/src/api.ts) | 401 和主动退出走同一条清理路径。切换操作员后，旧响应不能更新新会话的快照和回执 |
+| 改机房与座位页面 | [机房选择](../web/src/Rooms.tsx) · [草稿与保存](../web/src/rooms/RoomEditor.tsx) · [设备地址核对](../web/src/rooms/DeviceAddressReview.tsx) | 草稿编辑使旧预览失效。设备核对读取已生效快照，冲突设备可能对应多个位置 |
+
 ## 工程与部署边界
 
 赛场入口、活动控制器、持久数据库与逐机恢复状态分别管理。部署准备可在数据库副本上只读执行；控制器接管共用数据库前需取得独立会话锁。换物理机优先保留客户端信任的 HTTPS origin，另建入口时重新注册设备。授权随控制连接结束，管理机从进程探测、数据库就绪、设备回执三个层次核对恢复。职责及故障边界见 [ADR 0017](decisions/0017-site-deployment-and-cutover.md)。

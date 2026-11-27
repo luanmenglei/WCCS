@@ -27,6 +27,8 @@ Axum 提供 WebSocket 接入能力，连接恢复、命令有效期与执行确�
 
 windows crate 提供 Windows API 绑定，包括窗口、同步和系统接口。服务、会话、设备策略及登录集成按模块封装，并依据机房 Windows 版本逐项验证。[Microsoft Rust for Windows 文档](https://learn.microsoft.com/en-us/windows/dev-environment/rust/rust-for-windows)
 
+服务端启动、设备协议、Windows 宿主和管理台的源码入口及修改时需核对的约束见[按维护任务定位代码](../architecture.md#按维护任务定位代码)。
+
 ## 管理界面交付
 
 管理端使用 React + TypeScript 构建组件，Vite 生成静态发布资源。Node.js 用于前端开发和构建，Linux 比赛部署包提供构建后的资源。React 的 TypeScript 支持及 Vite 的静态构建方式见官方文档。[React TypeScript 文档](https://react.dev/learn/typescript)、[Vite 静态部署文档](https://vite.dev/guide/static-deploy.html)

@@ -197,7 +197,7 @@ pub fn apply(path: &Path, requested: &Restrictions) -> Result<()> {
         storage: waiting_policy::machine_read(STORAGE_KEY, STORAGE_VALUE)?,
         rights,
     };
-    crate::windows_agent::persist(path, &serde_json::to_vec(&journal)?)
+    crate::local_state::persist(path, &serde_json::to_vec(&journal)?)
         .map_err(|_| "contest_policy_persist_failed")?;
     if requested.block_removable_storage {
         waiting_policy::machine_write(STORAGE_KEY, STORAGE_VALUE, &blocked_storage())?;

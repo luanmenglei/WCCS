@@ -266,7 +266,7 @@ impl Controller {
         let bytes = serde_json::to_vec(
             &serde_json::json!({"schema_version":1,"instance_id":self.instance,"command":self.command,"report":self.report,"actual":self.actual}),
         )?;
-        crate::windows_agent::persist(&self.path.with_extension("control.json"), &bytes)
+        crate::local_state::persist(&self.path.with_extension("control.json"), &bytes)
             .map_err(|_| "control_persist_failed")?;
         Ok(())
     }
@@ -276,7 +276,7 @@ impl Controller {
         let server = crate::connection::server(&self.path, &typed_identity)
             .map_err(|_| "server_not_configured")?;
         let mut url =
-            crate::windows_agent::validate_server(&server).map_err(|_| "invalid_server_origin")?;
+            crate::connection::validate_server(&server).map_err(|_| "invalid_server_origin")?;
         let device = identity["device_id"].as_str().ok_or("device_missing")?;
         let credential = fs::read_to_string(self.path.with_extension("credential"))?;
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };

@@ -1,7 +1,7 @@
+import type { Mutation } from "./api";
 import { useState } from "react";
 import type { Page } from "./navigation";
 import type { Session, Snapshot } from "./contracts";
-import type { Mutation } from "./SeatChecks";
 import { ContestControl } from "./ContestControl";
 import { Distribution } from "./Distribution";
 import { Domjudge } from "./Domjudge";

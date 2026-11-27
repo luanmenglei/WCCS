@@ -81,7 +81,7 @@ pub struct Simulator {
 }
 
 fn save(path: &Path, value: &impl Serialize) -> Result<()> {
-    crate::windows_agent::persist(path, &serde_json::to_vec_pretty(value)?)
+    crate::local_state::persist(path, &serde_json::to_vec_pretty(value)?)
         .map_err(|_| "login_journal_write_failed".into())
 }
 

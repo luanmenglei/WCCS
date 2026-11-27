@@ -1,14 +1,10 @@
+import type { Mutation } from "./api";
 import { useAccess } from "./access";
 import { Health } from "./Health";
 import { Diagnostics } from "./Diagnostics";
 import { participantLabel, type Contest } from "./roster-model";
 import { useEffect, useState, type FormEvent } from "react";
-import {
-  LifecycleControls,
-  DeviceHistory,
-  lifecycleLabels,
-  type Mutate,
-} from "./Lifecycle";
+import { LifecycleControls, DeviceHistory, lifecycleLabels } from "./Lifecycle";
 import { DetailsDialog } from "./DetailsDialog";
 import { checkStatus, matchesSearch, seatRows } from "./fleet";
 import { checkLabel, reasons, type Device, type Snapshot } from "./contracts";
@@ -16,7 +12,7 @@ import { checkLabel, reasons, type Device, type Snapshot } from "./contracts";
 type Props = {
   contest?: Contest;
   snapshot: Snapshot;
-  onMutate: Mutate;
+  onMutate: Mutation;
   disabled: boolean;
   onCreate: (body: Record<string, unknown>) => Promise<void>;
   onRecheck: (id: string) => Promise<void>;

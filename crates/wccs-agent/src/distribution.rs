@@ -1,9 +1,5 @@
 //! Resumable data transfer worker, isolated from the control lease and native session thread.
-use crate::{
-    connection, diagnostics, file_transaction,
-    host::Result,
-    windows_agent::{Identity, persist},
-};
+use crate::{connection, file_transaction, host::Result, identity::Identity, local_state::persist};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -324,7 +320,7 @@ fn cycle(
     cursors: &mut std::collections::HashMap<String, usize>,
 ) -> Result<bool> {
     let identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
-    let credential = diagnostics::credential(path, &identity)
+    let credential = crate::identity::credential(path, &identity)
         .map_err(|_| "distribution_credential_unavailable")?;
     let server =
         connection::server(path, &identity).map_err(|_| "distribution_server_unavailable")?;

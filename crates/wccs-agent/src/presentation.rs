@@ -1,7 +1,4 @@
-use crate::{
-    connection, diagnostics,
-    windows_agent::{Identity, Result, persist},
-};
+use crate::{AgentResult as Result, connection, identity::Identity, local_state::persist};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -112,7 +109,7 @@ fn update(
 ) -> Result<()> {
     let identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
     let server = connection::server(path, &identity)?;
-    let credential = diagnostics::credential(path, &identity)?;
+    let credential = crate::identity::credential(path, &identity)?;
     let session = wccs_session::ipc::discover(test_mode).ok().map(|s| s.key);
     let started = Instant::now();
     let response: Value = client

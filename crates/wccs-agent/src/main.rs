@@ -13,9 +13,16 @@ mod distribution;
 #[cfg(windows)]
 mod file_transaction;
 #[cfg(windows)]
+pub(crate) type AgentResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[cfg(windows)]
 mod health;
 #[cfg(windows)]
 mod host;
+#[cfg(windows)]
+mod identity;
+#[cfg(windows)]
+mod local_state;
 #[cfg(windows)]
 mod login;
 #[cfg(windows)]

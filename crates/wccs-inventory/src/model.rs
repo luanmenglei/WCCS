@@ -172,7 +172,7 @@ pub enum ToolKind {
     Script,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPath {
     pub id: String,

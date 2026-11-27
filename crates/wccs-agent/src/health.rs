@@ -1,8 +1,5 @@
 //! Sampling and upload are isolated from the control renewal thread.
-use crate::{
-    connection, diagnostics,
-    windows_agent::{Identity, Result, persist},
-};
+use crate::{AgentResult as Result, connection, identity::Identity, local_state::persist};
 use serde::Deserialize;
 use std::{
     fs,
@@ -86,7 +83,7 @@ pub fn worker(path: &Path, instance: &str, stop: Arc<AtomicBool>) {
             )?;
             let identity: Identity = serde_json::from_slice(&fs::read(path)?)?;
             let server = connection::server(path, &identity)?;
-            let credential = diagnostics::credential(path, &identity)?;
+            let credential = crate::identity::credential(path, &identity)?;
             let mut request = client
                 .post(format!("{server}/api/device/health"))
                 .bearer_auth(credential)

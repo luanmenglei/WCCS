@@ -2,13 +2,20 @@
 //! Callbacks have static lifetimes, keep no Rust references, and post scalar
 //! notifications to the message loop. No Rust borrow crosses a reentrant call.
 
+mod control;
 mod presentation;
+mod snapshot;
+mod window;
+
+use control::Control;
+pub use control::controlled;
+use snapshot::{recovered_previous_run, save_snapshot};
+use window::{Label, NativeWindow};
 
 use crate::state::{InputKind, SessionEvent, Snapshot, WaitingState};
-use presentation::{BACKGROUND, CARD, FOREGROUND, Layout, MUTED};
+use presentation::{BACKGROUND, CARD, FOREGROUND, MUTED};
 use std::{
-    fs::{self, File},
-    io::{self, Write},
+    fs, io,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -18,16 +25,11 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW},
         System::{
             LibraryLoader::*,
             RemoteDesktop::*,
             StationsAndDesktops::*,
             SystemInformation::{GetLocalTime, GetTickCount64},
-            SystemServices::{
-                SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_LEFTNOWORDWRAP, SS_NOPREFIX,
-                SS_OWNERDRAW, SS_RIGHT,
-            },
             Threading::*,
         },
         UI::{
@@ -40,8 +42,7 @@ use windows::{
     core::{BOOL, PCWSTR, Result as WinResult, w},
 };
 
-use wccs_protocol::control::{Actual, CONTROL_VERSION, Command, IpcRequest, LEASE_SECONDS};
-use wccs_session::ipc;
+use wccs_protocol::control::Command;
 
 const REBUILD: u32 = WM_APP + 1;
 const LAYOUT: u32 = WM_APP + 2;
@@ -138,364 +139,6 @@ impl Drop for Font {
         unsafe {
             let _ = DeleteObject(self.0.into());
         }
-    }
-}
-
-struct NativeWindow {
-    handle: HWND,
-    labels: Vec<HWND>,
-    exit: HWND,
-    warning: HWND,
-    warning_visible: bool,
-    fonts: Vec<Font>,
-    development: bool,
-    session_registered: bool,
-    dpi: u32,
-}
-
-impl Drop for NativeWindow {
-    fn drop(&mut self) {
-        // SAFETY: this UI thread owns the parent and all its children. Unregister
-        // before destruction. DestroyWindow synchronously ends their callbacks,
-        // then Rust drops the font. No callback owns or frees a Rust object.
-        unsafe {
-            if self.session_registered {
-                let _ = WTSUnRegisterSessionNotification(self.handle);
-            }
-            let _ = DestroyWindow(self.handle);
-        }
-    }
-}
-
-impl NativeWindow {
-    fn create(
-        rect: RECT,
-        instance: HINSTANCE,
-        index: usize,
-        recovered: bool,
-        identity: Option<&Command>,
-        test_mode: bool,
-    ) -> WinResult<Self> {
-        let identification = identity.is_some_and(|c| c.action == "identify");
-        let rect = if test_mode && !identification {
-            RECT {
-                left: rect.left + 40,
-                top: rect.top + 40,
-                right: (rect.left + 900).min(rect.right),
-                bottom: (rect.top + 740).min(rect.bottom),
-            }
-        } else {
-            rect
-        };
-        let title = wide(format!("WCCS 等待界面 · 屏幕 {}", index + 1).as_ref());
-        // SAFETY: class is registered on this thread. Strings remain alive through
-        // creation and Windows copies them. No user-data pointer is passed.
-        let handle = unsafe {
-            CreateWindowExW(
-                if identity.is_some() && !test_mode {
-                    WS_EX_TOPMOST
-                } else {
-                    WINDOW_EX_STYLE::default()
-                },
-                CLASS_NAME,
-                PCWSTR(title.as_ptr()),
-                WS_POPUP | WS_CLIPCHILDREN,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                None,
-                None,
-                Some(instance),
-                None,
-            )?
-        };
-        let mut window = Self {
-            handle,
-            labels: Vec::new(),
-            exit: HWND::default(),
-            warning: HWND::default(),
-            warning_visible: false,
-            fonts: Vec::new(),
-            development: identity.is_none() || test_mode || identification,
-            session_registered: false,
-            dpi: 96,
-        };
-        let recovery = if recovered {
-            "上次运行异常结束，等待界面已恢复"
-        } else {
-            "开发预览 · 合成身份"
-        };
-        for (index, text) in [
-            "WCCS 程序设计竞赛",
-            "林小禾",
-            "示例实验学校",
-            "A-023",
-            "等待比赛开始",
-            "请等待工作人员统一开放",
-            "",
-            recovery,
-            "00:00:00",
-            "当前时间",
-            "",
-            "WCCS",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            window
-                .labels
-                .push(window.control(w!("STATIC"), text, LABEL_ID + index, instance)?);
-        }
-        if let Some(command) = identity {
-            window.set_label(0, &command.identity.contest_name)?;
-            window.set_label(1, &command.identity.name)?;
-            window.set_label(2, &command.identity.school)?;
-            window.set_label(3, &command.identity.seat_label)?;
-            window.set_label(7, if test_mode { "受控开发预览" } else { "" })?;
-        }
-        if window.development {
-            window.exit = window.control(
-                w!("BUTTON"),
-                if identification {
-                    "关闭设备识别"
-                } else {
-                    "退出开发测试"
-                },
-                EXIT_BUTTON,
-                instance,
-            )?;
-        }
-        if identification {
-            window.set_label(4, "设备与物理座位核对")?;
-            window.set_label(5, "Esc 关闭 · 到期自动关闭")?;
-            window.set_label(7, "工作人员主动识别")?;
-        }
-        window.warning =
-            window.control(w!("STATIC"), "请勿触碰鼠标和键盘", WARNING_ID, instance)?;
-        // SAFETY: child belongs to this window and starts hidden until input.
-        unsafe {
-            let _ = ShowWindow(window.warning, SW_HIDE);
-        }
-        unsafe {
-            let _ = ShowWindow(window.labels[10], SW_HIDE);
-        }
-        window.layout()?;
-        Ok(window)
-    }
-
-    fn control(
-        &self,
-        class: PCWSTR,
-        text: &str,
-        id: usize,
-        instance: HINSTANCE,
-    ) -> WinResult<HWND> {
-        let text = wide(text.as_ref());
-        // SAFETY: parent is live and owned by this thread. Child ownership transfers
-        // to the parent. ID is an integer control identifier, never dereferenced.
-        unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                class,
-                PCWSTR(text.as_ptr()),
-                WS_CHILD
-                    | WS_VISIBLE
-                    | WS_CLIPSIBLINGS
-                    | if id == EXIT_BUTTON {
-                        WS_TABSTOP
-                    } else {
-                        let style = match id {
-                            WARNING_ID => SS_OWNERDRAW.0,
-                            id if id == LABEL_ID + 10 => SS_LEFT.0,
-                            id if id == LABEL_ID + 3 => {
-                                SS_CENTER.0 | SS_CENTERIMAGE.0 | SS_ENDELLIPSIS.0
-                            }
-                            id if [5, 8, 9].contains(&id.saturating_sub(LABEL_ID)) => {
-                                SS_RIGHT.0 | SS_ENDELLIPSIS.0
-                            }
-                            _ => SS_LEFTNOWORDWRAP.0 | SS_ENDELLIPSIS.0,
-                        };
-                        WINDOW_STYLE(SS_NOPREFIX.0 | style)
-                    },
-                0,
-                0,
-                1,
-                1,
-                Some(self.handle),
-                Some(HMENU(id as *mut _)),
-                Some(instance),
-                None,
-            )
-        }
-    }
-
-    fn layout(&mut self) -> WinResult<()> {
-        let mut rect = RECT::default();
-        // SAFETY: window remains live for both queries; rect is writable.
-        unsafe {
-            GetClientRect(self.handle, &mut rect)?;
-            self.dpi = GetDpiForWindow(self.handle);
-        }
-        let layout = Layout::new(rect.right, rect.bottom, self.development);
-        let mut fonts = Vec::new();
-        for (index, (label, (area, size, weight))) in
-            self.labels.iter().zip(layout.labels).enumerate()
-        {
-            fonts.push(fitted_font(
-                *label,
-                area.right - area.left,
-                area.bottom - area.top,
-                size,
-                weight,
-                if index == 8 {
-                    w!("Consolas")
-                } else {
-                    w!("Microsoft YaHei UI")
-                },
-            )?);
-            // SAFETY: controls are owned by this live parent on the UI thread.
-            unsafe {
-                SetWindowPos(
-                    *label,
-                    None,
-                    area.left,
-                    area.top,
-                    area.right - area.left,
-                    area.bottom - area.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                )?;
-            }
-        }
-        if self.development {
-            let area = layout.exit;
-            fonts.push(fitted_font(
-                self.exit,
-                area.right - area.left,
-                area.bottom - area.top,
-                (18. * layout.unit) as i32,
-                400,
-                w!("Microsoft YaHei UI"),
-            )?);
-            // SAFETY: development-only button exists and belongs to this window.
-            unsafe {
-                SetWindowPos(
-                    self.exit,
-                    None,
-                    area.left,
-                    area.top,
-                    area.right - area.left,
-                    area.bottom - area.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                )?;
-            }
-        }
-        // SAFETY: warning is an owned child; positioning preserves visibility.
-        unsafe {
-            SetWindowPos(
-                self.warning,
-                Some(HWND_TOP),
-                0,
-                0,
-                rect.right,
-                rect.bottom,
-                SWP_NOACTIVATE,
-            )?;
-        }
-        // All fallible work completes before any control borrows a replacement
-        // font. The previous fonts remain owned until every control has switched.
-        // SAFETY: handles/fonts live through synchronous WM_SETFONT and beyond.
-        unsafe {
-            let controls = self
-                .labels
-                .iter()
-                .copied()
-                .chain(self.development.then_some(self.exit));
-            for (control, font) in controls.zip(&fonts) {
-                SendMessageW(
-                    control,
-                    WM_SETFONT,
-                    Some(WPARAM(font.0.0 as usize)),
-                    Some(LPARAM(1)),
-                );
-            }
-            let _ = InvalidateRect(Some(self.handle), None, true);
-        }
-        self.fonts = fonts;
-        Ok(())
-    }
-
-    fn set_label(&self, index: usize, text: &str) -> WinResult<()> {
-        let text = wide(text.as_ref());
-        // SAFETY: label is a live child; Windows copies the terminated text.
-        unsafe { SetWindowTextW(self.labels[index], PCWSTR(text.as_ptr())) }
-    }
-}
-
-// Match native single-line ellipsis. Preserve readable text at a minimum size;
-// controls retain the full identity string for accessibility and inspection.
-fn fitted_font(
-    control: HWND,
-    width: i32,
-    height: i32,
-    size: i32,
-    weight: i32,
-    family: PCWSTR,
-) -> WinResult<Font> {
-    // SAFETY: the UI thread owns control. The DC is released after the closure on
-    // both success and failure. Every selected font is restored before dropping it.
-    unsafe {
-        let dc = GetDC(Some(control));
-        if dc.is_invalid() {
-            return Err(windows::core::Error::from_win32());
-        }
-        let result = (|| {
-            let mut text = vec![0; GetWindowTextLengthW(control) as usize + 1];
-            let length = GetWindowTextW(control, &mut text) as usize;
-            text.truncate(length);
-            let minimum = size.clamp(12, 16);
-            let mut size = size.max(minimum);
-            loop {
-                let font = CreateFontW(
-                    -size,
-                    0,
-                    0,
-                    0,
-                    weight,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET,
-                    OUT_DEFAULT_PRECIS,
-                    CLIP_DEFAULT_PRECIS,
-                    CLEARTYPE_QUALITY,
-                    DEFAULT_PITCH.0 as u32,
-                    family,
-                );
-                if font.is_invalid() {
-                    return Err(windows::core::Error::from_win32());
-                }
-                let font = Font(font);
-                let previous = SelectObject(dc, font.0.into());
-                let mut bounds = RECT {
-                    right: width,
-                    ..Default::default()
-                };
-                DrawTextW(
-                    dc,
-                    &mut text,
-                    &mut bounds,
-                    DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
-                );
-                SelectObject(dc, previous);
-                if (bounds.bottom <= height && bounds.right <= width) || size <= minimum {
-                    return Ok(font);
-                }
-                size = (size * 9 / 10).max(minimum);
-            }
-        })();
-        ReleaseDC(Some(control), dc);
-        result
     }
 }
 
@@ -704,12 +347,8 @@ impl App {
                 self.test_mode,
             )?);
         }
-        // SAFETY: first window is live. Only it subscribes to this session, so
-        // counters remain independent of monitor count. Drop unregisters it.
-        unsafe {
-            WTSRegisterSessionNotification(windows[0].handle, NOTIFY_FOR_THIS_SESSION)?;
-        }
-        windows[0].session_registered = true;
+        // 只订阅一个窗口，避免多屏重复计数同一次会话切换。
+        windows[0].subscribe_to_session()?;
         self.windows = windows;
         self.last_counts.clear();
         self.last_clock.clear();
@@ -750,28 +389,12 @@ impl App {
         let clock = format!("{:02}:{:02}:{:02}", now.wHour, now.wMinute, now.wSecond);
         for window in &mut self.windows {
             if self.last_clock != clock {
-                window.set_label(8, &clock)?;
+                window.set_label(Label::Clock, &clock)?;
             }
             if self.last_counts != counts && window.development && !identification {
-                window.set_label(6, &counts)?;
+                window.set_label(Label::InputCounts, &counts)?;
             }
-            if window.warning_visible != warning {
-                // SAFETY: owned child, shown above identity labels without taking
-                // activation from the root window used by the control protocol.
-                unsafe {
-                    let _ = ShowWindow(
-                        window.warning,
-                        if warning { SW_SHOWNOACTIVATE } else { SW_HIDE },
-                    );
-                    let _ = RedrawWindow(
-                        Some(window.handle),
-                        None,
-                        None,
-                        RDW_INVALIDATE | RDW_ALLCHILDREN,
-                    );
-                }
-                window.warning_visible = warning;
-            }
+            window.show_warning(warning);
         }
         if !identification {
             self.render_presentation()?;
@@ -797,20 +420,11 @@ impl App {
             .filter(|p| self.command.as_ref().is_some_and(|c| p.data.matches(c)));
         presentation::set_logo(display.and_then(|p| p.data.logo.as_ref()));
         for window in &mut self.windows {
-            window.set_label(7, "工作人员诊断 F1")?;
+            window.set_label(Label::StaffHint, "工作人员诊断 F1")?;
             let Some(display) = display else {
-                window.set_label(4, "WCCS 等待展示数据 · OJ 未知")?;
-                window.set_label(10,"展示数据尚未到达。工作人员可在本机配置入口执行分步骤诊断，并在管理端核对展示配置与设备回执。")?;
-                unsafe {
-                    let _ = ShowWindow(
-                        window.labels[10],
-                        if self.show_diagnostics {
-                            SW_SHOWNOACTIVATE
-                        } else {
-                            SW_HIDE
-                        },
-                    );
-                }
+                window.set_label(Label::Connection, "WCCS 等待展示数据 · OJ 未知")?;
+                window.set_label(Label::Diagnostics,"展示数据尚未到达。工作人员可在本机配置入口执行分步骤诊断，并在管理端核对展示配置与设备回执。")?;
+                window.show_diagnostics(self.show_diagnostics);
                 continue;
             };
             let stale = display.stale(tick);
@@ -820,7 +434,7 @@ impl App {
                 _ => "未知",
             };
             window.set_label(
-                4,
+                Label::Connection,
                 &format!(
                     "WCCS {} · OJ {}",
                     if stale {
@@ -839,7 +453,7 @@ impl App {
             if let (Some(now), Some(start)) = (now, display.data.starts_at_ms) {
                 let seconds = start.saturating_sub(now).max(0).saturating_add(999) / 1000;
                 window.set_label(
-                    8,
+                    Label::Clock,
                     &format!(
                         "{:02}:{:02}:{:02}",
                         seconds / 3600,
@@ -848,7 +462,7 @@ impl App {
                     ),
                 )?;
                 window.set_label(
-                    9,
+                    Label::ClockCaption,
                     if now >= start {
                         "已到开始时间，等待开放"
                     } else {
@@ -856,11 +470,11 @@ impl App {
                     },
                 )?;
             } else {
-                window.set_label(8, "--:--:--")?;
-                window.set_label(9, "开赛时间待配置")?;
+                window.set_label(Label::Clock, "--:--:--")?;
+                window.set_label(Label::ClockCaption, "开赛时间待配置")?;
             }
             window.set_label(
-                5,
+                Label::Timing,
                 &format!(
                     "显示校时 {:+} ms · RTT {} ms{}",
                     display.clock_offset_ms,
@@ -874,20 +488,11 @@ impl App {
                 .as_ref()
                 .map(|l| format!("{} / {}", l.source, l.sha256))
                 .unwrap_or_else(|| "校徽缺失，使用默认图标，下轮刷新重试".into());
-            window.set_label(10,&format!("工作人员诊断（F1 收起）\n设备 {} · 座位 {}\n比赛 {} · 身份版本 {} / {}\n展示配置 v{}\n摘要 {}\nWCCS {} · {} · 更新 {}\nOJ {} · {} · 更新 {}\n服务器时间样本 {} · RTT {} ms · 偏差 {:+} ms\n校徽 {}",
+            window.set_label(Label::Diagnostics,&format!("工作人员诊断（F1 收起）\n设备 {} · 座位 {}\n比赛 {} · 身份版本 {} / {}\n展示配置 v{}\n摘要 {}\nWCCS {} · {} · 更新 {}\nOJ {} · {} · 更新 {}\n服务器时间样本 {} · RTT {} ms · 偏差 {:+} ms\n校徽 {}",
                 display.data.device_id,display.data.identity.seat_label,display.data.identity.contest_id,display.data.identity.contest_version,display.data.identity.room_version,
                 display.data.configuration_version,display.data.configuration_digest,display.wccs.source,display.wccs.detail,display.wccs.checked_at_ms,
                 display.oj.source,display.oj.detail,display.oj.checked_at_ms,display.data.server_time_ms,display.round_trip_ms,display.clock_offset_ms,logo))?;
-            unsafe {
-                let _ = ShowWindow(
-                    window.labels[10],
-                    if self.show_diagnostics {
-                        SW_SHOWNOACTIVATE
-                    } else {
-                        SW_HIDE
-                    },
-                );
-            }
+            window.show_diagnostics(self.show_diagnostics);
         }
         Ok(())
     }
@@ -918,136 +523,8 @@ impl App {
     }
 }
 
-fn recovered_previous_run(directory: &Path) -> io::Result<bool> {
-    match fs::read(directory.join("status.json")) {
-        Ok(bytes) => {
-            let previous: Snapshot = serde_json::from_slice(&bytes)?;
-            if previous.schema_version != 1 {
-                return Err(io::Error::other(
-                    "运行记录版本不支持，请使用新的 --state-dir",
-                ));
-            }
-            Ok(!previous.clean_exit)
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-fn save_snapshot(directory: &Path, snapshot: &Snapshot) -> io::Result<()> {
-    let temporary = directory.join("status.tmp");
-    let mut file = File::create(&temporary)?;
-    serde_json::to_writer_pretty(&mut file, snapshot)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    drop(file);
-    let source = wide(temporary.as_os_str());
-    let destination = wide(directory.join("status.json").as_os_str());
-    // SAFETY: both paths are terminated and live for the call. Same-directory
-    // replacement publishes one complete snapshot, including after interrupted writes.
-    unsafe {
-        MoveFileExW(
-            PCWSTR(source.as_ptr()),
-            PCWSTR(destination.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-        .map_err(io::Error::other)
-    }
-}
-
 pub fn run(directory: &Path) -> Result<u8, Box<dyn std::error::Error>> {
     run_ui(Some(directory), None)
-}
-
-struct Control {
-    display: Option<wccs_protocol::presentation::Display>,
-    pipe: ipc::Pipe,
-    command: Command,
-    deadline: Instant,
-    test_mode: bool,
-}
-
-pub fn controlled() -> Result<u8, Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 5 || !["test", "service"].contains(&args[4].as_str()) {
-        return Err("controlled_arguments".into());
-    }
-    let test_mode = args[4] == "test";
-    let pipe =
-        ipc::connect(&args[2], args[3].parse()?, test_mode).map_err(|_| "ipc_auth_failed")?;
-    let start = Instant::now();
-    let request = loop {
-        if let Some(request) = pipe
-            .receive::<IpcRequest>()
-            .map_err(|_| "ipc_read_failed")?
-        {
-            break request;
-        }
-        if start.elapsed().as_secs() > 8 {
-            return Err("ipc_timeout".into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    let session = ipc::discover(true).map_err(|_| "session_unavailable")?;
-    if request.protocol_version != CONTROL_VERSION
-        || request.command.protocol_version != CONTROL_VERSION
-        || !["enter", "probe_desktop", "probe_ipc", "identify"]
-            .contains(&request.command.action.as_str())
-        || request.command.session_key != session.key
-        || request.lease_seconds == 0
-        || request.lease_seconds > LEASE_SECONDS
-    {
-        return Err("ipc_command_rejected".into());
-    }
-    if request.command.action == "probe_ipc" {
-        pipe.send(&Actual {
-            command_id: Some(request.command.command_id),
-            session_key: Some(session.key),
-            detail: "ui_observed".into(),
-            ..Default::default()
-        })
-        .map_err(|_| "ipc_probe_reply_failed")?;
-        return Ok(0);
-    }
-    if request.command.action == "probe_desktop" {
-        if request
-            .command
-            .login
-            .as_ref()
-            .and_then(|p| p.snapshot.target_sid.as_deref())
-            != Some(session.sid())
-            || !ipc::default_desktop().map_err(|_| "desktop_query_failed")?
-        {
-            return Err("desktop_identity_mismatch".into());
-        }
-        let started = Instant::now();
-        // SAFETY: GetShellWindow borrows a window handle owned by the shell in this session.
-        while !input_desktop_active() || unsafe { GetShellWindow().0.is_null() } {
-            if started.elapsed() > std::time::Duration::from_secs(90) {
-                return Err("desktop_shell_initialization_timeout".into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        pipe.send(&Actual {
-            state: "desktop".into(),
-            command_id: Some(request.command.command_id),
-            session_key: Some(session.key),
-            detail: "ui_observed".into(),
-            ..Default::default()
-        })
-        .map_err(|_| "desktop_report_failed")?;
-        return Ok(0);
-    }
-    let control = Control {
-        pipe,
-        display: request
-            .presentation
-            .filter(|p| p.data.matches(&request.command)),
-        command: request.command,
-        deadline: Instant::now() + std::time::Duration::from_secs(request.lease_seconds),
-        test_mode,
-    };
-    run_ui(None, Some(control))
 }
 
 fn run_ui(
@@ -1120,7 +597,7 @@ fn run_ui(
     app.rebuild(module)?;
     app.save(false)?;
     if let Some(control) = &control {
-        report_control(control, &app)?;
+        control.report(&app)?;
     }
     // SAFETY: this thread owns the first visible window. Focus failure is permitted
     // by Windows policy and does not prevent clicking or closing the prototype.
@@ -1233,40 +710,10 @@ fn run_ui(
                         }
                     }
                 }
-                if let Some(control) = &mut control {
-                    if Instant::now() >= control.deadline {
-                        return Err("control_lease_expired".into());
-                    }
-                    if let Some(request) = control
-                        .pipe
-                        .receive::<IpcRequest>()
-                        .map_err(|_| "ipc_disconnected")?
-                    {
-                        if request.protocol_version != CONTROL_VERSION
-                            || request.lease_seconds == 0
-                            || request.lease_seconds > LEASE_SECONDS
-                        {
-                            return Err("ipc_protocol_rejected".into());
-                        }
-                        if request.command.action == "leave" {
-                            app.windows.clear();
-                            control
-                                .pipe
-                                .send(&Actual::default())
-                                .map_err(|_| "ipc_result_failed")?;
-                            return Ok(0);
-                        }
-                        control.display = request
-                            .presentation
-                            .filter(|p| p.data.matches(&control.command));
-                        app.display = control.display.clone();
-                        if request.command != control.command {
-                            return Err("ipc_command_changed".into());
-                        }
-                        control.deadline =
-                            Instant::now() + std::time::Duration::from_secs(request.lease_seconds);
-                        report_control(control, &app)?;
-                    }
+                if let Some(control) = &mut control
+                    && control.poll_host(&mut app)?.is_break()
+                {
+                    return Ok(0);
                 }
                 app.render()?;
                 if app.elapsed_ms().saturating_sub(app.last_save_ms) >= 1000 {
@@ -1377,40 +824,6 @@ fn update_animation_preference() {
     ANIMATE.store(result.is_ok() && enabled.as_bool(), Ordering::Relaxed);
 }
 
-fn report_control(control: &Control, app: &App) -> Result<(), Box<dyn std::error::Error>> {
-    // SAFETY: borrowed foreground HWND is compared only, never dereferenced.
-    let foreground = control.test_mode
-        || (input_desktop_active()
-            && unsafe {
-                app.windows
-                    .iter()
-                    .any(|w| w.handle == GetForegroundWindow())
-            });
-    let actual = Actual {
-        state: if app.state.visible() && !app.windows.is_empty() && foreground {
-            "waiting"
-        } else {
-            "unknown"
-        }
-        .into(),
-        command_id: Some(control.command.command_id.clone()),
-        session_key: Some(control.command.session_key.clone()),
-        monitors: app.windows.len() as u32,
-        detail: if foreground {
-            "ui_observed"
-        } else {
-            "waiting_focus_lost"
-        }
-        .into(),
-        account: None,
-    };
-    control
-        .pipe
-        .send(&actual)
-        .map_err(|_| "ipc_report_failed")?;
-    Ok(())
-}
-
 fn input_desktop_active() -> bool {
     // SAFETY: the returned input desktop is owned until CloseDesktop. A secure
     // desktop denies this ordinary token, which is reported as unobserved.
@@ -1468,224 +881,6 @@ fn identification_mode(app: &App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_layout_preserves_identity_with_readable_ellipsis() {
-        let mut command: Command = serde_json::from_value(serde_json::json!({
-            "protocol_version": CONTROL_VERSION, "command_id": "visual-test",
-            "request_id": "visual-test", "sequence": 1, "device_id": "test",
-            "generation": 1, "device_version": 1, "instance_id": "test",
-            "session_key": "test", "action": "enter", "expires_at": 1,
-            "identity": {
-                "contest_id": "test", "contest_name": "程序设计竞赛 & 现场验证",
-                "contest_version": 1, "participant_id": "test", "name": "林".repeat(100),
-                "school": "校".repeat(200), "seat_id": "test", "seat_label": "A-023",
-                "room_id": "test", "room_version": 1
-            }
-        }))
-        .unwrap();
-        // SAFETY: this test thread registers its class and owns all hidden windows.
-        // Windows are destroyed before the class guard. No UI is shown or focused.
-        let instance = unsafe {
-            let instance = HINSTANCE(GetModuleHandleW(None).unwrap().0);
-            let class = WNDCLASSW {
-                lpfnWndProc: Some(window_proc),
-                hInstance: instance,
-                lpszClassName: CLASS_NAME,
-                ..Default::default()
-            };
-            assert_ne!(RegisterClassW(&class), 0);
-            instance
-        };
-        let _class = WindowClass(instance);
-        for (case, (width, height)) in [
-            (640, 480),
-            (800, 600),
-            (1080, 1920),
-            (1920, 1080),
-            (3840, 2160),
-            (640, 480),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if case == 5 {
-                command.identity.school = "W".repeat(200);
-                command.identity.name = "W".repeat(100);
-            }
-            let window = NativeWindow::create(
-                RECT {
-                    right: width,
-                    bottom: height,
-                    ..Default::default()
-                },
-                instance,
-                0,
-                false,
-                Some(&command),
-                false,
-            )
-            .unwrap();
-            assert!(!window.development);
-            assert!(window.exit.is_invalid());
-            for (index, expected) in [
-                (0, command.identity.contest_name.as_str()),
-                (1, command.identity.name.as_str()),
-                (2, command.identity.school.as_str()),
-                (3, command.identity.seat_label.as_str()),
-                (6, ""),
-                (7, ""),
-            ] {
-                // SAFETY: label/font belong to window. Restore the borrowed DC's
-                // font before releasing the DC and eventually destroying window.
-                unsafe {
-                    let label = window.labels[index];
-                    let mut text = vec![0; GetWindowTextLengthW(label) as usize + 1];
-                    let length = GetWindowTextW(label, &mut text) as usize;
-                    text.truncate(length);
-                    assert_eq!(String::from_utf16(&text).unwrap(), expected);
-                    let mut area = RECT::default();
-                    GetClientRect(label, &mut area).unwrap();
-                    let dc = GetDC(Some(label));
-                    assert!(!dc.is_invalid());
-                    let previous = SelectObject(dc, window.fonts[index].0.into());
-                    let mut measured = RECT {
-                        right: area.right,
-                        ..Default::default()
-                    };
-                    DrawTextW(
-                        dc,
-                        &mut text,
-                        &mut measured,
-                        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
-                    );
-                    SelectObject(dc, previous);
-                    ReleaseDC(Some(label), dc);
-                    assert!(
-                        measured.bottom <= area.bottom,
-                        "height {width}×{height}, label {index}"
-                    );
-                    let mut font = LOGFONTW::default();
-                    assert_ne!(
-                        GetObjectW(
-                            window.fonts[index].0.into(),
-                            std::mem::size_of::<LOGFONTW>() as i32,
-                            Some((&mut font as *mut LOGFONTW).cast())
-                        ),
-                        0
-                    );
-                    assert!(font.lfHeight.unsigned_abs() >= 12);
-                    if measured.right > area.right {
-                        assert!(font.lfHeight.unsigned_abs() <= 16);
-                        assert_ne!(
-                            GetWindowLongW(label, GWL_STYLE) as u32 & SS_ENDELLIPSIS.0,
-                            0
-                        );
-                    }
-                }
-            }
-        }
-        let mut preview = NativeWindow::create(
-            RECT {
-                right: 1920,
-                bottom: 1080,
-                ..Default::default()
-            },
-            instance,
-            0,
-            false,
-            None,
-            true,
-        )
-        .unwrap();
-        assert!(preview.development);
-        assert!(!preview.exit.is_invalid());
-        preview.layout().unwrap();
-        assert_eq!(preview.fonts.len(), preview.labels.len() + 1);
-    }
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "wccs-session-{}-{unique}-中文 空格",
-                std::process::id()
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            // This unique directory was exclusively created by this test.
-            fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
-
-    fn snapshot(clean_exit: bool) -> Snapshot {
-        Snapshot {
-            schema_version: 1,
-            process_id: 0,
-            started_at_unix_ms: 0,
-            elapsed_ms: 42,
-            clean_exit,
-            recovered_previous_run: false,
-            keyboard_events: 2,
-            mouse_events: 3,
-            prompts: 1,
-            session_events: 0,
-            visible: true,
-            monitor_count: 1,
-            monitor_dpi: vec![144],
-        }
-    }
-
-    #[test]
-    fn interrupted_snapshot_and_clean_restart_are_distinct() {
-        let directory = TestDirectory::new();
-        assert!(!recovered_previous_run(&directory.0).unwrap());
-        save_snapshot(&directory.0, &snapshot(false)).unwrap();
-        assert!(recovered_previous_run(&directory.0).unwrap());
-        fs::write(directory.0.join("status.tmp"), b"{interrupted").unwrap();
-        assert!(recovered_previous_run(&directory.0).unwrap());
-        save_snapshot(&directory.0, &snapshot(true)).unwrap();
-        assert!(!recovered_previous_run(&directory.0).unwrap());
-        assert!(!directory.0.join("status.tmp").exists());
-        let saved: Snapshot =
-            serde_json::from_slice(&fs::read(directory.0.join("status.json")).unwrap()).unwrap();
-        assert_eq!((saved.keyboard_events, saved.mouse_events), (2, 3));
-    }
-
-    #[test]
-    fn failed_snapshot_write_preserves_previous_publication() {
-        let directory = TestDirectory::new();
-        save_snapshot(&directory.0, &snapshot(false)).unwrap();
-        let previous = fs::read(directory.0.join("status.json")).unwrap();
-        fs::create_dir(directory.0.join("status.tmp")).unwrap();
-        assert!(save_snapshot(&directory.0, &snapshot(true)).is_err());
-        assert_eq!(fs::read(directory.0.join("status.json")).unwrap(), previous);
-    }
-
-    #[test]
-    fn unknown_or_corrupt_record_is_reported_without_overwrite() {
-        let directory = TestDirectory::new();
-        let mut future = snapshot(false);
-        future.schema_version = 2;
-        save_snapshot(&directory.0, &future).unwrap();
-        assert!(recovered_previous_run(&directory.0).is_err());
-        fs::write(directory.0.join("status.json"), b"invalid").unwrap();
-        assert!(recovered_previous_run(&directory.0).is_err());
-        assert_eq!(
-            fs::read(directory.0.join("status.json")).unwrap(),
-            b"invalid"
-        );
-    }
 
     #[test]
     fn mutex_excludes_other_thread_and_releases_after_drop() {

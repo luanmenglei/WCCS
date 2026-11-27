@@ -1,5 +1,5 @@
 //! Small, durable file replacements used by the fixed preparation templates.
-use crate::{host::Result, windows_agent::persist};
+use crate::{host::Result, local_state::persist};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,

@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import { roleLabels } from "./access";
 import type { Session, Snapshot } from "./contracts";
 import { DetailsDialog } from "./DetailsDialog";
-import { randomSecret, type Mutate } from "./Lifecycle";
+import { randomSecret } from "./Lifecycle";
 
 export const operatorSchema = z.object({
   id: z.string(),
@@ -31,7 +31,7 @@ export function Operators({
   snapshot: Snapshot;
   session: Session;
   disabled: boolean;
-  onMutate: Mutate;
+  onMutate: Mutation;
 }) {
   const [accounts, setAccounts] = useState<Operator[]>([]);
   const [loading, setLoading] = useState(true);

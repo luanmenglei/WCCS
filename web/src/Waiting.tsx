@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { api } from "./api";
+import { api, type Mutation } from "./api";
 import type { Snapshot } from "./contracts";
 import { Seats } from "./Seats";
-import type { Mutation } from "./SeatChecks";
 import { DetailsDialog } from "./DetailsDialog";
 import {
   actualLabel,
